@@ -1,4 +1,4 @@
-const { lastTenDigits } = require('../rules');
+const { lastTenDigits, normalizePhone } = require('../rules');
 const { todayInIst } = require('../dates');
 const { createBusinessHours } = require('./businessHours');
 const { parseItems } = require('./orderItems');
@@ -133,6 +133,7 @@ function createCrm({
   let recordTypes = null;
   let customerRecordTypeId;
   let catalogCache = null;
+  let regionCache = null;
   let indianStates = null;
 
   // Without a configured customer record type, new accounts get the org default (today "Service Provider").
@@ -253,9 +254,7 @@ function createCrm({
     };
   }
 
-  async function resolveOrCreateContact(phone, customerName, accountFields = {}) {
-    const existing = await findContactByPhone(phone);
-    if (existing) return { ...existing, created: false };
+  async function createCustomer(phone, customerName, accountFields = {}, contactFields = {}) {
     const fullName = String(customerName || '').trim() || 'Unknown Customer';
     const words = fullName.split(/\s+/);
     const account = await salesforce.create('Account', compact({ Name: fullName, RecordTypeId: await accountRecordTypeId(), ...accountFields }));
@@ -264,8 +263,15 @@ function createCrm({
       FirstName: words.length > 1 ? words[0] : undefined,
       LastName: words.length > 1 ? words.slice(1).join(' ') : words[0],
       MobilePhone: phone,
+      ...contactFields,
     }));
     return { id: contact.id, accountId: account.id, name: fullName, created: true };
+  }
+
+  async function resolveOrCreateContact(phone, customerName, accountFields = {}) {
+    const existing = await findContactByPhone(phone);
+    if (existing) return { ...existing, created: false };
+    return createCustomer(phone, customerName, accountFields);
   }
 
   async function serviceLocation(input, order) {
@@ -586,6 +592,98 @@ function createCrm({
     return rows[0] ? { id: rows[0].Id, caseNumber: rows[0].CaseNumber } : null;
   }
 
+  const getServiceHours = () => businessHours.getStatus();
+
+  async function serviceRegions() {
+    if (regionCache && now() - regionCache.loadedAt < CATALOG_TTL_MS) return regionCache.rows;
+    const rows = await salesforce.query('SELECT Match_Type__c, Match_Value__c FROM Service_Region__mdt');
+    regionCache = { loadedAt: now(), rows };
+    return rows;
+  }
+
+  // Mirrors the Case_Service_Routing flow: a Delhi NCR city, or a PIN starting with a Delhi NCR prefix, goes to the
+  // internal team; any other location goes to a service partner.
+  async function checkServiceArea({ city, postalCode }) {
+    const cityName = String(city || '').trim();
+    const pin = String(postalCode || '').replace(/\D/g, '');
+    if (String(postalCode || '').trim() && !/^[1-9]\d{5}$/.test(pin)) return { valid: false, reason: 'pin' };
+    if (!cityName && !pin) return { valid: false, reason: 'missing' };
+    const regions = await serviceRegions();
+    const listed = (type, value) => regions.some((r) => r.Match_Type__c === type && String(r.Match_Value__c || '').toLowerCase() === value.toLowerCase());
+    const inNcr = Boolean((cityName && listed('City', cityName)) || (pin && listed('PIN Prefix', pin.slice(0, 3))));
+    return { valid: true, route: inNcr ? 'Internal' : 'External Provider', city: cityName || null, postalCode: pin || null };
+  }
+
+  // A new caller gets an account and contact. A caller cannot prove they own a number, so an existing record is never
+  // changed: the details go to the service team as a task to check with the customer.
+  async function saveCustomerDetails(input) {
+    if (!input.phone) return { saved: false, error: 'A valid mobile number is needed.' };
+    const name = String(input.customerName || '').trim();
+    const email = String(input.email || '').trim();
+    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return { saved: false, error: 'The email address does not look complete. Ask the customer to spell it again.' };
+    }
+    const otherPhone = input.alternatePhone ? normalizePhone(input.alternatePhone) : null;
+    if (input.alternatePhone && !otherPhone) return { saved: false, error: 'The other phone number is not valid. Ask for it again.' };
+    const pin = String(input.postalCode || '').replace(/\D/g, '');
+    if (String(input.postalCode || '').trim() && !/^[1-9]\d{5}$/.test(pin)) return { saved: false, error: 'A valid six digit PIN code is needed.' };
+    const street = String(input.address || '').trim();
+    const cityName = String(input.city || '').trim();
+
+    const existing = await findContactByPhone(input.phone);
+    if (!existing) {
+      if (!name) return { saved: false, error: "The customer's name is needed to save a new customer." };
+      const stateCode = await indianStateCode(input.state).catch(() => undefined);
+      const address = compact({ Street: street, City: cityName, PostalCode: pin, StateCode: stateCode, CountryCode: street || cityName || pin ? 'IN' : undefined });
+      const prefixed = (prefix) => Object.fromEntries(Object.entries(address).map(([k, v]) => [`${prefix}${k}`, v]));
+      const customer = await createCustomer(input.phone, name, prefixed('Billing'), compact({ Email: email, OtherPhone: otherPhone, ...prefixed('Mailing') }));
+      return { saved: true, newCustomer: true, name: customer.name, contactId: customer.id };
+    }
+
+    const details = [
+      name && `Name: ${name}`,
+      email && `Email: ${email}`,
+      otherPhone && `Other phone: ${otherPhone}`,
+      (street || cityName || input.state || pin) && `Address: ${[street, cityName, input.state, pin].filter(Boolean).join(', ')}`,
+    ].filter(Boolean);
+    if (!details.length) return { saved: false, error: 'No details were given to save. Ask what should be saved.' };
+    await salesforce.create('Task', compact({
+      WhoId: existing.id,
+      Subject: 'Customer details to update',
+      Description: ['The caller gave these details on a voice agent call. Confirm them with the customer before changing the record.', ...details].join('\n'),
+      Status: 'Not Started',
+      Priority: 'Normal',
+      ActivityDate: todayInIst(now()).toISOString().slice(0, 10),
+    }));
+    return { saved: true, newCustomer: false, name: existing.name, contactId: existing.id };
+  }
+
+  // The customer's latest requests, open or closed, and the latest logged calls.
+  async function getServiceHistory({ accountId, contactId }) {
+    if (!accountId && !contactId) return { cases: [], calls: [] };
+    const owner = accountId ? `AccountId = '${escapeSoql(accountId)}'` : null;
+    const cases = await salesforce.query(
+      'SELECT CaseNumber, Service_Type__c, Service_Sub_Type__c, Status, IsClosed, CreatedDate, ClosedDate FROM Case '
+      + `WHERE ${owner || `ContactId = '${escapeSoql(contactId)}'`} ORDER BY CreatedDate DESC LIMIT 5`,
+    );
+    const calls = await salesforce.query(
+      'SELECT CallType, CallDisposition, ActivityDate, CreatedDate FROM Task '
+      + `WHERE TaskSubtype = 'Call' AND ${owner || `WhoId = '${escapeSoql(contactId)}'`} ORDER BY CreatedDate DESC LIMIT 3`,
+    );
+    return {
+      cases: cases.map((r) => ({
+        caseNumber: r.CaseNumber,
+        serviceType: r.Service_Type__c,
+        subType: r.Service_Sub_Type__c,
+        status: r.Status,
+        closed: r.IsClosed,
+        createdDate: r.CreatedDate,
+        closedDate: r.ClosedDate,
+      })),
+      calls: calls.map((r) => ({ direction: r.CallType, outcome: r.CallDisposition, date: r.ActivityDate || r.CreatedDate })),
+    };
+  }
+
   async function logCall(input) {
     const fields = Object.fromEntries(Object.entries({
       Subject: input.subject,
@@ -622,6 +720,10 @@ function createCrm({
     getCaseStatus,
     getCaseNotice,
     findVoiceCaseSince,
+    getServiceHours,
+    checkServiceArea,
+    saveCustomerDetails,
+    getServiceHistory,
     logCall,
   };
 }

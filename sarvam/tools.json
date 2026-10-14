@@ -1,81 +1,109 @@
 {
   "agent_id": "Tiffany-Des-0db8e21d-e099",
-  "committed_version": 2,
-  "draft_version": 3,
-  "current_base_url": "https://foods-cricket-consensus-signed.trycloudflare.com",
-  "base_url_note": "Temporary Cloudflare quick tunnel used for testing on 2026-10-14. Re-point every tool to PUBLIC_BASE_URL once the server is deployed.",
-  "auth_header": "x-agent-secret (AGENT_TOOL_SECRET in .env)",
+  "committed_version": 3,
+  "draft_version": 4,
+  "current_base_url": "https://tiffany-designs-customer-service.onrender.com",
+  "base_url_note": "The server is deployed on Render. Every tool calls current_base_url + path; change all of them together if the server moves.",
+  "auth_header": "x-agent-secret (AGENT_TOOL_SECRET in .env and on Render)",
   "tools": [
     {
       "name": "find_customer",
-      "id": "a8d8f77e-98f1-41f2-b73e-826a00767c7c",
-      "committed_id": "1b17d7d6-cff7-4705-bb77-d6cb22066c38",
+      "id": "7d7ff997-171c-44bc-b921-4e789dc1cd5a",
+      "committed_id": "a8d8f77e-98f1-41f2-b73e-826a00767c7c",
       "path": "/api/agent/customer-lookup",
       "modules": [3]
     },
     {
       "name": "find_order",
-      "id": "f3469972-96b6-4df5-a068-4ffcb0c57f97",
-      "committed_id": "d338b6f3-44c5-4a7a-b808-7474058f63f2",
+      "id": "516a1163-a446-4e77-b743-1b5f7eb2754a",
+      "committed_id": "f3469972-96b6-4df5-a068-4ffcb0c57f97",
       "path": "/api/agent/order-lookup",
       "modules": [4, 15]
     },
     {
       "name": "find_parts",
-      "id": "5dfd1f68-ab51-4d08-a770-ee55cbebfc31",
-      "committed_id": "66b763f9-6d42-493d-b5ce-420a11eec017",
+      "id": "f2b617a8-9bfd-4075-a72c-8f72e37e2472",
+      "committed_id": "5dfd1f68-ab51-4d08-a770-ee55cbebfc31",
       "path": "/api/agent/part-lookup",
       "modules": [7]
     },
     {
       "name": "resolve_date",
-      "id": "b2c2f512-2f73-43c1-997e-52ced7f329b5",
-      "committed_id": "75d40b31-cd06-49a4-a861-a297f721e584",
+      "id": "d1518c8a-b7a4-466c-9c8f-d2a05ab2af48",
+      "committed_id": "b2c2f512-2f73-43c1-997e-52ced7f329b5",
       "path": "/api/agent/resolve-date",
       "modules": [6]
     },
     {
       "name": "register_service_request",
-      "id": "efdf7675-f71e-4146-9bc3-48dd2a3fdbaa",
-      "committed_id": "0cdce514-479f-403b-8a4e-d8b93d5da1e2",
+      "id": "f06196ac-efaa-4b68-8733-ab0d73543a47",
+      "committed_id": "efdf7675-f71e-4146-9bc3-48dd2a3fdbaa",
       "path": "/api/agent/cases",
       "modules": [5, 7, 8, 9, 12]
     },
     {
       "name": "book_installation",
-      "id": "6b2407e6-ea19-47e8-a132-462a3a289d4c",
-      "committed_id": "a3266a78-1ecf-441b-a15f-50790ebd2ed9",
+      "id": "d6289825-ee18-4a12-81f1-6e7b7da4fc79",
+      "committed_id": "6b2407e6-ea19-47e8-a132-462a3a289d4c",
       "path": "/api/agent/installation",
       "modules": [6, 8, 9]
     },
     {
       "name": "request_human_callback",
-      "id": "79cf5d60-bf24-4783-9e15-00186a6d21db",
-      "committed_id": "973e1925-8241-4d00-8839-6b065bd169ad",
+      "id": "f30de0a7-5f36-4cf6-898a-140109d6a609",
+      "committed_id": "79cf5d60-bf24-4783-9e15-00186a6d21db",
       "path": "/api/agent/escalate",
       "modules": [10]
     },
     {
       "name": "check_request_status",
-      "id": "5a3121a7-9024-4a68-93cb-1f42af4754c7",
-      "committed_id": "b54135bc-5c8c-43b1-bd61-197e3d7af120",
+      "id": "2f7a03fe-7486-4873-a4a9-4504c7fb4276",
+      "committed_id": "5a3121a7-9024-4a68-93cb-1f42af4754c7",
       "path": "/api/agent/case-status",
       "modules": [11, 13]
     },
     {
       "name": "find_products",
-      "id": "4c72eaee-f0a6-436f-8d8d-5babbf6e03be",
-      "committed_id": "1555f2e4-69d5-4922-baf4-59dfddb72348",
+      "id": "40d42953-adad-4dca-b593-7c6b3823cb18",
+      "committed_id": "4c72eaee-f0a6-436f-8d8d-5babbf6e03be",
       "path": "/api/agent/products",
       "modules": ["phone orders"]
     },
     {
       "name": "place_order",
-      "id": "a64ce829-0bc8-4fd8-a0eb-e6e4ab582012",
-      "committed_id": "69bae770-7291-43c0-961f-995d25c4613f",
+      "id": "dc4de5b9-1553-47cd-8a9a-150e466bb4ee",
+      "committed_id": "a64ce829-0bc8-4fd8-a0eb-e6e4ab582012",
       "path": "/api/agent/orders",
       "modules": ["phone orders"]
+    },
+    {
+      "name": "check_service_hours",
+      "id": "b4daab6b-28d2-44dd-a6f5-8ec450e89d88",
+      "committed_id": null,
+      "path": "/api/agent/service-hours",
+      "modules": [2, 10]
+    },
+    {
+      "name": "save_customer_details",
+      "id": "c488ebb6-905c-4aa7-931f-5f9b3a578959",
+      "committed_id": null,
+      "path": "/api/agent/customer",
+      "modules": [3]
+    },
+    {
+      "name": "check_service_area",
+      "id": "8b226ebb-9be9-419a-81e2-cd198770aad5",
+      "committed_id": null,
+      "path": "/api/agent/service-area",
+      "modules": [9]
+    },
+    {
+      "name": "get_service_history",
+      "id": "8cb86801-1400-4efa-baed-cf83d19d93de",
+      "committed_id": null,
+      "path": "/api/agent/history",
+      "modules": [14]
     }
   ],
-  "ids_note": "Each version holds its own copy of the tools. committed_id is frozen in committed version 2; id is the editable draft (version 3), which is what any change edits before the next commit."
+  "ids_note": "Each version holds its own copy of the tools. committed_id is frozen in committed version 3; id is the editable draft (version 4), which is what any change edits before the next commit. The last four tools exist only in the draft until version 4 is committed, after their endpoints are deployed to Render."
 }

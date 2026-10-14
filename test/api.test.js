@@ -709,6 +709,101 @@ test.describe('agent tools used during a call', () => {
     assert.equal(res.body.found, false);
     assert.equal(res.body.status, undefined);
   });
+
+  test('service hours say the team is available now, until when, and the weekly hours', async (t) => {
+    const s = await startTestServer();
+    t.after(s.close);
+    const res = await s.call('POST', '/api/agent/service-hours', { headers: s.agent, body: {} });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.open, true);
+    assert.equal(res.body.hours, 'Monday to Saturday, 9 am to 6 pm; closed on Sunday');
+    assert.equal(res.body.message, 'The service team is available now, until 6 pm today. Service hours are Monday to Saturday, 9 am to 6 pm; closed on Sunday.');
+  });
+
+  test('after hours the caller hears when the team is back', async (t) => {
+    const s = await startTestServer({ nowMs: Date.parse('2026-10-14T14:00:00Z') });
+    t.after(s.close);
+    s.crm.state.serviceHours = { ...s.crm.state.serviceHours, open: false, closesAt: null, opensAt: '2026-10-15T03:30:00.000Z' };
+    const res = await s.call('POST', '/api/agent/service-hours', { headers: s.agent, body: {} });
+    assert.equal(res.body.open, false);
+    assert.equal(res.body.next_open, '2026-10-15T03:30:00.000Z');
+    assert.match(res.body.message, /^The service team is closed now\. It opens again tomorrow at 9 am, and requests registered now are followed up then\./);
+
+    s.crm.state.serviceHours = { ...s.crm.state.serviceHours, holidayName: 'Diwali', opensAt: '2026-10-19T03:30:00.000Z' };
+    const holiday = await s.call('POST', '/api/agent/service-hours', { headers: s.agent, body: {} });
+    assert.match(holiday.body.message, /^The service team is closed today for Diwali\. It opens again on Monday, 19 October at 9 am,/);
+  });
+
+  test('service area tells who handles a location, by the routing rules', async (t) => {
+    const s = await startTestServer();
+    t.after(s.close);
+    const ncr = await s.call('POST', '/api/agent/service-area', { headers: s.agent, body: { city: 'Gurugram', postal_code: '122002' } });
+    assert.deepEqual(ncr.body, { valid: true, route: 'Internal', message: 'Gurugram, PIN 122002 is within the Delhi NCR service area, so the Tiffany Designs service team handles it.' });
+
+    const partner = await s.call('POST', '/api/agent/service-area', { headers: s.agent, body: { city: 'Jaipur', postal_code: '302012' } });
+    assert.equal(partner.body.route, 'External Provider');
+    assert.match(partner.body.message, /authorised service partner/);
+
+    const badPin = await s.call('POST', '/api/agent/service-area', { headers: s.agent, body: { city: 'Delhi', postal_code: '1100' } });
+    assert.deepEqual(badPin.body, { valid: false, route: null, message: 'That PIN code is not valid. Ask for the six digit PIN code.' });
+    assert.equal((await s.call('POST', '/api/agent/service-area', { headers: s.agent, body: {} })).body.message, 'The city or the six digit PIN code is needed.');
+  });
+
+  test('customer details are saved for a new caller and only noted for an existing customer', async (t) => {
+    const s = await startTestServer();
+    t.after(s.close);
+    const fresh = await s.call('POST', '/api/agent/customer', {
+      headers: s.agent,
+      body: { customer_name: 'Ravi Kumar', phone: '90000 00001', email: 'ravi@example.com', alternate_phone: '9811122233', address: '12 MG Road', city: 'Gurugram', state: 'Haryana', postal_code: '122002' },
+    });
+    assert.deepEqual(fresh.body, { saved: true, new_customer: true, message: 'The details are saved for Ravi Kumar.' });
+    assert.deepEqual(s.crm.savedCustomers[0].input, {
+      customerName: 'Ravi Kumar', phone: '+919000000001', email: 'ravi@example.com', alternatePhone: '9811122233',
+      address: '12 MG Road', city: 'Gurugram', state: 'Haryana', postalCode: '122002',
+    });
+
+    const known = await s.call('POST', '/api/agent/customer', { headers: s.agent, body: { phone: '9876543210', address: 'New flat 9', city: 'Noida' } });
+    assert.equal(known.body.new_customer, false);
+    assert.equal(known.body.message, 'The details are noted for the service team, who will check them with the customer before updating the record.');
+    assert.doesNotMatch(known.body.message, /Aarav/, 'the name on record is not revealed to the caller');
+  });
+
+  test('customer details need a valid Indian mobile, and refusals are spoken back', async (t) => {
+    const s = await startTestServer();
+    t.after(s.close);
+    const noPhone = await s.call('POST', '/api/agent/customer', { headers: s.agent, body: { customer_name: 'Ravi' } });
+    assert.deepEqual(noPhone.body, { saved: false, new_customer: null, message: 'A valid 10 digit Indian mobile number is needed.' });
+    const noName = await s.call('POST', '/api/agent/customer', { headers: s.agent, body: { phone: '9000000001' } });
+    assert.equal(noName.status, 200);
+    assert.equal(noName.body.message, "The customer's name is needed to save a new customer.");
+    assert.equal(s.crm.savedCustomers.length, 0);
+  });
+
+  test('service history lists recent requests, closed ones included, and recent calls', async (t) => {
+    const s = await startTestServer();
+    t.after(s.close);
+    const res = await s.call('POST', '/api/agent/history', { headers: s.agent, body: { phone: '9876543210' } });
+    assert.equal(res.body.found, true);
+    assert.equal(res.body.open_requests, 1);
+    assert.equal(res.body.message,
+      'Recent requests: request 1063 for Installation, initial installation, opened Monday, 12 October, status Appointment Scheduled; '
+      + 'request 1040 for Damage or Defect, missing component, opened Sunday, 20 September, closed. '
+      + 'Recent calls: Tuesday, 13 October, outbound call, the delivery was confirmed; Saturday, 10 October, inbound call, not answered.');
+
+    const nobody = await s.call('POST', '/api/agent/history', { headers: s.agent, body: { phone: '9000000009' } });
+    assert.deepEqual(nobody.body, { found: false, message: 'No customer record matches this number.' });
+    const noHistory = await s.call('POST', '/api/agent/history', { headers: s.agent, body: { phone: '9820011111' } });
+    assert.deepEqual(noHistory.body, { found: false, message: 'No earlier requests or calls are on record for this number.' });
+  });
+
+  test('the new tools need the agent secret', async (t) => {
+    const s = await startTestServer();
+    t.after(s.close);
+    for (const path of ['/api/agent/service-hours', '/api/agent/service-area', '/api/agent/customer', '/api/agent/history']) {
+      assert.equal((await s.call('POST', path, { headers: s.site, body: { phone: '9876543210' } })).status, 401, path);
+    }
+    assert.equal(s.crm.savedCustomers.length, 0);
+  });
 });
 
 test.describe('Sarvam call-end webhook', () => {

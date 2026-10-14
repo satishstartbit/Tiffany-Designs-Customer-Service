@@ -59,12 +59,50 @@ function createFakeCrm({ now = () => Date.now() } = {}) {
   const placedOrders = [];
   const created = [];
   const tasks = [];
-  const state = { withinBusinessHours: true };
+  const savedCustomers = [];
+  const weekly = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+    .map((day) => ({ day, window: day === 'Sunday' ? null : { start: 9 * 60, end: 18 * 60 } }));
+  const state = {
+    withinBusinessHours: true,
+    // Wednesday 14 October 2026: open until 18:00 IST; when closed, back on Thursday at 09:00 IST.
+    serviceHours: { configured: true, open: true, closesAt: '2026-10-14T12:30:00.000Z', opensAt: null, holidayName: null, weekly },
+  };
+  const history = {
+    '001A': {
+      cases: [
+        { caseNumber: '00001063', serviceType: 'Installation', subType: 'Initial Installation', status: 'Appointment Scheduled', closed: false, createdDate: '2026-10-12T05:00:00.000Z' },
+        { caseNumber: '00001040', serviceType: 'Damage or Defect', subType: 'Missing Component', status: 'Closed', closed: true, createdDate: '2026-09-20T05:00:00.000Z' },
+      ],
+      calls: [{ direction: 'Outbound', outcome: 'delivered_ok', date: '2026-10-13' }, { direction: 'Inbound', outcome: 'Not connected: busy', date: '2026-10-10' }],
+    },
+  };
 
   return {
     created,
     tasks,
     state,
+    savedCustomers,
+    async getServiceHours() {
+      return state.serviceHours;
+    },
+    async checkServiceArea({ city, postalCode }) {
+      const pin = String(postalCode || '').replace(/\D/g, '');
+      if (postalCode && !/^[1-9]\d{5}$/.test(pin)) return { valid: false, reason: 'pin' };
+      if (!city && !pin) return { valid: false, reason: 'missing' };
+      const inNcr = ncr.includes(String(city || '').trim().toLowerCase()) || ['110', '121', '122', '201'].includes(pin.slice(0, 3));
+      return { valid: true, route: inNcr ? 'Internal' : 'External Provider', city: city ? String(city).trim() : null, postalCode: pin || null };
+    },
+    async saveCustomerDetails(input) {
+      const existing = await this.findContactByPhone(input.phone);
+      if (!existing && !input.customerName) return { saved: false, error: "The customer's name is needed to save a new customer." };
+      savedCustomers.push({ input, existing: Boolean(existing) });
+      return existing
+        ? { saved: true, newCustomer: false, name: existing.name, contactId: existing.id }
+        : { saved: true, newCustomer: true, name: input.customerName, contactId: `003S${savedCustomers.length}` };
+    },
+    async getServiceHistory({ accountId }) {
+      return history[accountId] || { cases: [], calls: [] };
+    },
     async findContactByPhone(phone) {
       return contacts.find((c) => [c.mobile, c.phone].some((p) => p && lastTenDigits(p) === lastTenDigits(phone))) || null;
     },

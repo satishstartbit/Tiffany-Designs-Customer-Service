@@ -1,6 +1,28 @@
 # Sarvam agent: Tiffany Designs Customer Service
 
-Agent `Tiffany-Des-0db8e21d-e099`, committed as **version 2** (version 1 had no phone orders). The instructions are in [agent-prompt.md](agent-prompt.md), and the tool IDs and endpoints are in [tools.json](tools.json). Only this agent may be changed; the Sarvam workspace is shared with other agents.
+Agent `Tiffany-Des-0db8e21d-e099`, committed as **version 3**: the same instructions as version 2, with every tool calling the Render deployment (version 2's tools call a test tunnel that no longer exists, and version 1 had no phone orders). The instructions are in [agent-prompt.md](agent-prompt.md), and the tool IDs and endpoints are in [tools.json](tools.json). Only this agent may be changed; the Sarvam workspace is shared with other agents.
+
+**Draft version 4** adds four tools for modules 2, 3, 9 and 14: `check_service_hours`, `save_customer_details`, `check_service_area` and `get_service_history`. It also adds Phase 13 (customer details) to the instructions. Their endpoints are in this repository but not yet on Render. Commit version 4 only after the code is deployed, then set `SARVAM_APP_VERSION=4` on Render.
+
+## Module coverage
+
+| # | Module | Tools and instructions |
+| --- | --- | --- |
+| 1 | AI voice agent and call handling | Phases 1 to 4 and 11; `resolve_date` |
+| 2 | After-hours and holiday calls | `check_service_hours` (open now, next opening, Salesforce holidays); requests are registered at any hour |
+| 3 | Customer identification and contact management | `find_customer`; `save_customer_details` (Phase 13) |
+| 4 | Order and purchase identification | `find_order` (ERP id, invoice or order number, with a second factor) |
+| 5 | Intent detection and case classification | Phase 4; the issue type sent with each request |
+| 6 | Installation requests | `book_installation`, `resolve_date` |
+| 7 | Damage and defect complaints | `find_parts`, `register_service_request` |
+| 8 | Automatic case creation | `register_service_request`, `book_installation`, `request_human_callback`; fallback case from the call-end webhook |
+| 9 | Service location and case routing | `check_service_area` (same rules as the `Case_Service_Routing` flow) |
+| 10 | Human handoff and escalation | `request_human_callback`, with `check_service_hours` for when the team calls back. Live transfer needs the team's phone number |
+| 11 | Technician and service provider coordination | `check_request_status` (visit and technician) |
+| 12 | Replacement requests | `register_service_request` (replacement, return); shipment status in `check_request_status` |
+| 13 | Notifications and follow-ups | Server-started calls: delivery follow-up and service updates |
+| 14 | Service history and call logging | `get_service_history`; every call is logged as a Task by the webhook |
+| 15 | ERP and telephony integration | All tools go through the Node server to Salesforce; Sarvam handles telephony |
 
 ## Call types
 
@@ -39,6 +61,10 @@ All tools POST to the server with the `x-agent-secret` header and speak the `mes
 | `check_request_status` | `/api/agent/case-status` | Open cases, service visit and replacement shipment; only the caller's own cases |
 | `find_products` | `/api/agent/products` | Products and list prices from the standard price book (codes starting `TD-`); generic words such as "furniture" list everything |
 | `place_order` | `/api/agent/orders` | Draft `Order` with its lines at list price, on the account of the given mobile (or a new account), shipped to the given address. The sales team confirms price, delivery and payment |
+| `check_service_hours` (draft 4) | `/api/agent/service-hours` | Whether the team is working now and until when, or when it is back, from the default business hours and `Holiday` records, plus the weekly hours |
+| `save_customer_details` (draft 4) | `/api/agent/customer` | A new caller gets an account and contact with email, another number and address. For an existing customer nothing is overwritten: a "Customer details to update" task goes to the team, because a caller cannot prove they own the number |
+| `check_service_area` (draft 4) | `/api/agent/service-area` | Delhi NCR (internal team) or a service partner, from `Service_Region__mdt` by city or PIN prefix, and checks the PIN |
+| `get_service_history` (draft 4) | `/api/agent/history` | The latest 5 requests, closed ones included, and the latest 3 logged calls for the caller's account |
 
 ### Phone orders
 
@@ -73,13 +99,26 @@ Phone orders (version 2 draft, same day):
 
 The test orders, accounts and contacts were deleted afterwards.
 
+New module tools (draft version 4, 2026-10-14 at 8:16 pm IST, through a test tunnel to the new code, real Salesforce):
+
+| Scenario | Tool and result |
+| --- | --- |
+| "What are your service timings? Is anyone available now?" | `check_service_hours`: Monday to Saturday, 9 am to 6 pm; closed now, back tomorrow at 9 am |
+| "What happened with my old complaints?" (demo customer) | `get_service_history`: the five latest requests, with status and opening date |
+| "Update my email address" (existing customer) | Mobile confirmed and email spelled back, then `save_customer_details`; a review task for the team, the contact itself unchanged |
+| "I am moving to Jaipur, PIN 302012" | `check_service_area`: an authorised service partner handles it |
+
+The review task was deleted afterwards. A direct test of `save_customer_details` for a new number created the account and contact with email, other phone and mailing address (state code HR). It was also deleted afterwards.
+
 ## Re-pointing the tools after deployment
 
-The tools currently point to a temporary test tunnel (`current_base_url` in tools.json). That address stops working when the tunnel closes. Once the server runs at a permanent HTTPS address, change the base URL of all 10 tools: either ask Claude ("re-point the Tiffany tools to https://…"), or edit each tool's URL in the Sarvam dashboard. Then commit a new version, and move any campaign or deployment to it.
+All 10 tools call the Render deployment, `https://tiffany-designs-customer-service.onrender.com` (`current_base_url` in tools.json). Before committing version 3 (2026-10-14), a chat test ran with the local server and test tunnel switched off. `find_products`, `find_order`, `check_request_status` and `resolve_date` all answered from Render with live Salesforce data.
+
+If the server moves again, change the base URL of all 14 tools together. Either ask Claude ("re-point the Tiffany tools to https://…") or edit each tool's URL in the Sarvam dashboard. Then commit a new version, set `SARVAM_APP_VERSION` to it wherever the server runs, and move any campaign or deployment to it. The website panel's Salesforce credential follows `PUBLIC_BASE_URL` through `npm run deploy:salesforce`.
 
 ## Going live
 
 1. **Get a phone number for Tiffany.** `+917965851546` is already deployed (inbound and outbound) to another agent, `Arogaya-Hos-ec23d46a-0bcc` (Startbit Hospital). Deploying Tiffany on it would take that agent's calls, and customers calling back would reach the hospital agent. Buy or onboard a separate number in the Sarvam dashboard.
-2. **Inbound:** create a deployment of version 2 on the new number, with the webhook `{PUBLIC_BASE_URL}/api/webhooks/sarvam?token={SARVAM_WEBHOOK_TOKEN}`.
+2. **Inbound:** create a deployment of version 3 on the new number, with the webhook `{PUBLIC_BASE_URL}/api/webhooks/sarvam?token={SARVAM_WEBHOOK_TOKEN}`.
 3. **Outbound:** create campaigns on the new number for the follow-up, the callback and, if wanted, notifications. Use Monday to Saturday dialling hours (for example 09:00 to 19:00 IST), retries on busy and no-answer, and the same webhook. Put their IDs in `.env` (`SARVAM_FOLLOWUP_CAMPAIGN_ID`, `SARVAM_CALLBACK_CAMPAIGN_ID`, `SARVAM_NOTIFY_CAMPAIGN_ID`).
 4. **Live transfer (module 10, optional):** give the service team's number and the agent can transfer calls instead of only flagging them (`call_transfer_config`, Vobiz connections only).

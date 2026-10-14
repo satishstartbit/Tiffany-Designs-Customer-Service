@@ -651,3 +651,109 @@ test('findVoiceOrderSince finds the order placed during the call by number, else
   assert.equal(await crm.findVoiceOrderSince({ orderNumber: '123456789', since }), null, 'longer than an order number');
   assert.equal(sf.log.queries.length, before);
 });
+
+test('getServiceHours passes the business hours status through', async () => {
+  const hours = { configured: true, open: false, opensAt: new Date('2026-10-15T03:30:00Z') };
+  const crm = createCrm({ salesforce: fakeSalesforce(), businessHours: { isOpen: async () => false, getStatus: async () => hours } });
+  assert.equal(await crm.getServiceHours(), hours);
+});
+
+test('checkServiceArea follows the routing flow: a Delhi NCR city or PIN prefix is internal, anything else a partner', async () => {
+  const sf = fakeSalesforce({
+    queries: {
+      'FROM Service_Region__mdt': () => [
+        { Match_Type__c: 'City', Match_Value__c: 'Gurugram' },
+        { Match_Type__c: 'City', Match_Value__c: 'New Delhi' },
+        { Match_Type__c: 'PIN Prefix', Match_Value__c: '110' },
+        { Match_Type__c: 'PIN Prefix', Match_Value__c: '201' },
+      ],
+    },
+  });
+  const crm = createCrm({ salesforce: sf });
+  assert.deepEqual(await crm.checkServiceArea({ city: ' new delhi ', postalCode: '' }), { valid: true, route: 'Internal', city: 'new delhi', postalCode: null });
+  assert.deepEqual(await crm.checkServiceArea({ city: 'Ghaziabad', postalCode: '201 001' }), { valid: true, route: 'Internal', city: 'Ghaziabad', postalCode: '201001' }, 'the PIN prefix is enough');
+  assert.deepEqual(await crm.checkServiceArea({ city: 'Mumbai', postalCode: '400001' }), { valid: true, route: 'External Provider', city: 'Mumbai', postalCode: '400001' });
+  assert.deepEqual(await crm.checkServiceArea({ postalCode: '122001' }), { valid: true, route: 'External Provider', city: null, postalCode: '122001' }, 'only listed prefixes count');
+  assert.deepEqual(await crm.checkServiceArea({ city: 'Delhi', postalCode: '11001' }), { valid: false, reason: 'pin' });
+  assert.deepEqual(await crm.checkServiceArea({}), { valid: false, reason: 'missing' });
+  assert.equal(sf.log.queries.length, 1, 'the regions are read once');
+});
+
+test('saveCustomerDetails creates a new customer with email, other phone and address', async () => {
+  const sf = orderOrg();
+  const result = await createCrm({ salesforce: sf, businessHours: open, now: lateEvening }).saveCustomerDetails({
+    customerName: 'Ravi Kumar Verma', phone: '+919000000001', email: ' ravi@example.com ', alternatePhone: '98111 22233',
+    address: '12 MG Road', city: 'Gurugram', state: 'Haryana', postalCode: '122 002',
+  });
+  assert.deepEqual(result, { saved: true, newCustomer: true, name: 'Ravi Kumar Verma', contactId: 'Contact-2' });
+  assert.deepEqual(sf.log.creates.map((c) => c.sobject), ['Account', 'Contact']);
+  assert.deepEqual(sf.log.creates[0].fields, {
+    Name: 'Ravi Kumar Verma', BillingStreet: '12 MG Road', BillingCity: 'Gurugram', BillingPostalCode: '122002', BillingStateCode: 'HR', BillingCountryCode: 'IN',
+  });
+  assert.deepEqual(sf.log.creates[1].fields, {
+    AccountId: 'Account-1', FirstName: 'Ravi', LastName: 'Kumar Verma', MobilePhone: '+919000000001', Email: 'ravi@example.com', OtherPhone: '+919811122233',
+    MailingStreet: '12 MG Road', MailingCity: 'Gurugram', MailingPostalCode: '122002', MailingStateCode: 'HR', MailingCountryCode: 'IN',
+  });
+});
+
+test('saveCustomerDetails never changes an existing customer; the details go to the team as a task', async () => {
+  const sf = orderOrg({ search: [AARAV] });
+  const result = await createCrm({ salesforce: sf, businessHours: open, now: lateEvening }).saveCustomerDetails({
+    customerName: 'Aarav Sharma', phone: '+919810000001', email: 'aarav@example.com', address: 'Flat 9, Sector 62', city: 'Noida', state: 'Uttar Pradesh', postalCode: '201309',
+  });
+  assert.deepEqual(result, { saved: true, newCustomer: false, name: 'Aarav Sharma', contactId: '003A' });
+  assert.deepEqual(sf.log.creates.map((c) => c.sobject), ['Task']);
+  assert.equal(sf.log.updates.length, 0);
+  assert.deepEqual(sf.log.creates[0].fields, {
+    WhoId: '003A',
+    Subject: 'Customer details to update',
+    Description: [
+      'The caller gave these details on a voice agent call. Confirm them with the customer before changing the record.',
+      'Name: Aarav Sharma',
+      'Email: aarav@example.com',
+      'Address: Flat 9, Sector 62, Noida, Uttar Pradesh, 201309',
+    ].join('\n'),
+    Status: 'Not Started',
+    Priority: 'Normal',
+    ActivityDate: '2026-10-15',
+  });
+});
+
+test('saveCustomerDetails refuses incomplete details before saving anything', async () => {
+  const sf = orderOrg();
+  const crm = createCrm({ salesforce: sf, businessHours: open });
+  const base = { phone: '+919000000001', customerName: 'Ravi' };
+  assert.deepEqual(await crm.saveCustomerDetails({ customerName: 'Ravi' }), { saved: false, error: 'A valid mobile number is needed.' });
+  assert.deepEqual(await crm.saveCustomerDetails({ ...base, email: 'ravi at example' }), { saved: false, error: 'The email address does not look complete. Ask the customer to spell it again.' });
+  assert.deepEqual(await crm.saveCustomerDetails({ ...base, alternatePhone: '12345' }), { saved: false, error: 'The other phone number is not valid. Ask for it again.' });
+  assert.deepEqual(await crm.saveCustomerDetails({ ...base, postalCode: '1220' }), { saved: false, error: 'A valid six digit PIN code is needed.' });
+  assert.deepEqual(await crm.saveCustomerDetails({ phone: '+919000000001' }), { saved: false, error: "The customer's name is needed to save a new customer." });
+
+  const known = orderOrg({ search: [AARAV] });
+  assert.deepEqual(await createCrm({ salesforce: known, businessHours: open }).saveCustomerDetails({ phone: '+919810000001' }), {
+    saved: false, error: 'No details were given to save. Ask what should be saved.',
+  });
+  assert.equal(sf.log.creates.length + known.log.creates.length, 0);
+});
+
+test('getServiceHistory reads the latest cases, closed ones included, and the logged calls', async () => {
+  const sf = fakeSalesforce({
+    queries: {
+      'FROM Case': () => [{ CaseNumber: '00001063', Service_Type__c: 'Installation', Service_Sub_Type__c: 'Initial Installation', Status: 'New', IsClosed: false, CreatedDate: '2026-10-12T05:00:00.000+0000', ClosedDate: null }],
+      'FROM Task': () => [{ CallType: 'Outbound', CallDisposition: 'delivered_ok', ActivityDate: '2026-10-13', CreatedDate: '2026-10-13T08:00:00.000+0000' }],
+    },
+  });
+  const crm = createCrm({ salesforce: sf });
+  assert.deepEqual(await crm.getServiceHistory({ accountId: '001A', contactId: '003A' }), {
+    cases: [{ caseNumber: '00001063', serviceType: 'Installation', subType: 'Initial Installation', status: 'New', closed: false, createdDate: '2026-10-12T05:00:00.000+0000', closedDate: null }],
+    calls: [{ direction: 'Outbound', outcome: 'delivered_ok', date: '2026-10-13' }],
+  });
+  assert.match(sf.log.queries[0], /FROM Case WHERE AccountId = '001A' ORDER BY CreatedDate DESC LIMIT 5$/);
+  assert.match(sf.log.queries[1], /FROM Task WHERE TaskSubtype = 'Call' AND AccountId = '001A' ORDER BY CreatedDate DESC LIMIT 3$/);
+
+  await crm.getServiceHistory({ contactId: "003'Z" });
+  assert.match(sf.log.queries[2], /WHERE ContactId = '003\\'Z'/, 'a contact without an account is read by contact, escaped');
+  assert.match(sf.log.queries[3], /WHERE TaskSubtype = 'Call' AND WhoId = '003\\'Z'/);
+  assert.deepEqual(await crm.getServiceHistory({}), { cases: [], calls: [] });
+  assert.equal(sf.log.queries.length, 4);
+});

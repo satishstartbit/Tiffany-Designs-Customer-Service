@@ -1,10 +1,40 @@
 const express = require('express');
 const { normalizePhone, normalizeIssueType } = require('../rules');
-const { formatDate, formatDateTime, spokenCaseNumber, shortName } = require('../speech');
-const { resolveDate, MAX_DAYS_AHEAD } = require('../dates');
+const { formatDate, formatDateTime, formatClock, describeWeek, spokenCaseNumber, shortName } = require('../speech');
+const { resolveDate, todayInIst, MAX_DAYS_AHEAD } = require('../dates');
 const { formatRupees } = require('../crm/orderItems');
 
 const MAX_PRODUCTS_SPOKEN = 5;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+// Call dispositions written by the call-end webhook, as a phrase the agent can say.
+const CALL_OUTCOMES = {
+  request_registered: 'a service request was registered',
+  installation_requested: 'installation was requested',
+  order_placed: 'an order was placed',
+  details_saved: 'customer details were noted',
+  delivery_confirmed: 'the delivery was confirmed',
+  delivered_ok: 'the delivery was confirmed',
+  issue_reported: 'an issue was reported',
+  not_delivered: 'the order had not arrived',
+  information_given: 'information was given',
+  human_callback: 'a call back was arranged',
+  call_back_later: 'the customer asked to be called later',
+  wrong_person: 'the customer was not reached',
+  not_resolved: 'nothing was resolved',
+};
+
+function callOutcome(disposition) {
+  if (!disposition) return 'no outcome recorded';
+  if (/^not connected/i.test(disposition)) return 'not answered';
+  return CALL_OUTCOMES[disposition] || String(disposition).replace(/_/g, ' ').toLowerCase();
+}
+
+// "today at 9 am", "tomorrow at 9 am" or "on Monday, 19 October at 9 am", in India time.
+function describeWhen(value, nowMs) {
+  const days = Math.round((todayInIst(value) - todayInIst(nowMs)) / DAY_MS);
+  return `${days === 0 ? 'today' : days === 1 ? 'tomorrow' : `on ${formatDate(value)}`} at ${formatClock(value)}`;
+}
 
 function dateProblem(resolved) {
   if (resolved.reason === 'past') return `${resolved.spoken} has already passed. Ask for a later date.`;
@@ -291,6 +321,98 @@ module.exports = function agentToolsRouter({ crm, now = () => Date.now() }) {
       status: own[0].status,
       open_requests: own.length,
       message: own.map(caseSummary).join(' '),
+    });
+  });
+
+  // Module 2: whether the service team is working now, and when it is back, from Salesforce business hours and holidays.
+  router.post('/service-hours', async (req, res) => {
+    const hours = await crm.getServiceHours();
+    const week = describeWeek(hours.weekly);
+    const weekLine = week ? ` Service hours are ${week}.` : '';
+    if (hours.open) {
+      return res.json({
+        open: true,
+        closes_at: hours.closesAt,
+        next_open: null,
+        hours: week || null,
+        message: hours.closesAt ? `The service team is available now, until ${formatClock(hours.closesAt)} today.${weekLine}` : 'The service team is available now.',
+      });
+    }
+    const closed = hours.holidayName ? `The service team is closed today for ${hours.holidayName}.` : 'The service team is closed now.';
+    const reopens = hours.opensAt
+      ? ` It opens again ${describeWhen(hours.opensAt, now())}, and requests registered now are followed up then.`
+      : ' Requests registered now are followed up when it reopens.';
+    return res.json({ open: false, closes_at: null, next_open: hours.opensAt, hours: week || null, message: `${closed}${reopens}${weekLine}` });
+  });
+
+  // Module 9: who serves a location, by the same rules Salesforce uses to route the case.
+  router.post('/service-area', async (req, res) => {
+    const area = await crm.checkServiceArea({ city: req.body?.city, postalCode: req.body?.postal_code });
+    if (!area.valid) {
+      return res.json({
+        valid: false,
+        route: null,
+        message: area.reason === 'pin' ? 'That PIN code is not valid. Ask for the six digit PIN code.' : 'The city or the six digit PIN code is needed.',
+      });
+    }
+    const place = [area.city, area.postalCode && `PIN ${area.postalCode}`].filter(Boolean).join(', ');
+    return res.json({
+      valid: true,
+      route: area.route,
+      message: area.route === 'Internal'
+        ? `${place} is within the Delhi NCR service area, so the Tiffany Designs service team handles it.`
+        : `${place} is outside the Delhi NCR service area, so an authorised service partner handles it.`,
+    });
+  });
+
+  // Module 3: saves a new customer; changes for an existing customer go to the service team to confirm.
+  router.post('/customer', async (req, res) => {
+    const body = req.body || {};
+    const phone = normalizePhone(body.phone);
+    if (!phone || !/^\+91[6-9]\d{9}$/.test(phone)) {
+      return res.json({ saved: false, new_customer: null, message: 'A valid 10 digit Indian mobile number is needed.' });
+    }
+    const result = await crm.saveCustomerDetails({
+      customerName: body.customer_name,
+      phone,
+      email: body.email,
+      alternatePhone: body.alternate_phone,
+      address: body.address,
+      city: body.city,
+      state: body.state,
+      postalCode: body.postal_code,
+    });
+    if (!result.saved) return res.json({ saved: false, new_customer: null, message: result.error });
+    return res.json({
+      saved: true,
+      new_customer: result.newCustomer,
+      message: result.newCustomer
+        ? `The details are saved for ${result.name}.`
+        : 'The details are noted for the service team, who will check them with the customer before updating the record.',
+    });
+  });
+
+  // Module 14: the customer's recent requests, closed ones included, and their recent calls.
+  router.post('/history', async (req, res) => {
+    const phone = normalizePhone(req.body?.phone);
+    if (!phone) return res.json({ found: false, message: 'A valid phone number is required.' });
+    const contact = await crm.findContactByPhone(phone);
+    if (!contact) return res.json({ found: false, message: 'No customer record matches this number.' });
+
+    const history = await crm.getServiceHistory({ accountId: contact.accountId, contactId: contact.id });
+    if (!history.cases.length && !history.calls.length) {
+      return res.json({ found: false, message: 'No earlier requests or calls are on record for this number.' });
+    }
+    const requests = history.cases.map((c) => `request ${spokenCaseNumber(c.caseNumber)} for ${c.serviceType || 'service'}`
+      + `${c.subType ? `, ${c.subType.toLowerCase()}` : ''}, opened ${formatDate(c.createdDate)}, ${c.closed ? 'closed' : `status ${c.status}`}`);
+    const calls = history.calls.map((c) => `${formatDate(c.date)}, ${c.direction ? `${c.direction.toLowerCase()} call` : 'call'}, ${callOutcome(c.outcome)}`);
+    return res.json({
+      found: true,
+      open_requests: history.cases.filter((c) => !c.closed).length,
+      message: [
+        requests.length ? `Recent requests: ${requests.join('; ')}.` : 'No earlier requests.',
+        calls.length ? `Recent calls: ${calls.join('; ')}.` : null,
+      ].filter(Boolean).join(' '),
     });
   });
 

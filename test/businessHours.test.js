@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { createBusinessHours, isWithin } = require('../src/crm/businessHours');
+const { createBusinessHours, isWithin, status } = require('../src/crm/businessHours');
 
 // "Tiffany Support Hours" as Salesforce returns it: Monday to Saturday 09:00 to 18:00 IST, Sunday closed.
 const TIFFANY = {
@@ -67,4 +67,36 @@ test('business hours are read once and cached', async () => {
 test('without default business hours every moment counts as open', async () => {
   const hours = createBusinessHours({ salesforce: { query: async () => [] } });
   assert.equal(await hours.isOpen(at('2026-10-18T20:00:00Z')), true);
+  assert.deepEqual(await hours.getStatus(), { configured: false, open: true, closesAt: null, opensAt: null, holidayName: null, weekly: [] });
+});
+
+test('status gives the closing time when open and the next opening when closed', () => {
+  const noon = status(TIFFANY, [], at('2026-10-14T06:30:00Z'));
+  assert.equal(noon.open, true);
+  assert.equal(noon.closesAt.toISOString(), '2026-10-14T12:30:00.000Z', 'Wednesday 18:00 IST');
+  assert.equal(noon.opensAt, null);
+
+  assert.equal(status(TIFFANY, [], at('2026-10-14T14:00:00Z')).opensAt.toISOString(), '2026-10-15T03:30:00.000Z', 'Wednesday 19:30 IST: Thursday 09:00');
+  assert.equal(status(TIFFANY, [], at('2026-10-14T01:00:00Z')).opensAt.toISOString(), '2026-10-14T03:30:00.000Z', 'Wednesday 06:30 IST: the same morning');
+  assert.equal(status(TIFFANY, [], at('2026-10-17T13:00:00Z')).opensAt.toISOString(), '2026-10-19T03:30:00.000Z', 'Saturday 18:30 IST: Monday, as Sunday is closed');
+});
+
+test('a holiday is named, and the next opening skips it', () => {
+  const diwali = [{ Name: 'Diwali', ActivityDate: '2026-11-09', IsAllDay: true }];
+  const onTheDay = status(TIFFANY, diwali, at('2026-11-09T06:30:00Z'));
+  assert.equal(onTheDay.open, false);
+  assert.equal(onTheDay.holidayName, 'Diwali');
+  assert.equal(onTheDay.opensAt.toISOString(), '2026-11-10T03:30:00.000Z');
+
+  const sundayEvening = status(TIFFANY, diwali, at('2026-11-08T13:00:00Z'));
+  assert.equal(sundayEvening.holidayName, null, 'Sunday is closed, not a holiday');
+  assert.equal(sundayEvening.opensAt.toISOString(), '2026-11-10T03:30:00.000Z', 'Monday is Diwali, so Tuesday 09:00');
+});
+
+test('the week is listed from Monday, with each day\'s window', async () => {
+  const hours = createBusinessHours({ salesforce: { query: async (soql) => (soql.includes('FROM BusinessHours') ? [TIFFANY] : []) }, now: () => Date.parse('2026-10-14T06:30:00Z') });
+  const { weekly } = await hours.getStatus();
+  assert.deepEqual(weekly.map((d) => d.day), ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']);
+  assert.deepEqual(weekly[0].window, { start: 540, end: 1080 });
+  assert.equal(weekly[6].window, null);
 });

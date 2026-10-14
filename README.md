@@ -6,20 +6,20 @@ Connects the Sarvam AI voice agent (`Tiffany-Des-0db8e21d-e099`) to Tiffany Desi
 
 | # | Module | How it is covered |
 | --- | --- | --- |
-| 1 | AI voice agent and call handling | Sarvam agent v2: inbound, delivery follow-up, callback and service update flows, plus phone orders ([prompt](sarvam/agent-prompt.md)) |
-| 2 | After-hours and holiday calls | Agent answers 24/7 and registers requests at once. Salesforce "Tiffany Support Hours" (Mon to Sat, 09:00 to 18:00 IST) flags out-of-hours cases, and the customer hears that the team follows up on the next working day. **No holidays are set up in Salesforce yet**, so holidays are not detected |
-| 3 | Customer identification | `find_customer`: name, registered mobile, recent orders. New callers get an account and contact created by the server |
+| 1 | AI voice agent and call handling | Sarvam agent v3: inbound, delivery follow-up, callback and service update flows, plus phone orders ([prompt](sarvam/agent-prompt.md)) |
+| 2 | After-hours and holiday calls | Agent answers 24/7 and registers requests at once. Salesforce "Tiffany Support Hours" (Mon to Sat, 09:00 to 18:00 IST) flags out-of-hours cases, and the customer hears that the team follows up on the next working day. `check_service_hours` (draft 4) tells the caller whether the team is working now and when it is back. **No holidays are set up in Salesforce yet**, so holidays are not detected |
+| 3 | Customer identification | `find_customer`: name, registered mobile, recent orders. New callers get an account and contact created by the server. `save_customer_details` (draft 4) saves a new caller's email, other number and address; for an existing customer it leaves a task for the team instead of changing the record |
 | 4 | Order identification | `find_order`: `TD-ORD` id or invoice number plus a mobile on the order's account, checked by the server. Marketplace, invoice and product are recorded when an order cannot be verified. No ERP API exists; Salesforce holds `ERP_Order_Id__c` |
 | 5 | Intent detection and classification | Agent picks one of 14 issue types, each mapped to `Service_Type__c` / `Service_Sub_Type__c` |
 | 6 | Installation requests | `book_installation` with `resolve_date`: new, reschedule, follow-up and re-installation |
 | 7 | Damage and defect complaints | `find_parts` (part number), quantity, delivery damage versus later damage; part linked as `Damaged_Component__c` |
 | 8 | Automatic case creation | The server creates the Salesforce case during the call, and a fallback case from the call-end webhook when the agent could not register one |
-| 9 | Location and routing | Agent collects city and PIN; Salesforce flow `Case_Service_Routing` with `Service_Region__mdt` sends Delhi NCR to the Internal Service Team and others to Provider Coordination |
-| 10 | Human handoff and escalation | `request_human_callback`: escalated case for a callback. Live transfer needs the team's number |
+| 9 | Location and routing | Agent collects city and PIN; Salesforce flow `Case_Service_Routing` with `Service_Region__mdt` sends Delhi NCR to the Internal Service Team and others to Provider Coordination. `check_service_area` (draft 4) applies the same rules during the call, so the caller hears who will visit and a wrong PIN is caught early |
+| 10 | Human handoff and escalation | `request_human_callback`: escalated case for a callback, with `check_service_hours` for when the team calls back. Live transfer needs the team's number |
 | 11 | Technician and provider coordination | Cases land in the right queue; `check_request_status` reads `Service_Visit__c` (technician, schedule) |
 | 12 | Replacement requests | Replacement and return requests registered for assessment; `Replacement_Shipment__c` status is readable |
 | 13 | Notifications and follow-ups | Delivery follow-up call 1 hour after delivery. `POST /api/calls/notify` for case registered, appointment scheduled and replacement dispatched; off until `SARVAM_NOTIFY_CAMPAIGN_ID` is set |
-| 14 | Service history and call logging | Every call becomes a Task (outcome, summary, transcript, recording) linked to the contact and to the case or order from that call, or else the order the call was about |
+| 14 | Service history and call logging | Every call becomes a Task (outcome, summary, transcript, recording) linked to the contact and to the case or order from that call, or else the order the call was about. `get_service_history` (draft 4) reads back the latest requests, closed ones included, and the latest calls |
 | 15 | ERP and telephony integration | Node logic over the Salesforce REST data API; Sarvam campaigns, deployments and call-end webhooks |
 | + | Phone orders | `find_products` (list prices) and `place_order`: the customer orders by name, mobile and delivery address; Salesforce gets a Draft order for the sales team to confirm |
 
@@ -52,7 +52,7 @@ All business logic runs in Node (`src/crm/`). The server reads and writes record
 | `POST /api/calls/notify` | `x-api-key` | `{ caseId \| caseNumber, event }`, where `event` is `case_registered`, `appointment_scheduled` or `replacement_dispatched` |
 | `GET /api/jobs` | `x-api-key` | Scheduled calls and their status |
 | `GET /api/cron/jobs` | `Authorization: Bearer <CRON_SECRET>` | Places the scheduled calls that are due (Vercel Cron, every 5 minutes) |
-| `POST /api/agent/*` | `x-agent-secret` | The 10 agent tools; see [sarvam/README.md](sarvam/README.md) |
+| `POST /api/agent/*` | `x-agent-secret` | The 14 agent tools; see [sarvam/README.md](sarvam/README.md) |
 | `POST /api/webhooks/sarvam?token=…` | token | Sarvam call-end webhook |
 
 ## Run
@@ -60,12 +60,22 @@ All business logic runs in Node (`src/crm/`). The server reads and writes record
 ```bash
 npm install
 npm run dev                 # server on PORT (8081)
-npm test                    # 167 tests, no network calls
+npm test                    # 185 tests, no network calls
 npm run deploy:salesforce   # deploy the website call panel (salesforce/) and its credential
 npm run review:salesforce   # read-only review of the org -> salesforce-review.json
 ```
 
 All settings are in `.env`; see `.env.example`. Locally, scheduled calls are kept in `data/jobs.json` and run by a timer every 30 seconds.
+
+## Deploy on Render (current)
+
+The server runs at `https://tiffany-designs-customer-service.onrender.com`, built from `main` on GitHub with `npm start`. One process serves the API and runs the scheduler every 30 seconds. The Sarvam agent's tools (version 3) and the website panel's Salesforce credential both point at it.
+
+Render settings:
+
+- **Environment variables:** everything in `.env.example`, with the same secrets as `.env`. Set `PUBLIC_BASE_URL` to the Render URL, because instant calls give Sarvam that address for the call-end webhook. Set `SARVAM_APP_VERSION=3`, the committed agent version whose tools call Render (version 2's tools call a test tunnel that no longer exists). Raise it whenever a new agent version is committed.
+- **Scheduled calls survive restarts only with Redis.** Without `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN`, jobs are kept in `data/jobs.json`, and Render's disk is wiped on every deploy and restart. A free Upstash database is enough.
+- **Free instances sleep** after 15 minutes without traffic. The next request can then take up to a minute, which is longer than the agent's tool timeouts (8 to 20 seconds), and no scheduled call is placed while it sleeps. Use a paid instance, or have an external scheduler (for example cron-job.org) call `GET /api/cron/jobs` every 5 minutes with `Authorization: Bearer <CRON_SECRET>` (set `CRON_SECRET` on Render). This keeps the server awake and places due calls.
 
 ## Deploy on Vercel
 
@@ -87,7 +97,7 @@ Steps:
 ## Remaining setup
 
 1. **Sarvam workspace API key.** Create one in the Sarvam agents dashboard (Settings → API keys) and put it in `SARVAM_API_KEY`. The current `sk_...` key is a speech-API key and Sarvam refuses it, so no call can start until this is done.
-2. **Deploy the server** at a permanent HTTPS address ([Vercel](#deploy-on-vercel)) and set `PUBLIC_BASE_URL` if it is not the Vercel production domain. Then run `npm run deploy:salesforce` to point the website panel at it, and re-point the agent's tools as described in [sarvam/README.md](sarvam/README.md#re-pointing-the-tools-after-deployment). Both currently use a temporary test tunnel.
+2. **Server deployment: done on [Render](#deploy-on-render).** The agent's tools (committed version 3) and the website panel (`npm run deploy:salesforce`) point at it. On Render, set `SARVAM_APP_VERSION=3` and `PUBLIC_BASE_URL`, and add Upstash Redis so scheduled calls are not lost on restarts.
 3. **Phone number.** `+917965851546` is deployed to another agent (Startbit Hospital). The website panel uses it as the caller ID for test calls only, because customers who call it back reach that agent. Tiffany needs its own number, set in `SARVAM_AGENT_PHONE`, before any deployment, campaign or real customer calls.
 4. **Campaigns and deployment** on that number, with the webhook URL; put the campaign IDs in `.env`.
 5. **Salesforce flows** to call this server:
