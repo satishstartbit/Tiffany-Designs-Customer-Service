@@ -1162,13 +1162,15 @@ test.describe('website call widget', () => {
     assert.equal(s.sarvam.webSessions.length, 2);
   });
 
-  test('Sarvam’s refusals reach the widget unchanged, and an outage becomes a 502', async (t) => {
+  test('a refused server key becomes a plain "not available", other refusals reach the widget, and an outage is a 502', async (t) => {
     const s = await startTestServer();
     t.after(s.close);
-    s.sarvam.webResponse = { status: 401, body: '{"detail":"Invalid API key"}', retryAfter: null };
-    const refused = await s.call('GET', sessionPath);
-    assert.equal(refused.status, 401);
-    assert.deepEqual(refused.body, { detail: 'Invalid API key' });
+    for (const status of [401, 403]) {
+      s.sarvam.webResponse = { status, body: '{"error":{"data":{"details":"Invalid API key format."}}}', retryAfter: null };
+      const refused = await s.call('GET', sessionPath);
+      assert.equal(refused.status, 503);
+      assert.deepEqual(refused.body, { error: 'not_configured', message: 'Calls are not available right now. Please try again later.' });
+    }
 
     s.sarvam.webResponse = { status: 429, body: '{"detail":"slow down"}', retryAfter: '30' };
     const limited = await s.call('GET', sessionPath);

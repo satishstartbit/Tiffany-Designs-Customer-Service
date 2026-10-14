@@ -50,6 +50,12 @@ module.exports = function webCallsRouter({ sarvam, config, limiter, logger = con
     try {
       // The server's agent version wins over the browser's, so website and phone calls reach the same version.
       const upstream = await sarvam.getWebCallUrl({ interaction_type: interactionType, version: appVersion || undefined });
+      // A refused key is the server's setup, not the visitor's; Sarvam's wording would only confuse the caller.
+      if (upstream.status === 401 || upstream.status === 403) {
+        logger.error(`Sarvam refused SARVAM_API_KEY for a web call (${upstream.status}): ${upstream.body}. `
+          + 'It must be a workspace API key from the Sarvam agents dashboard (Settings, API keys); a speech API key (sk_...) is refused.');
+        return res.status(503).json({ error: 'not_configured', message: 'Calls are not available right now. Please try again later.' });
+      }
       if (upstream.retryAfter) res.set('Retry-After', upstream.retryAfter);
       res.set('Cache-Control', 'no-store');
       return res.status(upstream.status).type('application/json').send(upstream.body);
