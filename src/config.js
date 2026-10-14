@@ -41,6 +41,14 @@ module.exports = {
     maxPerDay: int(env.CALLBACK_MAX_PER_DAY, 100),
   },
 
+  // Browser calls started from the website widget, across all visitors.
+  webCalls: {
+    maxPerHour: int(env.WEB_CALLS_MAX_PER_HOUR, 30),
+    maxPerDay: int(env.WEB_CALLS_MAX_PER_DAY, 200),
+    // Websites allowed to host the widget, comma-separated (https://shop.example.com); "*" allows any site.
+    allowedOrigins: env.WEB_CALL_ALLOWED_ORIGINS || '*',
+  },
+
   salesforce: {
     // Developer name of the Account record type for new callers; empty uses the org default.
     customerAccountRecordType: env.SF_CUSTOMER_ACCOUNT_RECORD_TYPE || '',

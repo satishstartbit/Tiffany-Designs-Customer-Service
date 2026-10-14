@@ -4,7 +4,7 @@ const { createCrm } = require('./crm/crm');
 const { createSarvamClient } = require('./sarvam');
 const { createRedis } = require('./redis');
 const { createScheduler, createFileJobStore, createRedisJobStore, createUnavailableJobStore } = require('./scheduler');
-const { createCallbackLimiter } = require('./rateLimit');
+const { createCallbackLimiter, createWebCallLimiter } = require('./rateLimit');
 const { createJobHandlers } = require('./callFlows');
 const { createApp } = require('./app');
 
@@ -44,12 +44,20 @@ function buildServer() {
     prefix: config.redis.prefix,
   });
 
+  const webCallLimiter = createWebCallLimiter({
+    perHour: config.webCalls.maxPerHour,
+    perDay: config.webCalls.maxPerDay,
+    redis,
+    prefix: config.redis.prefix,
+  });
+
   const app = createApp({
     crm,
     sarvam,
     scheduler,
     config,
     limiter,
+    webCallLimiter,
     checkSalesforce: async () => {
       const limits = await sfRequest('/limits');
       return { dailyApiRequests: limits.DailyApiRequests };

@@ -1,7 +1,7 @@
 const { createApp } = require('../src/app');
 const { createScheduler, createMemoryJobStore } = require('../src/scheduler');
 const { createJobHandlers } = require('../src/callFlows');
-const { lastTenDigits } = require('../src/rules');
+const { lastTenDigits, nameWords, namesMatch } = require('../src/rules');
 
 const SECRETS = { internalApiKey: 'internal-key', siteCallApiKey: 'site-key', agentToolSecret: 'agent-secret', webhookToken: 'hook-token', cronSecret: 'cron-secret' };
 
@@ -10,8 +10,17 @@ function testConfig(overrides = {}) {
     ...SECRETS,
     publicBaseUrl: 'https://voice.example.test',
     followUpDelayMinutes: 60,
-    sarvam: { followUpCampaignId: 'camp-followup', callbackCampaignId: 'camp-callback', notifyCampaignId: 'camp-notify' },
+    sarvam: {
+      orgId: 'org-1',
+      workspaceId: 'ws-1',
+      agentId: 'Tiffany-Test-Agent',
+      appVersion: 3,
+      followUpCampaignId: 'camp-followup',
+      callbackCampaignId: 'camp-callback',
+      notifyCampaignId: 'camp-notify',
+    },
     callbacks: { allowedNumbers: 'any', maxPerHour: 20, maxPerDay: 100 },
+    webCalls: { maxPerHour: 30, maxPerDay: 200 },
     ...overrides,
   };
 }
@@ -19,13 +28,15 @@ function testConfig(overrides = {}) {
 // In-memory stand-in shaped like the Tiffany org: orders hang off accounts, customers quote TD-ORD ids.
 function createFakeCrm({ now = () => Date.now() } = {}) {
   const contacts = [
-    { id: '003A', name: 'Aarav Sharma', firstName: 'Aarav', accountId: '001A', mobile: '(987) 654-3210', phone: null },
-    { id: '003B', name: 'Meera Iyer', firstName: 'Meera', accountId: '001B', mobile: null, phone: '+91 98200 11111' },
+    { id: '003A', name: 'Aarav Sharma', firstName: 'Aarav', accountId: '001A', mobile: '(987) 654-3210', phone: null, postalCode: '110001' },
+    { id: '003B', name: 'Meera Iyer', firstName: 'Meera', accountId: '001B', mobile: null, phone: '+91 98200 11111', postalCode: '600001' },
   ];
   const orders = [
     { id: '801A', orderNumber: '00000101', erpOrderId: 'TD-ORD-1001', invoiceNumber: 'INV-2001', orderSource: 'Website', deliveryStatus: 'Delivered', deliveryDate: '2026-10-14', accountId: '001A', accountName: 'Aarav Sharma', contactId: null, city: 'Delhi', postalCode: '110001', productSummary: 'Demo 3-Door Wardrobe' },
     { id: '801B', orderNumber: '00000114', erpOrderId: 'TD-ORD-1111', invoiceNumber: 'INV-1111', orderSource: 'Flipkart', deliveryStatus: 'Processing', deliveryDate: null, accountId: '001B', accountName: 'Meera Iyer', contactId: '003B', city: 'Jaipur', postalCode: '302012', productSummary: 'Demo Bookcase' },
     { id: '801C', orderNumber: '00000117', erpOrderId: 'TD-ORD-3333', invoiceNumber: 'INV-3333', orderSource: 'Showroom', deliveryStatus: 'Delivered', deliveryDate: '2026-10-14', accountId: '001C', accountName: 'No Phone Customer', contactId: null, city: null, postalCode: null, productSummary: 'Demo Desk' },
+    // A phone order: no ERP id or invoice yet, only the Salesforce order number.
+    { id: '801D', orderNumber: '00000122', erpOrderId: null, invoiceNumber: null, orderSource: 'Other', deliveryStatus: null, deliveryDate: null, accountId: '001B', accountName: 'Meera Iyer', contactId: '003B', city: 'Jaipur', postalCode: '302012', productSummary: 'Demo Kids Bed' },
   ];
   const parts = [
     { name: 'Hardware Kit', partNumber: 'WRD-3D-HDW-001', productName: 'Demo 3-Door Wardrobe' },
@@ -35,13 +46,13 @@ function createFakeCrm({ now = () => Date.now() } = {}) {
   const serviceCases = [
     {
       id: '500X', caseNumber: '00001063', accountId: '001A', serviceType: 'Installation', status: 'Appointment Scheduled',
-      phone: '+919876543210', customerName: 'Aarav Sharma', erpOrderId: 'TD-ORD-1001',
+      phone: '+919876543210', customerName: 'Aarav Sharma', contactName: 'Aarav Sharma', accountName: 'Demo Customer - Aarav Sharma', erpOrderId: 'TD-ORD-1001',
       visit: { status: 'Appointment Scheduled', scheduledStart: '2026-10-16T05:30:00.000Z', technician: 'Demo Tech - Vikram (Internal)' },
       shipment: null,
     },
     {
       id: '500Y', caseNumber: '00001060', accountId: '001B', serviceType: 'Damage or Defect', status: 'Replacement Dispatched',
-      phone: '+91 98200 11111', customerName: 'Meera Iyer', erpOrderId: 'TD-ORD-1111',
+      phone: '+91 98200 11111', customerName: 'Meera Iyer', contactName: 'Meera Iyer', accountName: 'Demo Customer - Meera Iyer', erpOrderId: 'TD-ORD-1111',
       visit: null,
       shipment: { id: 'a01', status: 'Dispatched', expectedDate: '2026-10-18', courier: 'BlueDart', trackingNumber: 'BD123', component: 'Demo Bookcase - Side Panel' },
     },
@@ -116,7 +127,7 @@ function createFakeCrm({ now = () => Date.now() } = {}) {
       return orders.find((o) => o.erpOrderId === erpOrderId) || null;
     },
     async getOrderByInvoice(invoiceNumber) {
-      return orders.find((o) => o.invoiceNumber === invoiceNumber) || null;
+      return orders.find((o) => o.invoiceNumber && o.invoiceNumber.toLowerCase() === String(invoiceNumber).trim().toLowerCase()) || null;
     },
     async findRecentOrdersForAccount(accountId, limit = 5) {
       return orders.filter((o) => o.accountId === accountId).slice(0, limit);
@@ -124,14 +135,27 @@ function createFakeCrm({ now = () => Date.now() } = {}) {
     async getOrderContact(order) {
       return contacts.find((c) => c.id === order.contactId) || contacts.find((c) => c.accountId === order.accountId) || null;
     },
-    async verifyOrder(reference, verification) {
-      const orderNumber = /^\d{1,10}$/.test(String(reference)) ? String(reference).padStart(8, '0') : null;
-      const order = orders.find((o) => o.erpOrderId === reference || (orderNumber && o.orderNumber === orderNumber));
-      if (!order || !verification) return { found: false };
-      const byInvoice = order.invoiceNumber.toLowerCase() === String(verification).toLowerCase();
-      const byPhone = contacts.some((c) => c.accountId === order.accountId && [c.mobile, c.phone].some((p) => p && lastTenDigits(p) === lastTenDigits(verification)));
-      if (!byInvoice && !byPhone) return { found: false };
-      return { found: true, customerName: order.accountName, orderSource: order.orderSource, deliveryStatus: order.deliveryStatus, deliveryDate: order.deliveryDate, order };
+    async verifyOrder(reference, verification, { customerName } = {}) {
+      const factors = [].concat(verification).map((f) => String(f ?? '').trim()).filter(Boolean);
+      const ref = String(reference).trim();
+      const digits = (/^(?:ord(?:er)?)?(?:\s*(?:no|number))?[\s.#:-]*([\d\s]{1,14})$/i.exec(ref) || [])[1];
+      const orderNumber = digits ? digits.replace(/\D/g, '').padStart(8, '0') : null;
+      const order = orders.find((o) => (o.erpOrderId && o.erpOrderId.toLowerCase() === ref.toLowerCase()) || (orderNumber && o.orderNumber === orderNumber));
+      if (!order || (!factors.length && !customerName)) return { found: false };
+      const byInvoice = Boolean(order.invoiceNumber) && factors.some((f) => order.invoiceNumber.toLowerCase() === f.toLowerCase());
+      const byPhone = contacts.some((c) => c.accountId === order.accountId && [c.mobile, c.phone].some((p) => p && factors.some((f) => lastTenDigits(f) && lastTenDigits(p) === lastTenDigits(f))));
+      const byName = Boolean(customerName) && (namesMatch(customerName, order.accountName)
+        || contacts.some((c) => c.accountId === order.accountId && namesMatch(customerName, c.name)));
+      if (!byInvoice && !byPhone && !byName) return { found: false };
+      const verifiedBy = byInvoice ? 'invoice' : byPhone ? 'phone' : 'name';
+      return { found: true, customerName: order.accountName, orderSource: order.orderSource, deliveryStatus: order.deliveryStatus, deliveryDate: order.deliveryDate, order, verifiedBy };
+    },
+    async findCustomerByNameAndPin(customerName, postalCode) {
+      const pin = String(postalCode || '').replace(/\D/g, '');
+      if (nameWords(customerName).length < 2 || !/^[1-9]\d{5}$/.test(pin)) return { status: 'invalid' };
+      const matches = contacts.filter((c) => namesMatch(customerName, c.name) && c.postalCode === pin);
+      if (matches.length !== 1) return { status: matches.length ? 'ambiguous' : 'none' };
+      return { status: 'found', contact: matches[0] };
     },
     async findParts({ erpOrderId, productName }) {
       if (erpOrderId) {
@@ -144,7 +168,7 @@ function createFakeCrm({ now = () => Date.now() } = {}) {
       if (!input.phone && !(input.erpOrderId && (input.verification || input.invoiceNumber))) {
         return { created: false, error: 'Customer mobile or email (or a verifiable order) is required.' };
       }
-      const verified = input.erpOrderId ? (await this.verifyOrder(input.erpOrderId, input.verification || input.invoiceNumber || input.phone)).found : false;
+      const verified = input.erpOrderId ? (await this.verifyOrder(input.erpOrderId, [input.verification, input.invoiceNumber, input.phone])).found : false;
       const order = verified ? orders.find((o) => o.erpOrderId === input.erpOrderId) : null;
       const city = (input.city || order?.city || '').toLowerCase();
       const pin = String(input.postalCode || order?.postalCode || '');
@@ -205,14 +229,26 @@ function createFakeCrm({ now = () => Date.now() } = {}) {
   };
 }
 
-function createFakeSarvam({ canStartCalls = true } = {}) {
+function createFakeSarvam({ canStartCalls = true, canStartWebCalls = true } = {}) {
   const calls = [];
   const started = [];
+  const webSessions = [];
   return {
     calls,
     started,
+    webSessions,
     canStartCalls,
+    canStartWebCalls,
     failNext: 0,
+    webResponse: { status: 200, body: JSON.stringify({ url: 'wss://apps.sarvam.test/session?token=t1', reference_id: 'ref-1', expires_at: '2026-10-14T07:00:00Z' }), retryAfter: null },
+    async getWebCallUrl(query) {
+      if (this.failNext > 0) {
+        this.failNext -= 1;
+        throw new Error('Sarvam unavailable');
+      }
+      webSessions.push(query);
+      return this.webResponse;
+    },
     async addToCampaign(campaignId, label, users) {
       if (this.failNext > 0) {
         this.failNext -= 1;
@@ -232,11 +268,11 @@ function createFakeSarvam({ canStartCalls = true } = {}) {
   };
 }
 
-async function startTestServer({ nowMs = Date.parse('2026-10-14T06:30:00Z'), config = testConfig(), instantCalls = true } = {}) {
+async function startTestServer({ nowMs = Date.parse('2026-10-14T06:30:00Z'), config = testConfig(), instantCalls = true, webCalls = true } = {}) {
   const clock = { now: nowMs };
   const now = () => clock.now;
   const crm = createFakeCrm({ now });
-  const sarvam = createFakeSarvam({ canStartCalls: instantCalls });
+  const sarvam = createFakeSarvam({ canStartCalls: instantCalls, canStartWebCalls: webCalls });
   const logger = { error() {}, warn() {}, log() {} };
   const scheduler = createScheduler({
     store: createMemoryJobStore(),
@@ -268,7 +304,7 @@ async function startTestServer({ nowMs = Date.parse('2026-10-14T06:30:00Z'), con
     const text = await res.text();
     let json = null;
     try { json = JSON.parse(text); } catch { /* not JSON */ }
-    return { status: res.status, body: json };
+    return { status: res.status, body: json, text, headers: res.headers };
   }
 
   return {

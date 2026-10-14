@@ -136,7 +136,7 @@ test('getOrderContact falls back to the account contact when the authorising con
 test('verifyOrder accepts the invoice number as the second factor', async () => {
   const sf = fakeSalesforce({ queries: ORG });
   const result = await createCrm({ salesforce: sf, businessHours: open }).verifyOrder(' TD-ORD-1001 ', 'inv-2001');
-  assert.match(sf.log.queries[0], /WHERE ERP_Order_Id__c = 'TD-ORD-1001'/);
+  assert.match(sf.log.queries[0], /WHERE ERP_Order_Id__c IN \('TD-ORD-1001'\)/);
   assert.equal(result.found, true);
   assert.equal(result.customerName, 'Demo Customer - Aarav Sharma');
   assert.equal(result.deliveryStatus, 'Delivered');
@@ -319,7 +319,7 @@ test('getCaseStatus pads case numbers and includes the latest visit and shipment
 test('getOrderByInvoice looks the order up by invoice number', async () => {
   const sf = fakeSalesforce({ queries: { 'FROM Order ': () => [{ Id: '801A', ERP_Order_Id__c: 'TD-ORD-1001', Invoice_Number__c: 'INV-2001' }] } });
   const order = await createCrm({ salesforce: sf }).getOrderByInvoice(' INV-2001 ');
-  assert.match(sf.log.queries[0], /WHERE Invoice_Number__c = 'INV-2001'/);
+  assert.match(sf.log.queries[0], /WHERE Invoice_Number__c IN \('INV-2001'\)/);
   assert.equal(order.erpOrderId, 'TD-ORD-1001');
 });
 
@@ -622,7 +622,7 @@ test('verifyOrder also accepts the Salesforce order number of a phone order', as
   });
   const crm = createCrm({ salesforce: sf, businessHours: open });
   const result = await crm.verifyOrder(' 120 ', '9810000001');
-  assert.match(sf.log.queries[0], /WHERE \(ERP_Order_Id__c = '120' OR OrderNumber = '00000120'\) LIMIT 1$/);
+  assert.match(sf.log.queries[0], /WHERE \(ERP_Order_Id__c IN \('120'\) OR OrderNumber = '00000120'\) LIMIT 2$/);
   assert.equal(result.found, true);
   assert.equal(result.order.id, '801P');
   assert.equal(result.contactId, '003A');
@@ -630,6 +630,40 @@ test('verifyOrder also accepts the Salesforce order number of a phone order', as
   await crm.verifyOrder('TD-ORD-1001', '9810000001');
   const orderQueries = sf.log.queries.filter((q) => q.includes('FROM Order '));
   assert.doesNotMatch(orderQueries[1], /OrderNumber =/, 'an ERP id is never read as an order number');
+});
+
+test('verifyOrder reads the order number however the caller says it, and tries every factor', async () => {
+  const sf = fakeSalesforce({
+    queries: {
+      'FROM Order ': () => [{ Id: '801P', OrderNumber: '00000122', AccountId: '001A', Account: { Name: 'Aarav Sharma' } }],
+      "FROM Contact WHERE AccountId = '001A'": ORG["FROM Contact WHERE AccountId = '001A'"],
+    },
+  });
+  const crm = createCrm({ salesforce: sf, businessHours: open });
+  for (const said of ['ORD-00000122', 'ord 122', 'Order number 122', '00000122']) {
+    const result = await crm.verifyOrder(said, ['INV-0000', '9810000001']);
+    assert.equal(result.found, true, said);
+    assert.equal(result.verifiedBy, 'phone');
+  }
+  assert.ok(sf.log.queries.every((q) => !q.includes('FROM Order ') || q.includes("OrderNumber = '00000122'")));
+
+  await crm.verifyOrder('td ord 1001', '9810000001');
+  assert.match(sf.log.queries.filter((q) => q.includes('FROM Order ')).pop(), /ERP_Order_Id__c IN \('td ord 1001', 'TD-ORD-1001'\)\)?/);
+});
+
+test('verifyOrder prefers the order whose ERP id was said over one with the same order number', async () => {
+  const sf = fakeSalesforce({
+    queries: {
+      'FROM Order ': () => [
+        { Id: '801N', OrderNumber: '00000010', AccountId: '001A', Account: { Name: 'Aarav Sharma' } },
+        { Id: '801E', OrderNumber: '00000117', ERP_Order_Id__c: 'ORD-010', Invoice_Number__c: 'INV-010', AccountId: '001A', Account: { Name: 'Aarav Sharma' } },
+      ],
+      "FROM Contact WHERE AccountId = '001A'": ORG["FROM Contact WHERE AccountId = '001A'"],
+    },
+  });
+  const result = await createCrm({ salesforce: sf, businessHours: open }).verifyOrder('ORD-010', 'INV 010');
+  assert.equal(result.order.id, '801E');
+  assert.equal(result.verifiedBy, 'invoice', 'invoice numbers match without regard to spaces or dashes');
 });
 
 test('findVoiceOrderSince finds the order placed during the call by number, else by the caller', async () => {
@@ -756,4 +790,63 @@ test('getServiceHistory reads the latest cases, closed ones included, and the lo
   assert.match(sf.log.queries[3], /WHERE TaskSubtype = 'Call' AND WhoId = '003\\'Z'/);
   assert.deepEqual(await crm.getServiceHistory({}), { cases: [], calls: [] });
   assert.equal(sf.log.queries.length, 4);
+});
+
+test('verifyOrder accepts the full name on the order when there is no mobile or invoice', async () => {
+  const crm = createCrm({ salesforce: fakeSalesforce({ queries: ORG }), businessHours: open });
+  const byName = await crm.verifyOrder('TD-ORD-1001', undefined, { customerName: 'Aarav Sharma' });
+  assert.equal(byName.found, true);
+  assert.equal(byName.verifiedBy, 'name');
+  assert.equal(byName.contactId, '003A', 'the contact with that name');
+  assert.equal((await crm.verifyOrder('TD-ORD-1001', null, { customerName: 'arav sharma' })).found, true, 'one letter off still matches');
+  assert.deepEqual(await crm.verifyOrder('TD-ORD-1001', null, { customerName: 'Aarav' }), { found: false });
+  assert.deepEqual(await crm.verifyOrder('TD-ORD-1001', null, { customerName: 'Demo Customer' }), { found: false });
+  assert.deepEqual(await crm.verifyOrder('TD-ORD-1001', null, { customerName: 'Meera Iyer' }), { found: false });
+  assert.equal((await crm.verifyOrder('TD-ORD-1001', '9810000001', { customerName: 'Meera Iyer' })).verifiedBy, 'phone');
+});
+
+test('getCaseStatus returns the names on the request', async () => {
+  const sf = fakeSalesforce({
+    queries: { 'FROM Case': () => [{ Id: '500A', CaseNumber: '00001063', AccountId: '001A', Account: { Name: 'Demo Customer - Aarav Sharma' }, Contact: { Name: 'Aarav Sharma' } }] },
+  });
+  const [request] = await createCrm({ salesforce: sf }).getCaseStatus({ caseNumber: '1063' });
+  assert.equal(request.accountName, 'Demo Customer - Aarav Sharma');
+  assert.equal(request.contactName, 'Aarav Sharma');
+  assert.match(sf.log.queries[0], /Account\.Name, Contact\.Name/);
+});
+
+test('findCustomerByNameAndPin finds one customer by full name and a PIN on their record', async () => {
+  const person = (id, first, last, accountId, mailingPin, billingPin) => ({
+    Id: id, FirstName: first, LastName: last, AccountId: accountId, MailingPostalCode: mailingPin,
+    Account: { Name: `Demo Customer - ${first} ${last}`, BillingPostalCode: billingPin },
+  });
+  const sf = fakeSalesforce({
+    search: [
+      person('003A', 'Aarav', 'Sharma', '001A', '110001', '110001'),
+      person('003Q', 'Aarav', 'Sharma', '001Q', null, '400001'),
+      person('003R', 'Rohan', 'Sharma', '001R', '201301', '201301'),
+    ],
+    queries: { 'FROM Order WHERE AccountId IN': (soql) => (soql.includes("ShippingPostalCode = '302012'") ? [{ AccountId: '001Q' }] : []) },
+  });
+  const crm = createCrm({ salesforce: sf });
+
+  const found = await crm.findCustomerByNameAndPin('Arav Sharma', '110 001');
+  assert.equal(found.status, 'found');
+  assert.equal(found.contact.id, '003A');
+  assert.match(sf.log.searches[0], /^FIND \{arav OR sharma\} IN NAME FIELDS RETURNING Contact\(/);
+  assert.equal((await crm.findCustomerByNameAndPin('Aarav Sharma', '400001')).contact.id, '003Q', 'the account billing PIN counts');
+  assert.equal((await crm.findCustomerByNameAndPin('Aarav Sharma', '302012')).contact.id, '003Q', 'so does the PIN an order was delivered to');
+  assert.deepEqual(await crm.findCustomerByNameAndPin('Aarav Sharma', '560001'), { status: 'none' });
+  assert.deepEqual(await crm.findCustomerByNameAndPin('Kabir Singh', '110001'), { status: 'none' });
+
+  const searches = sf.log.searches.length;
+  assert.deepEqual(await crm.findCustomerByNameAndPin('Aarav', '110001'), { status: 'invalid' });
+  assert.deepEqual(await crm.findCustomerByNameAndPin('Aarav Sharma', '1100'), { status: 'invalid' });
+  assert.equal(sf.log.searches.length, searches, 'nothing is searched for incomplete details');
+});
+
+test('findCustomerByNameAndPin gives nothing when two customers share the name and PIN', async () => {
+  const twin = (id, accountId) => ({ Id: id, FirstName: 'Aarav', LastName: 'Sharma', AccountId: accountId, MailingPostalCode: '110001', Account: { Name: 'Aarav Sharma' } });
+  const crm = createCrm({ salesforce: fakeSalesforce({ search: [twin('003A', '001A'), twin('003B', '001B')] }) });
+  assert.deepEqual(await crm.findCustomerByNameAndPin('Aarav Sharma', '110001'), { status: 'ambiguous' });
 });

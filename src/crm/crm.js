@@ -1,4 +1,4 @@
-const { lastTenDigits, normalizePhone } = require('../rules');
+const { lastTenDigits, normalizePhone, nameWords, namesMatch } = require('../rules');
 const { todayInIst } = require('../dates');
 const { createBusinessHours } = require('./businessHours');
 const { parseItems } = require('./orderItems');
@@ -119,6 +119,25 @@ function toShipment(record) {
   };
 }
 
+// The ways a caller says one id ("td ord 1001", "TD-ORD-1001"), as SOQL literals; SOQL equality ignores case.
+function idForms(value) {
+  const raw = String(value || '').trim();
+  const dashed = raw.toUpperCase().replace(/[\s_]+/g, '-').replace(/-{2,}/g, '-');
+  return [...new Set([raw, dashed].filter(Boolean))].map((f) => `'${escapeSoql(f)}'`).join(', ');
+}
+
+function sameId(a, b) {
+  const plain = (v) => String(v || '').toUpperCase().replace(/[\s_-]+/g, '');
+  return plain(a) !== '' && plain(a) === plain(b);
+}
+
+// Salesforce order number as stored (8 digits) from "122", "00000122", "ORD-00000122" or "order number 122".
+function orderNumberOf(reference) {
+  const match = /^(?:ord(?:er)?)?(?:\s*(?:no|number))?[\s.#:-]*([\d\s]{1,14})$/i.exec(String(reference || '').trim());
+  const digits = match ? match[1].replace(/\D/g, '') : '';
+  return digits && digits.length <= 10 ? digits.padStart(8, '0') : null;
+}
+
 function compact(fields) {
   return Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined && v !== null && v !== ''));
 }
@@ -199,7 +218,7 @@ function createCrm({
 
   const getOrderById = (orderId) => queryOrder(`Id = '${escapeSoql(orderId)}'`);
   const getOrderByErpId = (erpOrderId) => queryOrder(`ERP_Order_Id__c = '${escapeSoql(String(erpOrderId).trim())}'`);
-  const getOrderByInvoice = (invoiceNumber) => queryOrder(`Invoice_Number__c = '${escapeSoql(String(invoiceNumber).trim())}'`);
+  const getOrderByInvoice = (invoiceNumber) => queryOrder(`Invoice_Number__c IN (${idForms(invoiceNumber)})`);
 
   async function findRecentOrdersForAccount(accountId, limit = 5) {
     const rows = await salesforce.query(
@@ -224,24 +243,30 @@ function createCrm({
 
   // An order is shown only to someone who also has its invoice number or a mobile on the order's account.
   // Unknown and unverified orders give the same answer, so order ids cannot be probed.
-  async function verifyOrder(erpOrderId, verification) {
-    if (!erpOrderId || !verification) return { found: false };
+  // A caller without the mobile or invoice can give the full name on the order instead (first and last name).
+  // `verification` is one factor or a list (invoice numbers and mobiles); any one of them is enough.
+  async function verifyOrder(erpOrderId, verification, { customerName } = {}) {
+    const factors = [].concat(verification).map((f) => String(f ?? '').trim()).filter(Boolean);
+    if (!erpOrderId || (!factors.length && !customerName)) return { found: false };
     const reference = String(erpOrderId).trim();
     // Phone orders have no ERP id until the ERP picks them up, so their Salesforce order number also counts.
-    const orderNumber = /^[\d\s]{1,10}$/.test(reference) ? reference.replace(/\D/g, '').padStart(8, '0') : null;
+    const orderNumber = orderNumberOf(reference);
     const where = orderNumber
-      ? `(ERP_Order_Id__c = '${escapeSoql(reference)}' OR OrderNumber = '${orderNumber}')`
-      : `ERP_Order_Id__c = '${escapeSoql(reference)}'`;
-    const rows = await salesforce.query(`SELECT ${ORDER_FIELDS} FROM Order WHERE ${where} LIMIT 1`);
-    const order = toOrder(rows[0]);
+      ? `(ERP_Order_Id__c IN (${idForms(reference)}) OR OrderNumber = '${orderNumber}')`
+      : `ERP_Order_Id__c IN (${idForms(reference)})`;
+    const rows = await salesforce.query(`SELECT ${ORDER_FIELDS} FROM Order WHERE ${where} LIMIT 2`);
+    // "ORD-010" is an ERP id and also reads as order number 10; the ERP id wins.
+    const order = toOrder(rows.find((r) => r.ERP_Order_Id__c && sameId(r.ERP_Order_Id__c, reference)) || rows[0]);
     if (!order) return { found: false };
 
-    const factor = String(verification).trim();
-    const byInvoice = Boolean(order.invoiceNumber) && order.invoiceNumber.toLowerCase() === factor.toLowerCase();
-    const digits = lastTenDigits(factor);
+    const byInvoice = Boolean(order.invoiceNumber) && factors.some((f) => sameId(f, order.invoiceNumber));
     const contacts = order.accountId ? await accountContacts(order.accountId) : [];
-    const matched = digits ? contacts.find((c) => [c.mobile, c.phone].some((p) => lastTenDigits(p) === digits)) : null;
-    if (!byInvoice && !matched) return { found: false };
+    const mobiles = factors.map(lastTenDigits).filter(Boolean);
+    const matched = contacts.find((c) => [c.mobile, c.phone].some((p) => p && mobiles.includes(lastTenDigits(p))));
+    const named = !byInvoice && !matched && customerName
+      ? contacts.find((c) => namesMatch(customerName, c.name)) || (namesMatch(customerName, order.accountName) ? contacts[0] || {} : null)
+      : null;
+    if (!byInvoice && !matched && !named) return { found: false };
 
     return {
       found: true,
@@ -250,8 +275,40 @@ function createCrm({
       deliveryStatus: order.deliveryStatus,
       deliveryDate: order.deliveryDate,
       order,
-      contactId: (matched || contacts[0])?.id || null,
+      contactId: (matched || named || contacts[0])?.id || null,
+      verifiedBy: byInvoice ? 'invoice' : matched ? 'phone' : 'name',
     };
+  }
+
+  // Finds the caller by full name and a PIN code on their record (address or an order's delivery PIN) when they do
+  // not know the registered mobile. Only one customer may match; otherwise nothing is returned.
+  async function findCustomerByNameAndPin(customerName, postalCode) {
+    const pin = String(postalCode || '').replace(/\D/g, '');
+    const words = nameWords(customerName);
+    if (words.length < 2 || !/^[1-9]\d{5}$/.test(pin)) return { status: 'invalid' };
+
+    const terms = words.map((w) => escapeSosl(w)).join(' OR ');
+    const rows = await salesforce.search(
+      `FIND {${terms}} IN NAME FIELDS RETURNING Contact(${CONTACT_FIELDS}, Account.Name, Account.BillingPostalCode, Account.ShippingPostalCode) LIMIT 50`,
+    );
+    const named = rows.filter((r) => namesMatch(customerName, [r.FirstName, r.LastName].filter(Boolean).join(' ')));
+    if (!named.length) return { status: 'none' };
+
+    const digitsOf = (value) => String(value || '').replace(/\D/g, '');
+    let matches = named.filter((r) => [r.MailingPostalCode, r.Account?.BillingPostalCode, r.Account?.ShippingPostalCode].some((p) => digitsOf(p) === pin));
+    if (!matches.length) {
+      const accountIds = [...new Set(named.map((r) => r.AccountId).filter(Boolean))];
+      const delivered = accountIds.length
+        ? await salesforce.query(
+          `SELECT AccountId FROM Order WHERE AccountId IN (${accountIds.map((id) => `'${escapeSoql(id)}'`).join(', ')}) AND ShippingPostalCode = '${pin}' LIMIT 50`,
+        )
+        : [];
+      const shippedTo = new Set(delivered.map((o) => o.AccountId));
+      matches = named.filter((r) => shippedTo.has(r.AccountId));
+    }
+    const accounts = new Set(matches.map((r) => r.AccountId || r.Id));
+    if (accounts.size !== 1) return { status: matches.length ? 'ambiguous' : 'none' };
+    return { status: 'found', contact: toContact(matches[0]) };
   }
 
   async function createCustomer(phone, customerName, accountFields = {}, contactFields = {}) {
@@ -470,7 +527,7 @@ function createCrm({
     if (!String(input.description || '').trim()) return { created: false, error: 'A description of the issue is required.' };
 
     const verified = input.erpOrderId
-      ? await verifyOrder(input.erpOrderId, input.verification || input.invoiceNumber || input.phone)
+      ? await verifyOrder(input.erpOrderId, [input.verification, input.invoiceNumber, input.phone])
       : { found: false };
     const order = verified.found ? verified.order : null;
     if (!order && !input.phone) {
@@ -541,13 +598,15 @@ function createCrm({
     if (!where && accountId) where = `AccountId = '${escapeSoql(accountId)}' AND IsClosed = false`;
     if (!where) return [];
     const rows = await salesforce.query(
-      `SELECT Id, CaseNumber, Service_Type__c, Service_Sub_Type__c, Status, CreatedDate, AccountId, Order__r.ERP_Order_Id__c, `
+      `SELECT Id, CaseNumber, Service_Type__c, Service_Sub_Type__c, Status, CreatedDate, AccountId, Account.Name, Contact.Name, Order__r.ERP_Order_Id__c, `
       + `${VISIT_SUBQUERY}, ${SHIPMENT_SUBQUERY} FROM Case WHERE ${where} ORDER BY CreatedDate DESC LIMIT 3`,
     );
     return rows.map((r) => ({
       id: r.Id,
       caseNumber: r.CaseNumber,
       accountId: r.AccountId,
+      accountName: r.Account?.Name || null,
+      contactName: r.Contact?.Name || null,
       serviceType: r.Service_Type__c,
       subType: r.Service_Sub_Type__c,
       status: r.Status,
@@ -711,6 +770,7 @@ function createCrm({
     findRecentOrdersForAccount,
     getOrderContact,
     verifyOrder,
+    findCustomerByNameAndPin,
     findParts,
     findProducts,
     indianStateCode,

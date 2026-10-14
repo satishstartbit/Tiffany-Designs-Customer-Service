@@ -109,3 +109,27 @@ test('cohortName keeps only allowed characters and 50 chars', () => {
   assert.equal(cohortName('x'.repeat(80)).length, 50);
   assert.equal(cohortName(''), 'cohort');
 });
+
+test('getWebCallUrl asks the app runtime for a signed URL with the key and passes the answer through', async () => {
+  const requests = [];
+  const impl = async (url, options) => {
+    requests.push({ url, options });
+    return { status: 200, text: async () => '{"url":"wss://x","reference_id":"r1"}', headers: { get: () => null } };
+  };
+  const client = createSarvamClient({ ...config, agentId: 'Tiffany-Des-1' }, impl);
+  assert.equal(client.canStartWebCalls, true);
+  assert.deepEqual(await client.getWebCallUrl({ interaction_type: 'call', version: 3, unused: undefined }), {
+    status: 200, body: '{"url":"wss://x","reference_id":"r1"}', retryAfter: null,
+  });
+  assert.equal(requests[0].url, 'https://apps.sarvam.ai/api/app-runtime/orgs/org1/workspaces/ws1/apps/Tiffany-Des-1/url?interaction_type=call&version=3');
+  assert.equal(requests[0].options.method, 'GET');
+  assert.equal(requests[0].options.headers['X-API-Key'], 'sk_test');
+});
+
+test('web calls stay off without an API key or an agent', async () => {
+  const noRequest = async () => { throw new Error('no request expected'); };
+  assert.equal(createSarvamClient({ ...config, agentId: 'A', apiKey: '' }, noRequest).canStartWebCalls, false);
+  const noAgent = createSarvamClient(config, noRequest);
+  assert.equal(noAgent.canStartWebCalls, false);
+  await assert.rejects(noAgent.getWebCallUrl(), /SARVAM_AGENT_ID/);
+});

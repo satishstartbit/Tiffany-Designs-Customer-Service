@@ -1,13 +1,19 @@
+const path = require('path');
 const express = require('express');
 const { requireSecret, requireAnySecret } = require('./middleware/auth');
-const { createCallbackLimiter } = require('./rateLimit');
+const { createCallbackLimiter, createWebCallLimiter } = require('./rateLimit');
 const ordersRouter = require('./routes/orders');
 const callsRouter = require('./routes/calls');
 const agentToolsRouter = require('./routes/agentTools');
 const webhooksRouter = require('./routes/webhooks');
+const webCallsRouter = require('./routes/webCalls');
 
-function createApp({ crm, sarvam, scheduler, config, checkSalesforce, limiter, now = () => Date.now(), logger = console }) {
+const PUBLIC_DIR = path.join(__dirname, '..', 'public');
+
+function createApp({ crm, sarvam, scheduler, config, checkSalesforce, limiter, webCallLimiter, now = () => Date.now(), logger = console }) {
   const app = express();
+  // Render and Vercel sit behind proxies; the visitor address comes from X-Forwarded-For.
+  app.set('trust proxy', true);
   app.use(express.json({ limit: '2mb' }));
 
   const internalKey = requireSecret(() => config.internalApiKey, (req) => req.get('x-api-key'), 'INTERNAL_API_KEY');
@@ -55,6 +61,13 @@ function createApp({ crm, sarvam, scheduler, config, checkSalesforce, limiter, n
   app.get('/api/cron/jobs', cronSecret, async (req, res) => res.json(await scheduler.tick()));
   app.use('/api/agent', agentSecret, agentToolsRouter({ crm, now }));
   app.use('/api/webhooks', webhookToken, webhooksRouter({ crm, now, logger }));
+  app.use('/api/sarvam', webCallsRouter({
+    sarvam,
+    config,
+    logger,
+    limiter: webCallLimiter || createWebCallLimiter({ perHour: config.webCalls.maxPerHour, perDay: config.webCalls.maxPerDay, now }),
+  }));
+  app.use(express.static(PUBLIC_DIR, { index: false }));
 
   app.use((req, res) => res.status(404).json({ error: 'Not found' }));
 

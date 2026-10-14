@@ -64,7 +64,23 @@ function createSarvamClient({ baseUrl, apiKey, orgId, workspaceId, agentId, appV
     return { attemptId: data?.attempt_id || null };
   }
 
-  return { addToCampaign, startCall, canStartCalls };
+  const canStartWebCalls = Boolean(apiKey && orgId && workspaceId && agentId);
+
+  // A short-lived signed WebSocket URL for one browser call with this agent. Sarvam's status and body are returned
+  // as they are, because the website widget reads them directly.
+  async function getWebCallUrl(query = {}) {
+    if (!canStartWebCalls) {
+      throw new Error('Web calls need SARVAM_API_KEY, SARVAM_ORG_ID, SARVAM_WORKSPACE_ID and SARVAM_AGENT_ID');
+    }
+    const params = new URLSearchParams(strings(query)).toString();
+    const res = await fetchImpl(
+      `${baseUrl}/api/app-runtime/orgs/${orgId}/workspaces/${workspaceId}/apps/${agentId}/url${params ? `?${params}` : ''}`,
+      { method: 'GET', headers: { 'X-API-Key': apiKey } },
+    );
+    return { status: res.status, body: await res.text(), retryAfter: res.headers.get('retry-after') };
+  }
+
+  return { addToCampaign, startCall, canStartCalls, getWebCallUrl, canStartWebCalls };
 }
 
 module.exports = { createSarvamClient, cohortName };

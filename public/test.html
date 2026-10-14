@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Tiffany Designs voice agent test</title>
+    <style>
+        body {
+            font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+            margin: 0;
+            padding: 2rem;
+            color: #2b2b2b;
+            background: #f8f4ee;
+        }
+
+        h1 {
+            font-weight: 600;
+        }
+
+        .warning {
+            padding: 1rem;
+            border-left: 4px solid #b3261e;
+            background: #fdecea;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>Tiffany Designs voice agent</h1>
+    <p>Click <strong>Begin call</strong> at the bottom right and allow the microphone when your browser asks.</p>
+    <p id="opened-as-file" class="warning" hidden>
+        This page was opened as a file, so the call button cannot reach the server.
+        Start the server with <code>npm run dev</code> and open
+        <!-- <a href="http://localhost:8081/test.html">http://localhost:8081/test.html</a> instead. -->
+    </p>
+
+    <!-- The Sarvam API key stays on the server: the widget asks /api/sarvam/ for a signed call URL. -->
+    <sarvam-widget session-endpoint="/api/sarvam/" app-id="Tiffany-Des-0db8e21d-e099"
+        org-id="01a0c3a4-b74a-7441-813a-d7d799923769" workspace-id="01a0c3ef-4753-7a81-a20c-07f739dcf1d6"
+        button-text="Begin call" interaction-type="call" button-color="#6b3a1e" position="bottom-right">
+    </sarvam-widget>
+
+    <script>
+        const widget = document.querySelector('sarvam-widget');
+        // session-endpoint is relative, so it only works when the page comes from the Node server.
+        if (location.protocol === 'file:') {
+            document.getElementById('opened-as-file').hidden = false;
+            widget.remove();
+        } else {
+            // The user id is what Sarvam's Log Analyser searches by; one per visit, findable by its prefix.
+            widget.setAttribute('user-id', `tiffany-web-${Date.now()}`);
+        }
+    </script>
+    <script src="https://unpkg.com/sarvam-convai-embed@1.0.20/index.js"></script>
+</body>
+
+</html>

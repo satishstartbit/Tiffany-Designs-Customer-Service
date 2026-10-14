@@ -95,4 +95,19 @@ function createCallbackLimiter({ perHour, perDay, now, redis, prefix }) {
   return redis ? createRedisRateLimiter({ redis, rules, prefix, now }) : createRateLimiter({ rules, now });
 }
 
-module.exports = { createRateLimiter, createRedisRateLimiter, createCallbackLimiter };
+// Browser calls from the website widget: per visitor address, and overall so a flood cannot run up the bill.
+function webCallRules({ perHour, perDay }) {
+  return [
+    { name: 'web_ip_10min', key: (c) => c.ip, limit: 5, windowMs: 10 * MINUTE },
+    { name: 'web_ip_day', key: (c) => c.ip, limit: 20, windowMs: DAY },
+    { name: 'web_all_hour', key: () => 'all', limit: perHour, windowMs: HOUR },
+    { name: 'web_all_day', key: () => 'all', limit: perDay, windowMs: DAY },
+  ];
+}
+
+function createWebCallLimiter({ perHour, perDay, now, redis, prefix }) {
+  const rules = webCallRules({ perHour, perDay });
+  return redis ? createRedisRateLimiter({ redis, rules, prefix, now }) : createRateLimiter({ rules, now });
+}
+
+module.exports = { createRateLimiter, createRedisRateLimiter, createCallbackLimiter, createWebCallLimiter };

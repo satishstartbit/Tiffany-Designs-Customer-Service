@@ -10,8 +10,8 @@ Agent `Tiffany-Des-0db8e21d-e099`, committed as **version 3**: the same instruct
 | --- | --- | --- |
 | 1 | AI voice agent and call handling | Phases 1 to 4 and 11; `resolve_date` |
 | 2 | After-hours and holiday calls | `check_service_hours` (open now, next opening, Salesforce holidays); requests are registered at any hour |
-| 3 | Customer identification and contact management | `find_customer`; `save_customer_details` (Phase 13) |
-| 4 | Order and purchase identification | `find_order` (ERP id, invoice or order number, with a second factor) |
+| 3 | Customer identification and contact management | `find_customer` (by mobile, or by full name and PIN code); `save_customer_details` (Phase 13) |
+| 4 | Order and purchase identification | `find_order` (ERP id, invoice or order number, with the mobile, the invoice or the full name on the order) |
 | 5 | Intent detection and case classification | Phase 4; the issue type sent with each request |
 | 6 | Installation requests | `book_installation`, `resolve_date` |
 | 7 | Damage and defect complaints | `find_parts`, `register_service_request` |
@@ -51,14 +51,14 @@ All tools POST to the server with the `x-agent-secret` header and speak the `mes
 
 | Tool | Endpoint | What it does |
 | --- | --- | --- |
-| `find_customer` | `/api/agent/customer-lookup` | Customer and recent orders by mobile |
-| `find_order` | `/api/agent/order-lookup` | Order by `TD-ORD` id or invoice number, verified in Node against the invoice number or a mobile on the order's account |
+| `find_customer` | `/api/agent/customer-lookup` | Customer and recent orders by mobile. Without the mobile (draft 4): by full name and a PIN code on the customer's address or orders, only when exactly one customer matches, and then with their open requests too |
+| `find_order` | `/api/agent/order-lookup` | Order by `order_id`, `order_number` (phone orders, for example 122 or ORD-00000122) or `invoice_number`, verified in Node against the invoice number, a mobile on the order's account, or (draft 4) the full name on the order. `phone` is optional in draft 4; a reference with no proof is refused before any lookup |
 | `find_parts` | `/api/agent/part-lookup` | Parts and part numbers (`Product_Component__c`) for the order or product |
 | `resolve_date` | `/api/agent/resolve-date` | "tomorrow", "Saturday", "17/10" → calendar date in IST; refuses past dates. The model never does date arithmetic |
 | `register_service_request` | `/api/agent/cases` | Node creates the classified Salesforce Case (record type, order, contact, part, `Origin = Phone`); the routing flow picks the queue |
 | `book_installation` | `/api/agent/installation` | Installation or reschedule request with the preferred slot |
 | `request_human_callback` | `/api/agent/escalate` | Escalated case for a service team callback (no live transfer yet) |
-| `check_request_status` | `/api/agent/case-status` | Open cases, service visit and replacement shipment; only the caller's own cases |
+| `check_request_status` | `/api/agent/case-status` | Open cases, service visit and replacement shipment; only the caller's own cases. Without the mobile (draft 4): the request number with the full name on it or the order id it is about |
 | `find_products` | `/api/agent/products` | Products and list prices from the standard price book (codes starting `TD-`); generic words such as "furniture" list everything |
 | `place_order` | `/api/agent/orders` | Draft `Order` with its lines at list price, on the account of the given mobile (or a new account), shipped to the given address. The sales team confirms price, delivery and payment |
 | `check_service_hours` (draft 4) | `/api/agent/service-hours` | Whether the team is working now and until when, or when it is back, from the default business hours and `Holiday` records, plus the weekly hours |
@@ -109,6 +109,17 @@ New module tools (draft version 4, 2026-10-14 at 8:16 pm IST, through a test tun
 | "I am moving to Jaipur, PIN 302012" | `check_service_area`: an authorised service partner handles it |
 
 The review task was deleted afterwards. A direct test of `save_customer_details` for a new number created the account and contact with email, other phone and mailing address (state code HR). It was also deleted afterwards.
+
+Callers without the registered mobile (draft version 4, 2026-10-14 at 9:04 to 9:09 pm IST, through a test tunnel, real Salesforce, read-only):
+
+| Scenario | Tool and result |
+| --- | --- |
+| "I don't remember my registered number", then name Aarav Sharma and PIN 110001 | `find_customer` (name, PIN): two orders and three open requests; then `find_order` (TD-ORD-1007, name): Demo Kids Bed, shipped; then `check_request_status` (1063, name): New |
+| Meera Iyer with order TD-ORD-1004, no mobile | After the instruction fix, one turn: `find_order` (order, name): Demo Shoe Cabinet, delivered 22 September; then request 1061 by number and name: New |
+| Order TD-ORD-1001 with another person's name (Rahul Mehta) and a wrong PIN | Nothing found; the agent refused the contents and the delivery address |
+| Order TD-ORD-1001 with the registered mobile | Unchanged: Demo Study Table, delivered 21 September |
+
+The first runs asked for a PIN code even when the caller had already given the name and an order id. Phase 5 now lists the no-mobile options explicitly, and a speaking rule stops the agent asking again for details already given.
 
 ## Re-pointing the tools after deployment
 

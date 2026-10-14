@@ -434,6 +434,51 @@ test.describe('agent tools used during a call', () => {
     assert.equal(noPhone.body.found, false, 'the invoice number alone is not enough');
   });
 
+  test('without the mobile, an order is found by order id, order number or invoice number with the full name', async (t) => {
+    const s = await startTestServer();
+    t.after(s.close);
+    const lookup = (body) => s.call('POST', '/api/agent/order-lookup', { body, headers: s.agent }).then((r) => r.body);
+
+    const byId = await lookup({ order_id: 'TD-ORD-1111', customer_name: 'Meera Iyer' });
+    assert.equal(byId.found, true);
+    assert.equal(byId.verified_by, 'name');
+
+    const byInvoice = await lookup({ invoice_number: 'INV-1111', customer_name: 'Meera Iyer' });
+    assert.equal(byInvoice.order_id, 'TD-ORD-1111');
+
+    const idAndInvoice = await lookup({ order_id: 'TD-ORD-1111', invoice_number: 'INV-1111' });
+    assert.equal(idAndInvoice.found, true, 'the order id with its invoice number is proof enough');
+
+    for (const said of ['ORD-00000122', '122', 'order number 122']) {
+      const phoneOrder = await lookup({ order_number: said, customer_name: 'Meera Iyer' });
+      assert.equal(phoneOrder.found, true, said);
+      assert.equal(phoneOrder.order_id, null);
+      assert.equal(phoneOrder.order_number, '00000122');
+      assert.equal(phoneOrder.message, 'Order 122 for Demo Kids Bed is being processed.');
+    }
+    assert.equal((await lookup({ order_id: 'ORD-00000122', phone: '9820011111' })).found, true, 'an order number said as the order id still works');
+
+    const invoiceAsId = await lookup({ order_id: 'INV-2001', customer_name: 'Aarav Sharma' });
+    assert.equal(invoiceAsId.order_id, 'TD-ORD-1001', 'an invoice number said as the order id is read as the invoice');
+  });
+
+  test('an order reference alone, or with the wrong name, reveals nothing', async (t) => {
+    const s = await startTestServer();
+    t.after(s.close);
+    const lookup = (body) => s.call('POST', '/api/agent/order-lookup', { body, headers: s.agent }).then((r) => r.body);
+
+    const alone = await lookup({ order_id: 'TD-ORD-1111' });
+    assert.equal(alone.found, false);
+    assert.match(alone.message, /registered mobile number, the invoice number or the full name/);
+    assert.equal((await lookup({ order_number: '122' })).found, false);
+
+    const wrongName = await lookup({ order_id: 'TD-ORD-1111', customer_name: 'Aarav Sharma' });
+    const unknown = await lookup({ order_id: 'TD-ORD-9999', customer_name: 'Meera Iyer' });
+    assert.equal(wrongName.found, false);
+    assert.equal(wrongName.message, unknown.message, 'unknown and unverified orders look the same');
+    assert.equal(wrongName.delivery_status, undefined);
+  });
+
   test('part lookup lists parts with part numbers for the order or a product', async (t) => {
     const s = await startTestServer();
     t.after(s.close);
@@ -460,6 +505,66 @@ test.describe('agent tools used during a call', () => {
     const none = await s.call('POST', '/api/agent/order-lookup', { body: { phone: '9000000000' }, headers: s.agent });
     assert.equal(none.body.found, false);
     assert.equal((await s.call('POST', '/api/agent/order-lookup', { body: {}, headers: s.agent })).body.found, false);
+  });
+
+  test('without the mobile, a customer is found by full name and PIN code, with orders and open requests', async (t) => {
+    const s = await startTestServer();
+    t.after(s.close);
+    const res = await s.call('POST', '/api/agent/customer-lookup', { headers: s.agent, body: { customer_name: 'Arav Sharma', postal_code: '110 001' } });
+    assert.equal(res.body.found, true);
+    assert.equal(res.body.verified_by, 'name_and_pin');
+    assert.equal(res.body.latest_order_id, 'TD-ORD-1001');
+    assert.equal(res.body.message,
+      'Customer Aarav Sharma found by name and PIN code. Recent orders: TD-ORD-1001, delivered. Open requests: 1063 for Installation, Appointment Scheduled.');
+
+    const wrongPin = await s.call('POST', '/api/agent/customer-lookup', { headers: s.agent, body: { customer_name: 'Aarav Sharma', postal_code: '560001' } });
+    assert.equal(wrongPin.body.found, false);
+    assert.match(wrongPin.body.message, /^No single customer matches this name and PIN code/);
+    const firstNameOnly = await s.call('POST', '/api/agent/customer-lookup', { headers: s.agent, body: { customer_name: 'Aarav', postal_code: '110001' } });
+    assert.match(firstNameOnly.body.message, /first and last name/);
+    const nothing = await s.call('POST', '/api/agent/customer-lookup', { headers: s.agent, body: {} });
+    assert.equal(nothing.body.message, 'The registered mobile number is needed, or the full name with the six digit PIN code.');
+  });
+
+  test('without the mobile, an order is shown with the full name on it', async (t) => {
+    const s = await startTestServer();
+    t.after(s.close);
+    const byId = await s.call('POST', '/api/agent/order-lookup', { headers: s.agent, body: { order_id: 'TD-ORD-1001', customer_name: 'Aarav Sharma' } });
+    assert.equal(byId.body.found, true);
+    assert.equal(byId.body.products, 'Demo 3-Door Wardrobe');
+    const byInvoice = await s.call('POST', '/api/agent/order-lookup', { headers: s.agent, body: { invoice_number: 'INV-1111', customer_name: 'meera iyer' } });
+    assert.equal(byInvoice.body.found, true);
+    assert.equal(byInvoice.body.order_id, 'TD-ORD-1111');
+
+    for (const body of [
+      { order_id: 'TD-ORD-1001', customer_name: 'Meera Iyer' },
+      { order_id: 'TD-ORD-1001', customer_name: 'Aarav' },
+      { order_id: 'TD-ORD-1001', customer_name: 'Demo Customer' },
+      { invoice_number: 'INV-1111' },
+    ]) {
+      const res = await s.call('POST', '/api/agent/order-lookup', { headers: s.agent, body });
+      assert.equal(res.body.found, false, JSON.stringify(body));
+      assert.equal(res.body.delivery_status, undefined, 'nothing about the order is given away');
+    }
+  });
+
+  test('without the mobile, a request is shown with its number and the full name or the order id', async (t) => {
+    const s = await startTestServer();
+    t.after(s.close);
+    const byName = await s.call('POST', '/api/agent/case-status', { headers: s.agent, body: { case_number: '1063', customer_name: 'Aarav Sharma' } });
+    assert.equal(byName.body.found, true);
+    assert.equal(byName.body.status, 'Appointment Scheduled');
+    const byOrder = await s.call('POST', '/api/agent/case-status', { headers: s.agent, body: { case_number: '1060', order_id: 'td-ord-1111' } });
+    assert.equal(byOrder.body.found, true);
+    assert.equal(byOrder.body.case_number, '00001060');
+
+    const wrongName = await s.call('POST', '/api/agent/case-status', { headers: s.agent, body: { case_number: '1063', customer_name: 'Meera Iyer' } });
+    assert.deepEqual(wrongName.body, { found: false, message: 'No request matches these details.' });
+    const otherOrder = await s.call('POST', '/api/agent/case-status', { headers: s.agent, body: { case_number: '1063', order_id: 'TD-ORD-1111' } });
+    assert.equal(otherOrder.body.found, false);
+    const numberOnly = await s.call('POST', '/api/agent/case-status', { headers: s.agent, body: { case_number: '1063' } });
+    assert.equal(numberOnly.body.found, false);
+    assert.match(numberOnly.body.message, /request number with the full name or the order id/);
   });
 
   test('an order without an ERP id is found by its order number, with the same second factor', async (t) => {
@@ -1006,5 +1111,130 @@ test.describe('Sarvam call-end webhook', () => {
     const s = await startTestServer();
     t.after(s.close);
     assert.equal((await s.call('POST', s.hookPath('/api/webhooks/sarvam'), { body: { hello: 1 } })).status, 400);
+  });
+});
+
+test.describe('website call widget', () => {
+  const sessionPath = '/api/sarvam/orgs/org-1/workspaces/ws-1/apps/Tiffany-Test-Agent/url';
+
+  test('the widget gets Sarvam’s signed URL without ever seeing the API key', async (t) => {
+    const s = await startTestServer();
+    t.after(s.close);
+    const res = await s.call('GET', `${sessionPath}?interaction_type=call&version=1`);
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.body, { url: 'wss://apps.sarvam.test/session?token=t1', reference_id: 'ref-1', expires_at: '2026-10-14T07:00:00Z' });
+    assert.equal(res.headers.get('cache-control'), 'no-store');
+    assert.deepEqual(s.sarvam.webSessions, [{ interaction_type: 'call', version: 3 }], 'the server picks the agent version, not the browser');
+  });
+
+  test('only this project’s agent can be reached through the endpoint', async (t) => {
+    const s = await startTestServer();
+    t.after(s.close);
+    for (const path of [
+      '/api/sarvam/orgs/org-1/workspaces/ws-1/apps/Arogaya-Hos-ec23d46a-0bcc/url',
+      '/api/sarvam/orgs/org-2/workspaces/ws-1/apps/Tiffany-Test-Agent/url',
+      '/api/sarvam/orgs/org-1/workspaces/ws-2/apps/Tiffany-Test-Agent/url',
+    ]) {
+      assert.equal((await s.call('GET', path)).status, 404, path);
+    }
+    assert.equal(s.sarvam.webSessions.length, 0);
+  });
+
+  test('a visitor can start 5 calls in 10 minutes', async (t) => {
+    const s = await startTestServer();
+    t.after(s.close);
+    for (let i = 0; i < 5; i += 1) assert.equal((await s.call('GET', sessionPath)).status, 200);
+    const blocked = await s.call('GET', sessionPath);
+    assert.equal(blocked.status, 429);
+    assert.ok(Number(blocked.headers.get('retry-after')) > 0);
+    assert.equal((await s.call('GET', sessionPath, { headers: { 'x-forwarded-for': '203.0.113.9' } })).status, 200, 'another visitor is not affected');
+    s.clock.now += 10 * 60 * 1000 + 1;
+    assert.equal((await s.call('GET', sessionPath)).status, 200, 'allowed again after ten minutes');
+  });
+
+  test('an overall hourly cap stops a flood from many addresses', async (t) => {
+    const s = await startTestServer({ config: testConfig({ webCalls: { maxPerHour: 2, maxPerDay: 200 } }) });
+    t.after(s.close);
+    for (const ip of ['203.0.113.1', '203.0.113.2']) {
+      assert.equal((await s.call('GET', sessionPath, { headers: { 'x-forwarded-for': ip } })).status, 200);
+    }
+    assert.equal((await s.call('GET', sessionPath, { headers: { 'x-forwarded-for': '203.0.113.3' } })).status, 429);
+    assert.equal(s.sarvam.webSessions.length, 2);
+  });
+
+  test('Sarvam’s refusals reach the widget unchanged, and an outage becomes a 502', async (t) => {
+    const s = await startTestServer();
+    t.after(s.close);
+    s.sarvam.webResponse = { status: 401, body: '{"detail":"Invalid API key"}', retryAfter: null };
+    const refused = await s.call('GET', sessionPath);
+    assert.equal(refused.status, 401);
+    assert.deepEqual(refused.body, { detail: 'Invalid API key' });
+
+    s.sarvam.webResponse = { status: 429, body: '{"detail":"slow down"}', retryAfter: '30' };
+    const limited = await s.call('GET', sessionPath);
+    assert.equal(limited.status, 429);
+    assert.equal(limited.headers.get('retry-after'), '30');
+
+    s.sarvam.failNext = 1;
+    const down = await s.call('GET', sessionPath);
+    assert.equal(down.status, 502);
+    assert.equal(down.body.error, 'upstream_failed');
+  });
+
+  test('without an API key the endpoint says so instead of failing in the browser', async (t) => {
+    const s = await startTestServer({ webCalls: false });
+    t.after(s.close);
+    const res = await s.call('GET', sessionPath);
+    assert.equal(res.status, 503);
+    assert.equal(res.body.error, 'not_configured');
+  });
+
+  test('the test page is served with the widget and without any key', async (t) => {
+    const s = await startTestServer();
+    t.after(s.close);
+    const page = await s.call('GET', '/test.html');
+    assert.equal(page.status, 200);
+    assert.match(page.headers.get('content-type'), /text\/html/);
+    assert.match(page.text, /<sarvam-widget[\s\S]*session-endpoint="https:\/\/tiffany-designs-customer-service\.onrender\.com\/api\/sarvam\/"/,
+      'a full address, so a copy on another computer or web server still reaches the Tiffany server');
+    assert.match(page.text, /app-id="Tiffany-Des-0db8e21d-e099"/);
+    assert.doesNotMatch(page.text, /api-key=|sk_/, 'no API key in the page');
+  });
+
+  test('a page on another site may ask for a session (CORS), including the browser preflight', async (t) => {
+    const s = await startTestServer();
+    t.after(s.close);
+    const preflight = await s.call('OPTIONS', sessionPath, {
+      headers: { origin: 'https://localhost', 'access-control-request-method': 'GET', 'access-control-request-headers': 'x-api-key' },
+    });
+    assert.equal(preflight.status, 204);
+    assert.equal(preflight.headers.get('access-control-allow-origin'), '*');
+    assert.match(preflight.headers.get('access-control-allow-headers'), /X-API-Key/);
+    assert.equal(s.sarvam.webSessions.length, 0, 'the preflight starts nothing');
+
+    const fromOtherSite = await s.call('GET', sessionPath, { headers: { origin: 'https://localhost', 'x-api-key': '' } });
+    assert.equal(fromOtherSite.status, 200);
+    assert.equal(fromOtherSite.headers.get('access-control-allow-origin'), '*');
+    assert.equal(fromOtherSite.headers.get('access-control-expose-headers'), 'Retry-After');
+
+    const fromFile = await s.call('GET', sessionPath, { headers: { origin: 'null' } });
+    assert.equal(fromFile.status, 200, 'a page opened from disk works too');
+  });
+
+  test('with an allowed-sites list, other websites are refused', async (t) => {
+    const s = await startTestServer({ config: testConfig({ webCalls: { maxPerHour: 30, maxPerDay: 200, allowedOrigins: 'https://www.tiffany.example, https://shop.tiffany.example/' } }) });
+    t.after(s.close);
+    const ours = await s.call('GET', sessionPath, { headers: { origin: 'https://shop.tiffany.example' } });
+    assert.equal(ours.status, 200);
+    assert.equal(ours.headers.get('access-control-allow-origin'), 'https://shop.tiffany.example');
+    assert.match(ours.headers.get('vary'), /Origin/);
+
+    const other = await s.call('GET', sessionPath, { headers: { origin: 'https://copycat.example' } });
+    assert.equal(other.status, 403);
+    assert.equal(other.headers.get('access-control-allow-origin'), null);
+    assert.equal((await s.call('OPTIONS', sessionPath, { headers: { origin: 'https://copycat.example' } })).status, 403);
+
+    assert.equal((await s.call('GET', sessionPath)).status, 200, 'pages on this server send no Origin and still work');
+    assert.equal(s.sarvam.webSessions.length, 2);
   });
 });

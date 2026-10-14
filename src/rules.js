@@ -64,4 +64,44 @@ function normalizeIssueType(value) {
   return ISSUE_TYPES.includes(resolved) ? resolved : null;
 }
 
-module.exports = { ISSUE_TYPES, normalizePhone, lastTenDigits, normalizeIssueType };
+// Words that say nothing about who someone is: titles, and the "Demo Customer - " prefix on the org's sample accounts.
+const NAME_FILLER = new Set(['mr', 'mrs', 'ms', 'miss', 'dr', 'shri', 'smt', 'sri', 'ji', 'demo', 'customer', 'test']);
+
+function nameWords(name) {
+  return String(name || '').toLowerCase().normalize('NFKD').replace(/[^a-z\s]/g, ' ')
+    .split(/\s+/).filter((w) => w.length >= 2 && !NAME_FILLER.has(w));
+}
+
+// Equal, or one letter added, dropped or changed in a word of four letters or more ("Arav" for "Aarav").
+function sameWord(a, b) {
+  if (a === b) return true;
+  if (Math.min(a.length, b.length) < 4 || Math.abs(a.length - b.length) > 1) return false;
+  let i = 0;
+  let j = 0;
+  let edits = 0;
+  while (i < a.length && j < b.length) {
+    if (a[i] === b[j]) {
+      i += 1;
+      j += 1;
+    } else {
+      edits += 1;
+      if (edits > 1) return false;
+      if (a.length > b.length) i += 1;
+      else if (b.length > a.length) j += 1;
+      else {
+        i += 1;
+        j += 1;
+      }
+    }
+  }
+  return edits + (a.length - i) + (b.length - j) <= 1;
+}
+
+// A caller's spoken name counts as a match only with a first and a last name, each found on the record.
+function namesMatch(spoken, recorded) {
+  const said = nameWords(spoken);
+  const known = nameWords(recorded);
+  return said.length >= 2 && said.every((w) => known.some((k) => sameWord(w, k)));
+}
+
+module.exports = { ISSUE_TYPES, normalizePhone, lastTenDigits, normalizeIssueType, nameWords, namesMatch };
