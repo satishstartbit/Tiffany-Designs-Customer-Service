@@ -1,0 +1,629 @@
+const { lastTenDigits } = require('../rules');
+const { todayInIst } = require('../dates');
+const { createBusinessHours } = require('./businessHours');
+const { parseItems } = require('./orderItems');
+
+// Limits on what the voice agent may order in one call; bigger orders go to the sales team.
+const MAX_ORDER_LINES = 10;
+const MAX_LINE_QUANTITY = 10;
+const CATALOG_TTL_MS = 10 * 60 * 1000;
+const STATE_ALIASES = { 'new delhi': 'delhi', 'nct of delhi': 'delhi', orissa: 'odisha', pondicherry: 'puducherry' };
+// Words that say nothing about which product is meant; a query of only these lists the whole catalog.
+const GENERIC_WORDS = new Set([
+  'furniture', 'product', 'item', 'thing', 'all', 'any', 'anything', 'everything', 'something', 'the', 'and', 'for',
+  'with', 'want', 'need', 'buy', 'order', 'new', 'tiffany', 'design', 'demo', 'have', 'you', 'what', 'which', 'show',
+]);
+
+// Case record type for each Service_Type__c, by developer name.
+const RECORD_TYPE_BY_SERVICE_TYPE = {
+  Installation: 'Installation_Request',
+  'Damage or Defect': 'Damage_Defect_Complaint',
+  Replacement: 'Replacement_Request',
+  'General Query': 'General_Service_Query',
+};
+
+// Voice issue types -> the org's restricted Service_Type__c / Service_Sub_Type__c values.
+const SERVICE_TYPES = {
+  installation: { serviceType: 'Installation', subType: 'Initial Installation' },
+  installation_reschedule: { serviceType: 'Installation', subType: 'Installation Rescheduling' },
+  installation_followup: { serviceType: 'Installation', subType: 'Installation Follow-up' },
+  reinstallation: { serviceType: 'Installation', subType: 'Re-installation' },
+  damaged: { serviceType: 'Damage or Defect', subType: 'Damaged Component' },
+  delivery_damage: { serviceType: 'Damage or Defect', subType: 'Damage During Delivery' },
+  defective: { serviceType: 'Damage or Defect', subType: 'Defective Component' },
+  missing_parts: { serviceType: 'Damage or Defect', subType: 'Missing Component' },
+  wrong_part: { serviceType: 'Damage or Defect', subType: 'Wrong Component' },
+  quality_issue: { serviceType: 'Damage or Defect', subType: 'Product Quality Issue' },
+  replacement: { serviceType: 'Replacement', subType: null },
+  return: { serviceType: 'Replacement', subType: null },
+  general: { serviceType: 'General Query', subType: null },
+  escalation: { serviceType: 'General Query', subType: null },
+};
+
+const ORDER_FIELDS = [
+  'Id', 'OrderNumber', 'ERP_Order_Id__c', 'Invoice_Number__c', 'Order_Source__c', 'Delivery_Status__c',
+  'Delivery_Date__c', 'AccountId', 'Account.Name', 'CustomerAuthorizedById', 'ShippingCity', 'ShippingPostalCode',
+  'ShippingState',
+].join(', ');
+
+const CONTACT_FIELDS = 'Id, FirstName, LastName, AccountId, MobilePhone, Phone, MailingCity, MailingPostalCode';
+
+const VISIT_SUBQUERY = '(SELECT Id, Status__c, Scheduled_Start__c, Technician__r.Name FROM Service_Visits__r ORDER BY Scheduled_Start__c DESC NULLS LAST LIMIT 1)';
+const SHIPMENT_SUBQUERY = '(SELECT Id, Shipment_Status__c, Expected_Delivery_Date__c, Courier__c, Tracking_Number__c, Component__r.Name FROM Replacement_Shipments__r ORDER BY CreatedDate DESC LIMIT 1)';
+
+function escapeSoql(value) {
+  return String(value).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+}
+
+function escapeSoqlLike(value) {
+  return escapeSoql(value).replace(/[%_]/g, '\\$&');
+}
+
+function escapeSosl(value) {
+  return String(value).replace(/[?&|!{}[\]()^~*:\\"'+-]/g, '\\$&');
+}
+
+function soqlDateTime(value) {
+  return new Date(value).toISOString().replace(/\.\d{3}Z$/, 'Z');
+}
+
+function toOrder(row, items = []) {
+  if (!row) return null;
+  return {
+    id: row.Id,
+    orderNumber: row.OrderNumber,
+    erpOrderId: row.ERP_Order_Id__c,
+    invoiceNumber: row.Invoice_Number__c,
+    orderSource: row.Order_Source__c,
+    deliveryStatus: row.Delivery_Status__c,
+    deliveryDate: row.Delivery_Date__c,
+    accountId: row.AccountId,
+    accountName: row.Account?.Name || null,
+    contactId: row.CustomerAuthorizedById,
+    city: row.ShippingCity,
+    postalCode: row.ShippingPostalCode,
+    state: row.ShippingState,
+    items,
+    productSummary: items.map((i) => i.productName).filter(Boolean).join(', '),
+  };
+}
+
+function toContact(row) {
+  if (!row) return null;
+  return {
+    id: row.Id,
+    name: [row.FirstName, row.LastName].filter(Boolean).join(' '),
+    firstName: row.FirstName,
+    accountId: row.AccountId,
+    mobile: row.MobilePhone,
+    phone: row.Phone,
+    city: row.MailingCity,
+    postalCode: row.MailingPostalCode,
+  };
+}
+
+function toVisit(record) {
+  if (!record) return null;
+  return { status: record.Status__c, scheduledStart: record.Scheduled_Start__c, technician: record.Technician__r?.Name || null };
+}
+
+function toShipment(record) {
+  if (!record) return null;
+  return {
+    id: record.Id,
+    status: record.Shipment_Status__c,
+    expectedDate: record.Expected_Delivery_Date__c,
+    courier: record.Courier__c,
+    trackingNumber: record.Tracking_Number__c,
+    component: record.Component__r?.Name || null,
+  };
+}
+
+function compact(fields) {
+  return Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined && v !== null && v !== ''));
+}
+
+function createCrm({
+  salesforce,
+  now = () => Date.now(),
+  businessHours = createBusinessHours({ salesforce, now }),
+  customerAccountRecordType = '',
+  productCodePrefix = 'TD-',
+}) {
+  let recordTypes = null;
+  let customerRecordTypeId;
+  let catalogCache = null;
+  let indianStates = null;
+
+  // Without a configured customer record type, new accounts get the org default (today "Service Provider").
+  async function accountRecordTypeId() {
+    if (!customerAccountRecordType) return undefined;
+    if (customerRecordTypeId === undefined) {
+      const [row] = await salesforce.query(
+        `SELECT Id FROM RecordType WHERE SobjectType = 'Account' AND DeveloperName = '${escapeSoql(customerAccountRecordType)}' AND IsActive = true LIMIT 1`,
+      );
+      customerRecordTypeId = row?.Id || null;
+    }
+    return customerRecordTypeId || undefined;
+  }
+
+  async function caseRecordTypeId(serviceType) {
+    if (!recordTypes) {
+      const rows = await salesforce.query("SELECT Id, DeveloperName FROM RecordType WHERE SobjectType = 'Case' AND IsActive = true");
+      recordTypes = Object.fromEntries(rows.map((r) => [r.DeveloperName, r.Id]));
+    }
+    return recordTypes[RECORD_TYPE_BY_SERVICE_TYPE[serviceType]] || null;
+  }
+
+  async function findContactByPhone(phone) {
+    const digits = lastTenDigits(phone);
+    if (!digits) return null;
+    const results = await salesforce.search(
+      `FIND {${escapeSosl(digits)}} IN PHONE FIELDS RETURNING Contact(${CONTACT_FIELDS} ORDER BY CreatedDate) LIMIT 5`,
+    );
+    const match = results.find((r) => [r.MobilePhone, r.Phone].some((p) => lastTenDigits(p) === digits));
+    if (match) return toContact(match);
+    // Search indexing lags behind new records, so a contact created moments ago in this call is matched exactly.
+    const forms = [`+91${digits}`, digits].map((f) => `'${f}'`).join(', ');
+    const rows = await salesforce.query(
+      `SELECT ${CONTACT_FIELDS} FROM Contact WHERE MobilePhone IN (${forms}) OR Phone IN (${forms}) ORDER BY CreatedDate LIMIT 1`,
+    );
+    return toContact(rows[0] || null);
+  }
+
+  async function getContactById(contactId) {
+    const rows = await salesforce.query(`SELECT ${CONTACT_FIELDS} FROM Contact WHERE Id = '${escapeSoql(contactId)}' LIMIT 1`);
+    return toContact(rows[0]);
+  }
+
+  async function getAccountContact(accountId) {
+    const rows = await salesforce.query(
+      `SELECT ${CONTACT_FIELDS} FROM Contact WHERE AccountId = '${escapeSoql(accountId)}' AND (MobilePhone != null OR Phone != null) ORDER BY CreatedDate LIMIT 1`,
+    );
+    return toContact(rows[0]);
+  }
+
+  async function getOrderItems(orderId) {
+    const rows = await salesforce.query(
+      `SELECT Product2Id, Product2.Name, Product2.ProductCode, Quantity FROM OrderItem WHERE OrderId = '${escapeSoql(orderId)}'`,
+    );
+    return rows.map((r) => ({ productId: r.Product2Id, productName: r.Product2?.Name, productCode: r.Product2?.ProductCode, quantity: r.Quantity }));
+  }
+
+  async function queryOrder(where) {
+    const rows = await salesforce.query(`SELECT ${ORDER_FIELDS} FROM Order WHERE ${where} LIMIT 1`);
+    if (!rows[0]) return null;
+    return toOrder(rows[0], await getOrderItems(rows[0].Id));
+  }
+
+  const getOrderById = (orderId) => queryOrder(`Id = '${escapeSoql(orderId)}'`);
+  const getOrderByErpId = (erpOrderId) => queryOrder(`ERP_Order_Id__c = '${escapeSoql(String(erpOrderId).trim())}'`);
+  const getOrderByInvoice = (invoiceNumber) => queryOrder(`Invoice_Number__c = '${escapeSoql(String(invoiceNumber).trim())}'`);
+
+  async function findRecentOrdersForAccount(accountId, limit = 5) {
+    const rows = await salesforce.query(
+      `SELECT ${ORDER_FIELDS} FROM Order WHERE AccountId = '${escapeSoql(accountId)}' ORDER BY EffectiveDate DESC NULLS LAST LIMIT ${limit}`,
+    );
+    return rows.map((r) => toOrder(r));
+  }
+
+  // Customer to call about an order: the authorising contact, else the account's first contact with a number.
+  async function getOrderContact(order) {
+    const contact = order.contactId ? await getContactById(order.contactId) : null;
+    if (contact && (contact.mobile || contact.phone)) return contact;
+    return order.accountId ? getAccountContact(order.accountId) : contact;
+  }
+
+  async function accountContacts(accountId) {
+    const rows = await salesforce.query(
+      `SELECT ${CONTACT_FIELDS} FROM Contact WHERE AccountId = '${escapeSoql(accountId)}' ORDER BY CreatedDate LIMIT 20`,
+    );
+    return rows.map(toContact);
+  }
+
+  // An order is shown only to someone who also has its invoice number or a mobile on the order's account.
+  // Unknown and unverified orders give the same answer, so order ids cannot be probed.
+  async function verifyOrder(erpOrderId, verification) {
+    if (!erpOrderId || !verification) return { found: false };
+    const reference = String(erpOrderId).trim();
+    // Phone orders have no ERP id until the ERP picks them up, so their Salesforce order number also counts.
+    const orderNumber = /^[\d\s]{1,10}$/.test(reference) ? reference.replace(/\D/g, '').padStart(8, '0') : null;
+    const where = orderNumber
+      ? `(ERP_Order_Id__c = '${escapeSoql(reference)}' OR OrderNumber = '${orderNumber}')`
+      : `ERP_Order_Id__c = '${escapeSoql(reference)}'`;
+    const rows = await salesforce.query(`SELECT ${ORDER_FIELDS} FROM Order WHERE ${where} LIMIT 1`);
+    const order = toOrder(rows[0]);
+    if (!order) return { found: false };
+
+    const factor = String(verification).trim();
+    const byInvoice = Boolean(order.invoiceNumber) && order.invoiceNumber.toLowerCase() === factor.toLowerCase();
+    const digits = lastTenDigits(factor);
+    const contacts = order.accountId ? await accountContacts(order.accountId) : [];
+    const matched = digits ? contacts.find((c) => [c.mobile, c.phone].some((p) => lastTenDigits(p) === digits)) : null;
+    if (!byInvoice && !matched) return { found: false };
+
+    return {
+      found: true,
+      customerName: order.accountName,
+      orderSource: order.orderSource,
+      deliveryStatus: order.deliveryStatus,
+      deliveryDate: order.deliveryDate,
+      order,
+      contactId: (matched || contacts[0])?.id || null,
+    };
+  }
+
+  async function resolveOrCreateContact(phone, customerName, accountFields = {}) {
+    const existing = await findContactByPhone(phone);
+    if (existing) return { ...existing, created: false };
+    const fullName = String(customerName || '').trim() || 'Unknown Customer';
+    const words = fullName.split(/\s+/);
+    const account = await salesforce.create('Account', compact({ Name: fullName, RecordTypeId: await accountRecordTypeId(), ...accountFields }));
+    const contact = await salesforce.create('Contact', compact({
+      AccountId: account.id,
+      FirstName: words.length > 1 ? words[0] : undefined,
+      LastName: words.length > 1 ? words.slice(1).join(' ') : words[0],
+      MobilePhone: phone,
+    }));
+    return { id: contact.id, accountId: account.id, name: fullName, created: true };
+  }
+
+  async function serviceLocation(input, order) {
+    if (input.city || input.postalCode) return { city: input.city, state: input.state, postalCode: input.postalCode };
+    if (!order) return {};
+    if (order.city || order.postalCode) return { city: order.city, state: order.state, postalCode: order.postalCode };
+    const [account] = await salesforce.query(
+      `SELECT BillingCity, BillingState, BillingPostalCode FROM Account WHERE Id = '${escapeSoql(order.accountId)}' LIMIT 1`,
+    );
+    return { city: account?.BillingCity, state: account?.BillingState, postalCode: account?.BillingPostalCode };
+  }
+
+  async function componentId(partNumber) {
+    if (!partNumber) return null;
+    const [row] = await salesforce.query(
+      `SELECT Id FROM Product_Component__c WHERE Part_Number__c = '${escapeSoql(String(partNumber).trim())}' LIMIT 1`,
+    );
+    return row?.Id || null;
+  }
+
+  // Active products with a list price in the standard price book, limited to Tiffany's own product codes.
+  async function catalog() {
+    if (catalogCache && now() - catalogCache.loadedAt < CATALOG_TTL_MS) return catalogCache.entries;
+    const prefix = productCodePrefix ? ` AND Product2.ProductCode LIKE '${escapeSoqlLike(productCodePrefix)}%'` : '';
+    const rows = await salesforce.query(
+      'SELECT Id, UnitPrice, Pricebook2Id, Product2Id, Product2.Name, Product2.ProductCode FROM PricebookEntry '
+      + `WHERE Pricebook2.IsStandard = true AND IsActive = true AND Product2.IsActive = true${prefix} ORDER BY Product2.Name`,
+    );
+    const entries = rows.map((r) => ({
+      pricebookEntryId: r.Id,
+      pricebookId: r.Pricebook2Id,
+      productId: r.Product2Id,
+      name: r.Product2?.Name,
+      productCode: r.Product2?.ProductCode,
+      unitPrice: r.UnitPrice,
+    }));
+    catalogCache = { loadedAt: now(), entries };
+    return entries;
+  }
+
+  async function findProducts(query) {
+    const entries = await catalog();
+    const words = String(query || '').toLowerCase().split(/[^a-z0-9]+/)
+      .filter((w) => w.length >= 3)
+      .map((w) => (w.length > 4 && w.endsWith('s') ? w.slice(0, -1) : w))
+      .filter((w) => !GENERIC_WORDS.has(w));
+    if (!words.length) return entries;
+    const text = (e) => `${e.name} ${e.productCode}`.toLowerCase();
+    const everyWord = entries.filter((e) => words.every((w) => text(e).includes(w)));
+    return everyWord.length ? everyWord : entries.filter((e) => words.some((w) => text(e).includes(w)));
+  }
+
+  // Salesforce's state picklist for India, label or code to code; an unknown state is left out of the address.
+  async function indianStateCode(name) {
+    if (!name) return undefined;
+    if (!indianStates) {
+      const described = await salesforce.describe('Order');
+      const field = (n) => described.fields.find((f) => f.name === n)?.picklistValues || [];
+      const india = field('ShippingCountryCode').findIndex((c) => c.value === 'IN');
+      indianStates = new Map();
+      for (const state of field('ShippingStateCode')) {
+        const bits = state.validFor ? Buffer.from(state.validFor, 'base64') : null;
+        if (india < 0 || !state.active || !bits || !(bits[india >> 3] & (0x80 >> (india % 8)))) continue;
+        indianStates.set(state.label.toLowerCase(), state.value);
+        indianStates.set(state.value.toLowerCase(), state.value);
+      }
+    }
+    const key = String(name).trim().toLowerCase();
+    return indianStates.get(STATE_ALIASES[key] || key);
+  }
+
+  // A phone order is saved as a Draft for the sales team to confirm price, delivery and payment before activating it.
+  async function createOrder(input) {
+    if (!input.phone) return { created: false, error: 'A valid mobile number is needed to place the order.' };
+    const parsed = parseItems(input.items);
+    if (parsed.error) return { created: false, error: parsed.error };
+    if (!parsed.items.length) return { created: false, error: 'No product was given. Ask which product and how many.' };
+    if (parsed.items.length > MAX_ORDER_LINES) {
+      return { created: false, error: `Up to ${MAX_ORDER_LINES} different products can be ordered by phone. Offer a call back from the sales team for larger orders.` };
+    }
+
+    const entries = await catalog();
+    const lines = [];
+    for (const item of parsed.items) {
+      const entry = entries.find((e) => String(e.productCode).toUpperCase() === item.productCode);
+      if (!entry) return { created: false, error: `Product code ${item.productCode} is not in the catalog. Check the product with find_products.` };
+      if (item.quantity < 1 || item.quantity > MAX_LINE_QUANTITY) {
+        return { created: false, error: `Quantities from 1 to ${MAX_LINE_QUANTITY} can be ordered by phone. Offer a call back from the sales team for larger quantities.` };
+      }
+      lines.push({ ...entry, quantity: item.quantity });
+    }
+
+    const pin = String(input.postalCode || '').replace(/\D/g, '');
+    if (!String(input.address || '').trim() || !String(input.city || '').trim()) {
+      return { created: false, error: 'The delivery address and city are needed.' };
+    }
+    if (!/^[1-9]\d{5}$/.test(pin)) return { created: false, error: 'A valid six digit PIN code is needed for delivery.' };
+
+    const stateCode = await indianStateCode(input.state).catch(() => undefined);
+    const address = compact({
+      Street: String(input.address).trim(),
+      City: String(input.city).trim(),
+      PostalCode: pin,
+      CountryCode: 'IN',
+      StateCode: stateCode,
+    });
+    const prefixed = (prefix) => Object.fromEntries(Object.entries(address).map(([k, v]) => [`${prefix}${k}`, v]));
+    const customer = await resolveOrCreateContact(input.phone, input.customerName, prefixed('Billing'));
+    const givenName = String(input.customerName || '').trim();
+
+    const order = await salesforce.create('Order', compact({
+      AccountId: customer.accountId,
+      CustomerAuthorizedById: customer.id,
+      EffectiveDate: todayInIst(now()).toISOString().slice(0, 10),
+      Status: 'Draft',
+      Pricebook2Id: lines[0].pricebookId,
+      Order_Source__c: 'Other',
+      Description: [
+        'Placed by phone through the Sarvam AI voice agent.',
+        'Confirm the final price, delivery charges, delivery date and payment with the customer before activating.',
+        !customer.created && givenName && givenName.toLowerCase() !== String(customer.name || '').toLowerCase()
+          ? `The caller gave the name ${givenName}; the mobile belongs to ${customer.name}.`
+          : null,
+        input.notes ? `Customer notes: ${input.notes}` : null,
+      ].filter(Boolean).join('\n'),
+      ...prefixed('Shipping'),
+    }));
+
+    try {
+      await salesforce.createMany('OrderItem', lines.map((l) => ({
+        OrderId: order.id,
+        PricebookEntryId: l.pricebookEntryId,
+        Quantity: l.quantity,
+        UnitPrice: l.unitPrice,
+      })));
+    } catch (err) {
+      await salesforce.remove('Order', order.id).catch(() => {});
+      throw err;
+    }
+
+    const [saved] = await salesforce.query(`SELECT OrderNumber, TotalAmount FROM Order WHERE Id = '${escapeSoql(order.id)}'`);
+    return {
+      created: true,
+      orderId: order.id,
+      orderNumber: saved?.OrderNumber || null,
+      total: saved?.TotalAmount ?? lines.reduce((sum, l) => sum + l.unitPrice * l.quantity, 0),
+      lines: lines.map(({ name, productCode, quantity, unitPrice }) => ({ name, productCode, quantity, unitPrice })),
+      newCustomer: customer.created,
+    };
+  }
+
+  // The order placed during a call: by the number the agent noted, else the caller's newest order. Only orders
+  // created since the call began qualify, so a misheard number cannot link someone else's older order.
+  async function findVoiceOrderSince({ orderNumber, contactId, since }) {
+    if (!since || Number.isNaN(Date.parse(since))) return null;
+    const newest = async (where) => {
+      const [row] = await salesforce.query(
+        `SELECT Id, OrderNumber FROM Order WHERE ${where} AND CreatedDate >= ${soqlDateTime(since)} ORDER BY CreatedDate DESC LIMIT 1`,
+      );
+      return row ? { id: row.Id, orderNumber: row.OrderNumber } : null;
+    };
+    const digits = String(orderNumber || '').replace(/\D/g, '');
+    const byNumber = digits && digits.length <= 8 ? await newest(`OrderNumber = '${digits.padStart(8, '0')}'`) : null;
+    if (byNumber || !contactId) return byNumber;
+    return newest(`CustomerAuthorizedById = '${escapeSoql(contactId)}'`);
+  }
+
+  // Parts of the products on an order, or of products whose name matches.
+  async function findParts({ erpOrderId, productName }) {
+    let where;
+    if (erpOrderId) {
+      const order = await getOrderByErpId(erpOrderId);
+      const productIds = (order?.items || []).map((i) => i.productId).filter(Boolean);
+      if (!productIds.length) return [];
+      where = `Product__c IN (${productIds.map((id) => `'${escapeSoql(id)}'`).join(', ')})`;
+    } else if (productName && String(productName).trim()) {
+      where = `Product__r.Name LIKE '%${escapeSoqlLike(String(productName).trim())}%'`;
+    } else {
+      return [];
+    }
+    const rows = await salesforce.query(
+      `SELECT Name, Part_Number__c, Product__r.Name FROM Product_Component__c WHERE ${where} ORDER BY Product__r.Name, Name LIMIT 20`,
+    );
+    return rows.map((r) => ({
+      name: String(r.Name || '').split(' - ').pop(),
+      partNumber: r.Part_Number__c,
+      productName: r.Product__r?.Name || null,
+    }));
+  }
+
+  // Classifies the request, links order, contact and part, and saves the Case. Salesforce's
+  // Case_Service_Routing flow then sets Service_Route__c and the owning queue from the city and PIN.
+  async function createServiceCase(input) {
+    const mapping = SERVICE_TYPES[input.issueType];
+    if (!mapping) throw new Error(`Unknown issue type: ${input.issueType}`);
+    if (!String(input.description || '').trim()) return { created: false, error: 'A description of the issue is required.' };
+
+    const verified = input.erpOrderId
+      ? await verifyOrder(input.erpOrderId, input.verification || input.invoiceNumber || input.phone)
+      : { found: false };
+    const order = verified.found ? verified.order : null;
+    if (!order && !input.phone) {
+      return { created: false, error: 'A mobile number is needed to register the request.' };
+    }
+
+    const customer = order
+      ? { id: verified.contactId, accountId: order.accountId }
+      : await resolveOrCreateContact(input.phone, input.customerName);
+    const location = await serviceLocation(input, order);
+    const withinBusinessHours = await businessHours.isOpen(new Date(now())).catch(() => true);
+
+    const description = [
+      withinBusinessHours ? null : '[Received outside business hours]',
+      input.issueType === 'return' ? 'Customer requests a return.' : null,
+      input.issueType === 'escalation' ? 'Customer asked for a service team member to call back.' : null,
+      input.description,
+      input.partName && `Part / component: ${input.partName}`,
+      input.partNumber && `Part number: ${input.partNumber}`,
+      input.quantity && `Quantity: ${input.quantity}`,
+      input.productName && `Product: ${input.productName}`,
+      input.erpOrderId && `Order id given: ${input.erpOrderId}`,
+      input.address && `Address: ${input.address}`,
+      (input.preferredDate || input.preferredTime) && `Preferred slot: ${[input.preferredDate, input.preferredTime].filter(Boolean).join(' ')}`,
+      'Captured by the Sarvam AI voice agent.',
+    ].filter(Boolean).join('\n');
+
+    const fields = compact({
+      RecordTypeId: await caseRecordTypeId(mapping.serviceType),
+      Subject: `${mapping.serviceType}${order?.erpOrderId ? ` - ${order.erpOrderId}` : ''}`,
+      Description: description,
+      Origin: 'Phone',
+      Status: input.issueType === 'escalation' ? 'Escalated' : undefined,
+      ContactId: customer.id,
+      AccountId: customer.id ? undefined : customer.accountId,
+      Service_Type__c: mapping.serviceType,
+      Service_Sub_Type__c: mapping.subType,
+      Order__c: order?.id,
+      Invoice_Number__c: order ? order.invoiceNumber : input.invoiceNumber,
+      Order_Source__c: order ? order.orderSource : input.orderSource,
+      Customer_Mobile__c: input.phone,
+      Damaged_Component__c: await componentId(input.partNumber),
+      Service_City__c: location.city,
+      Service_State__c: location.state,
+      Service_PIN__c: location.postalCode,
+    });
+
+    const created = await salesforce.create('Case', fields);
+    const [saved] = await salesforce.query(`SELECT CaseNumber, Service_Route__c FROM Case WHERE Id = '${escapeSoql(created.id)}'`);
+    return {
+      created: true,
+      caseId: created.id,
+      caseNumber: saved?.CaseNumber || null,
+      serviceRoute: saved?.Service_Route__c || null,
+      withinBusinessHours,
+      orderVerified: Boolean(order),
+    };
+  }
+
+  function caseWhere({ caseId, caseNumber }) {
+    if (caseId) return `Id = '${escapeSoql(caseId)}'`;
+    if (caseNumber) return `CaseNumber = '${escapeSoql(String(caseNumber).replace(/\D/g, '').padStart(8, '0'))}'`;
+    return null;
+  }
+
+  async function getCaseStatus({ caseNumber, accountId }) {
+    let where = caseWhere({ caseNumber });
+    if (!where && accountId) where = `AccountId = '${escapeSoql(accountId)}' AND IsClosed = false`;
+    if (!where) return [];
+    const rows = await salesforce.query(
+      `SELECT Id, CaseNumber, Service_Type__c, Service_Sub_Type__c, Status, CreatedDate, AccountId, Order__r.ERP_Order_Id__c, `
+      + `${VISIT_SUBQUERY}, ${SHIPMENT_SUBQUERY} FROM Case WHERE ${where} ORDER BY CreatedDate DESC LIMIT 3`,
+    );
+    return rows.map((r) => ({
+      id: r.Id,
+      caseNumber: r.CaseNumber,
+      accountId: r.AccountId,
+      serviceType: r.Service_Type__c,
+      subType: r.Service_Sub_Type__c,
+      status: r.Status,
+      createdDate: r.CreatedDate,
+      erpOrderId: r.Order__r?.ERP_Order_Id__c || null,
+      visit: toVisit(r.Service_Visits__r?.records?.[0]),
+      shipment: toShipment(r.Replacement_Shipments__r?.records?.[0]),
+    }));
+  }
+
+  // Everything a notification call needs: who to call and what changed.
+  async function getCaseNotice(ref) {
+    const where = caseWhere(ref);
+    if (!where) return null;
+    const rows = await salesforce.query(
+      'SELECT Id, CaseNumber, Service_Type__c, Status, Customer_Mobile__c, ContactId, Contact.FirstName, Contact.LastName, '
+      + `Contact.MobilePhone, Contact.Phone, Order__r.ERP_Order_Id__c, ${VISIT_SUBQUERY}, ${SHIPMENT_SUBQUERY} FROM Case WHERE ${where} LIMIT 1`,
+    );
+    const r = rows[0];
+    if (!r) return null;
+    return {
+      id: r.Id,
+      caseNumber: r.CaseNumber,
+      serviceType: r.Service_Type__c,
+      status: r.Status,
+      phone: r.Customer_Mobile__c || r.Contact?.MobilePhone || r.Contact?.Phone || null,
+      customerName: [r.Contact?.FirstName, r.Contact?.LastName].filter(Boolean).join(' ') || null,
+      contactId: r.ContactId,
+      erpOrderId: r.Order__r?.ERP_Order_Id__c || null,
+      visit: toVisit(r.Service_Visits__r?.records?.[0]),
+      shipment: toShipment(r.Replacement_Shipments__r?.records?.[0]),
+    };
+  }
+
+  // The newest phone case for this mobile since a moment; used to avoid duplicating a case the agent already created.
+  async function findVoiceCaseSince(phone, since) {
+    if (!phone || !since || Number.isNaN(Date.parse(since))) return null;
+    const rows = await salesforce.query(
+      `SELECT Id, CaseNumber FROM Case WHERE Origin = 'Phone' AND Customer_Mobile__c = '${escapeSoql(phone)}' `
+      + `AND CreatedDate >= ${soqlDateTime(since)} ORDER BY CreatedDate DESC LIMIT 1`,
+    );
+    return rows[0] ? { id: rows[0].Id, caseNumber: rows[0].CaseNumber } : null;
+  }
+
+  async function logCall(input) {
+    const fields = Object.fromEntries(Object.entries({
+      Subject: input.subject,
+      Description: input.description,
+      WhoId: input.contactId,
+      WhatId: input.relatedId,
+      Status: 'Completed',
+      TaskSubtype: 'Call',
+      ActivityDate: input.activityDate,
+      CallType: input.direction === 'inbound' ? 'Inbound' : 'Outbound',
+      CallDisposition: input.disposition ? String(input.disposition).slice(0, 255) : undefined,
+      CallObject: input.callId,
+      CallDurationInSeconds: input.durationSeconds != null ? Math.round(input.durationSeconds) : undefined,
+    }).filter(([, v]) => v !== undefined && v !== null && v !== ''));
+    const created = await salesforce.create('Task', fields);
+    return { id: created.id };
+  }
+
+  return {
+    findContactByPhone,
+    getContactById,
+    getOrderById,
+    getOrderByErpId,
+    getOrderByInvoice,
+    findRecentOrdersForAccount,
+    getOrderContact,
+    verifyOrder,
+    findParts,
+    findProducts,
+    indianStateCode,
+    createOrder,
+    findVoiceOrderSince,
+    createServiceCase,
+    getCaseStatus,
+    getCaseNotice,
+    findVoiceCaseSince,
+    logCall,
+  };
+}
+
+module.exports = { createCrm, SERVICE_TYPES, escapeSoql, escapeSoqlLike, escapeSosl, soqlDateTime };

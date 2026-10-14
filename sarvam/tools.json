@@ -1,0 +1,81 @@
+{
+  "agent_id": "Tiffany-Des-0db8e21d-e099",
+  "committed_version": 2,
+  "draft_version": 3,
+  "current_base_url": "https://foods-cricket-consensus-signed.trycloudflare.com",
+  "base_url_note": "Temporary Cloudflare quick tunnel used for testing on 2026-10-14. Re-point every tool to PUBLIC_BASE_URL once the server is deployed.",
+  "auth_header": "x-agent-secret (AGENT_TOOL_SECRET in .env)",
+  "tools": [
+    {
+      "name": "find_customer",
+      "id": "a8d8f77e-98f1-41f2-b73e-826a00767c7c",
+      "committed_id": "1b17d7d6-cff7-4705-bb77-d6cb22066c38",
+      "path": "/api/agent/customer-lookup",
+      "modules": [3]
+    },
+    {
+      "name": "find_order",
+      "id": "f3469972-96b6-4df5-a068-4ffcb0c57f97",
+      "committed_id": "d338b6f3-44c5-4a7a-b808-7474058f63f2",
+      "path": "/api/agent/order-lookup",
+      "modules": [4, 15]
+    },
+    {
+      "name": "find_parts",
+      "id": "5dfd1f68-ab51-4d08-a770-ee55cbebfc31",
+      "committed_id": "66b763f9-6d42-493d-b5ce-420a11eec017",
+      "path": "/api/agent/part-lookup",
+      "modules": [7]
+    },
+    {
+      "name": "resolve_date",
+      "id": "b2c2f512-2f73-43c1-997e-52ced7f329b5",
+      "committed_id": "75d40b31-cd06-49a4-a861-a297f721e584",
+      "path": "/api/agent/resolve-date",
+      "modules": [6]
+    },
+    {
+      "name": "register_service_request",
+      "id": "efdf7675-f71e-4146-9bc3-48dd2a3fdbaa",
+      "committed_id": "0cdce514-479f-403b-8a4e-d8b93d5da1e2",
+      "path": "/api/agent/cases",
+      "modules": [5, 7, 8, 9, 12]
+    },
+    {
+      "name": "book_installation",
+      "id": "6b2407e6-ea19-47e8-a132-462a3a289d4c",
+      "committed_id": "a3266a78-1ecf-441b-a15f-50790ebd2ed9",
+      "path": "/api/agent/installation",
+      "modules": [6, 8, 9]
+    },
+    {
+      "name": "request_human_callback",
+      "id": "79cf5d60-bf24-4783-9e15-00186a6d21db",
+      "committed_id": "973e1925-8241-4d00-8839-6b065bd169ad",
+      "path": "/api/agent/escalate",
+      "modules": [10]
+    },
+    {
+      "name": "check_request_status",
+      "id": "5a3121a7-9024-4a68-93cb-1f42af4754c7",
+      "committed_id": "b54135bc-5c8c-43b1-bd61-197e3d7af120",
+      "path": "/api/agent/case-status",
+      "modules": [11, 13]
+    },
+    {
+      "name": "find_products",
+      "id": "4c72eaee-f0a6-436f-8d8d-5babbf6e03be",
+      "committed_id": "1555f2e4-69d5-4922-baf4-59dfddb72348",
+      "path": "/api/agent/products",
+      "modules": ["phone orders"]
+    },
+    {
+      "name": "place_order",
+      "id": "a64ce829-0bc8-4fd8-a0eb-e6e4ab582012",
+      "committed_id": "69bae770-7291-43c0-961f-995d25c4613f",
+      "path": "/api/agent/orders",
+      "modules": ["phone orders"]
+    }
+  ],
+  "ids_note": "Each version holds its own copy of the tools. committed_id is frozen in committed version 2; id is the editable draft (version 3), which is what any change edits before the next commit."
+}

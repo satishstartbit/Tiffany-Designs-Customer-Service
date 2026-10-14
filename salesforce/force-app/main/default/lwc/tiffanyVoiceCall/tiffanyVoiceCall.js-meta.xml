@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<LightningComponentBundle xmlns="http://soap.sforce.com/2006/04/metadata">
+    <apiVersion>62.0</apiVersion>
+    <isExposed>true</isExposed>
+    <masterLabel>Tiffany Voice Call</masterLabel>
+    <description>A customer enters a mobile number and the Tiffany Designs AI voice assistant (Sarvam) calls it straight away.</description>
+    <targets>
+        <target>lightningCommunity__Page</target>
+        <target>lightningCommunity__Default</target>
+        <target>lightning__RecordPage</target>
+        <target>lightning__AppPage</target>
+        <target>lightning__HomePage</target>
+        <target>lightning__UtilityBar</target>
+    </targets>
+    <targetConfigs>
+        <targetConfig targets="lightningCommunity__Default">
+            <property name="heading" type="String" label="Heading" default="Talk to Tiffany Designs"/>
+            <property name="subheading" type="String" label="Subheading" default="Our AI assistant calls you right away"/>
+            <property name="buttonLabel" type="String" label="Button label" default="Call me now"/>
+        </targetConfig>
+    </targetConfigs>
+</LightningComponentBundle>

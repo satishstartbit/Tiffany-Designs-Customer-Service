@@ -1,0 +1,32 @@
+{
+  "name": "tiffany-designs-customer-service",
+  "version": "1.0.0",
+  "description": "",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "test": "node --test \"test/**/*.test.js\"",
+    "review:salesforce": "node scripts/review-salesforce.js",
+    "deploy:salesforce": "node scripts/deploy-salesforce.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/satishstartbit/Tiffany-Designs-Customer-Service.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "engines": {
+    "node": "22.x"
+  },
+  "bugs": {
+    "url": "https://github.com/satishstartbit/Tiffany-Designs-Customer-Service/issues"
+  },
+  "homepage": "https://github.com/satishstartbit/Tiffany-Designs-Customer-Service#readme",
+  "dependencies": {
+    "dotenv": "^18.0.7",
+    "express": "^5.3.0"
+  }
+}

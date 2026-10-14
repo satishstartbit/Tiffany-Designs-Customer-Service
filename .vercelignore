@@ -1,0 +1,10 @@
+.env
+.env.*
+!.env.example
+data/
+test/
+scripts/
+salesforce/
+sarvam/
+.claude/
+salesforce-review.json
