@@ -82,8 +82,6 @@ function caseResponse(res, result, successMessage) {
   });
 }
 
-const NOT_VERIFIED = 'The order could not be verified with these details.';
-
 // Endpoints the Sarvam agent calls mid-conversation as API tools.
 // Responses are flat, snake_case and include a short `message` the agent can relay.
 module.exports = function agentToolsRouter({ crm, now = () => Date.now() }) {
@@ -171,67 +169,9 @@ module.exports = function agentToolsRouter({ crm, now = () => Date.now() }) {
     });
   });
 
-  // Any one reference (order id, Salesforce order number or invoice number) finds the order; it is shown only when
-  // one proof also matches: the registered mobile, the invoice number, or the full name on the order.
-  router.post('/order-lookup', async (req, res) => {
-    const body = req.body || {};
-    const text = (value) => String(value ?? '').trim();
-    const phone = normalizePhone(body.phone);
-    const customerName = text(body.customer_name);
-    let invoiceNumber = text(body.invoice_number);
-    let references = [text(body.order_id), text(body.order_number)].filter(Boolean);
-    // An invoice number said where the order id was expected.
-    if (!invoiceNumber) invoiceNumber = references.find((r) => /^inv/i.test(r)) || '';
-    references = references.filter((r) => r !== invoiceNumber);
-
-    if (references.length || invoiceNumber) {
-      const proofs = [text(body.verification), invoiceNumber, phone].filter(Boolean);
-      // With no order id or number, the invoice number is what finds the order, so it cannot also prove ownership.
-      if (!customerName && !(references.length ? proofs.length : phone)) {
-        return res.json({
-          found: false,
-          message: 'To share the order, the registered mobile number, the invoice number or the full name on the order is also needed.',
-        });
-      }
-
-      let verified = { found: false };
-      for (const reference of references) {
-        verified = await crm.verifyOrder(reference, proofs, { customerName });
-        if (verified.found) break;
-      }
-      // A misheard order id can still be found from the invoice number with the mobile or the full name.
-      if (!verified.found && invoiceNumber && (phone || customerName)) {
-        const byInvoice = await crm.getOrderByInvoice(invoiceNumber);
-        const reference = byInvoice?.erpOrderId || byInvoice?.orderNumber;
-        if (reference) verified = await crm.verifyOrder(reference, [phone], { customerName });
-      }
-      if (!verified.found) return res.json({ found: false, message: NOT_VERIFIED });
-
-      const order = await crm.getOrderById(verified.order.id) || verified.order;
-      const spokenId = order.erpOrderId || spokenCaseNumber(order.orderNumber);
-      return res.json({
-        found: true,
-        order_id: order.erpOrderId || null,
-        order_number: order.orderNumber || null,
-        customer_name: verified.customerName,
-        verified_by: verified.verifiedBy,
-        delivery_status: verified.deliveryStatus,
-        delivery_date: verified.deliveryDate,
-        order_source: verified.orderSource,
-        products: order.productSummary || '',
-        message: describeOrder({ orderId: spokenId, products: order.productSummary, deliveryStatus: verified.deliveryStatus, deliveryDate: verified.deliveryDate }),
-      });
-    }
-
-    if (!phone) {
-      return res.json({ found: false, message: 'An order id, order number or invoice number, or the registered mobile number, is needed.' });
-    }
-    const contact = await crm.findContactByPhone(phone);
-    const [latest] = contact?.accountId ? await crm.findRecentOrdersForAccount(contact.accountId, 1) : [];
-    if (!latest) return res.json({ found: false, message: 'No order is linked to this phone number.' });
-    const order = await crm.getOrderById(latest.id);
-    const id = order.erpOrderId || spokenCaseNumber(order.orderNumber);
-    return res.json({
+  function orderAnswer(order, lead = '') {
+    const spokenId = order.erpOrderId || spokenCaseNumber(order.orderNumber);
+    return {
       found: true,
       order_id: order.erpOrderId || null,
       order_number: order.orderNumber || null,
@@ -239,9 +179,56 @@ module.exports = function agentToolsRouter({ crm, now = () => Date.now() }) {
       delivery_status: order.deliveryStatus,
       delivery_date: order.deliveryDate,
       order_source: order.orderSource,
-      products: order.productSummary,
-      message: `The latest order on this number: ${describeOrder({ orderId: id, products: order.productSummary, deliveryStatus: order.deliveryStatus, deliveryDate: order.deliveryDate })}`,
-    });
+      products: order.productSummary || '',
+      message: `${lead}${describeOrder({ orderId: spokenId, products: order.productSummary, deliveryStatus: order.deliveryStatus, deliveryDate: order.deliveryDate })}`,
+    };
+  }
+
+  // Any one reference finds the order and its details are given at once (the business chose no ownership check):
+  // the order id, the Salesforce order number of a phone order, or the invoice number. Addresses and phone numbers
+  // on the order are never returned.
+  router.post('/order-lookup', async (req, res) => {
+    const body = req.body || {};
+    const text = (value) => String(value ?? '').trim();
+    const phone = normalizePhone(body.phone);
+    let invoiceNumber = text(body.invoice_number);
+    let references = [text(body.order_id), text(body.order_number)].filter(Boolean);
+    // An invoice number said where the order id was expected.
+    if (!invoiceNumber) invoiceNumber = references.find((r) => /^inv/i.test(r)) || '';
+    references = references.filter((r) => r !== invoiceNumber);
+
+    if (references.length || invoiceNumber) {
+      let found = null;
+      for (const reference of references) {
+        found = await crm.findOrderByReference(reference);
+        if (found) break;
+      }
+      if (!found && invoiceNumber) {
+        let matches = await crm.findOrdersByInvoice(invoiceNumber);
+        // One invoice number on several orders: the caller's mobile picks theirs, otherwise the order id is needed.
+        if (matches.length > 1 && phone) {
+          const contact = await crm.findContactByPhone(phone);
+          const own = matches.filter((o) => contact?.accountId && o.accountId === contact.accountId);
+          if (own.length) matches = own;
+        }
+        if (matches.length > 1) {
+          return res.json({ found: false, message: 'More than one order has this invoice number. Ask for the order id or the order number.' });
+        }
+        [found] = matches;
+      }
+      if (!found) {
+        return res.json({ found: false, message: 'No order matches that number. Ask the customer to read the order id, order number or invoice number again.' });
+      }
+      return res.json(orderAnswer(await crm.getOrderById(found.id) || found));
+    }
+
+    if (!phone) {
+      return res.json({ found: false, message: 'An order id, order number or invoice number, or the registered mobile number, is needed.' });
+    }
+    const contact = await crm.findContactByPhone(phone);
+    const [latest] = contact?.accountId ? await crm.findRecentOrdersForAccount(contact.accountId, 1) : [];
+    if (!latest) return res.json({ found: false, message: 'No order is linked to this phone number. Ask for the order id, order number or invoice number.' });
+    return res.json(orderAnswer(await crm.getOrderById(latest.id), 'The latest order on this number: '));
   });
 
   router.post('/products', async (req, res) => {

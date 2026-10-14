@@ -11,7 +11,7 @@ Agent `Tiffany-Des-0db8e21d-e099`, committed as **version 3**: the same instruct
 | 1 | AI voice agent and call handling | Phases 1 to 4 and 11; `resolve_date` |
 | 2 | After-hours and holiday calls | `check_service_hours` (open now, next opening, Salesforce holidays); requests are registered at any hour |
 | 3 | Customer identification and contact management | `find_customer` (by mobile, or by full name and PIN code); `save_customer_details` (Phase 13) |
-| 4 | Order and purchase identification | `find_order` (ERP id, invoice or order number, with the mobile, the invoice or the full name on the order) |
+| 4 | Order and purchase identification | `find_order` (ERP id, invoice or order number; no second check) |
 | 5 | Intent detection and case classification | Phase 4; the issue type sent with each request |
 | 6 | Installation requests | `book_installation`, `resolve_date` |
 | 7 | Damage and defect complaints | `find_parts`, `register_service_request` |
@@ -52,7 +52,7 @@ All tools POST to the server with the `x-agent-secret` header and speak the `mes
 | Tool | Endpoint | What it does |
 | --- | --- | --- |
 | `find_customer` | `/api/agent/customer-lookup` | Customer and recent orders by mobile. Without the mobile (draft 4): by full name and a PIN code on the customer's address or orders, only when exactly one customer matches, and then with their open requests too |
-| `find_order` | `/api/agent/order-lookup` | Order by `order_id`, `order_number` (phone orders, for example 122 or ORD-00000122) or `invoice_number`, verified in Node against the invoice number, a mobile on the order's account, or (draft 4) the full name on the order. `phone` is optional in draft 4; a reference with no proof is refused before any lookup |
+| `find_order` | `/api/agent/order-lookup` | Order by `order_id`, `order_number` (phone orders, for example 122 or ORD-00000122) or `invoice_number`; the details are returned as soon as one matches, with no mobile or name check (draft 4). An invoice number on several orders asks for the order id. With only `phone`, the latest order on that number |
 | `find_parts` | `/api/agent/part-lookup` | Parts and part numbers (`Product_Component__c`) for the order or product |
 | `resolve_date` | `/api/agent/resolve-date` | "tomorrow", "Saturday", "17/10" → calendar date in IST; refuses past dates. The model never does date arithmetic |
 | `register_service_request` | `/api/agent/cases` | Node creates the classified Salesforce Case (record type, order, contact, part, `Origin = Phone`); the routing flow picks the queue |

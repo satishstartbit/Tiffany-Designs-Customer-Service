@@ -220,6 +220,15 @@ function createCrm({
   const getOrderByErpId = (erpOrderId) => queryOrder(`ERP_Order_Id__c = '${escapeSoql(String(erpOrderId).trim())}'`);
   const getOrderByInvoice = (invoiceNumber) => queryOrder(`Invoice_Number__c IN (${idForms(invoiceNumber)})`);
 
+  // Every order carrying an invoice number (the org has duplicates); line items are not loaded.
+  async function findOrdersByInvoice(invoiceNumber) {
+    if (!String(invoiceNumber || '').trim()) return [];
+    const rows = await salesforce.query(
+      `SELECT ${ORDER_FIELDS} FROM Order WHERE Invoice_Number__c IN (${idForms(invoiceNumber)}) ORDER BY CreatedDate DESC LIMIT 5`,
+    );
+    return rows.map((r) => toOrder(r));
+  }
+
   async function findRecentOrdersForAccount(accountId, limit = 5) {
     const rows = await salesforce.query(
       `SELECT ${ORDER_FIELDS} FROM Order WHERE AccountId = '${escapeSoql(accountId)}' ORDER BY EffectiveDate DESC NULLS LAST LIMIT ${limit}`,
@@ -245,18 +254,24 @@ function createCrm({
   // Unknown and unverified orders give the same answer, so order ids cannot be probed.
   // A caller without the mobile or invoice can give the full name on the order instead (first and last name).
   // `verification` is one factor or a list (invoice numbers and mobiles); any one of them is enough.
+  // The order a caller means by an ERP id ("TD-ORD-1001", "ORD-010") or, for a phone order, its Salesforce order
+  // number ("122", "ORD-00000122"). No ownership check; line items are not loaded.
+  async function findOrderByReference(reference) {
+    const ref = String(reference || '').trim();
+    if (!ref) return null;
+    const orderNumber = orderNumberOf(ref);
+    const where = orderNumber
+      ? `(ERP_Order_Id__c IN (${idForms(ref)}) OR OrderNumber = '${orderNumber}')`
+      : `ERP_Order_Id__c IN (${idForms(ref)})`;
+    const rows = await salesforce.query(`SELECT ${ORDER_FIELDS} FROM Order WHERE ${where} LIMIT 2`);
+    // "ORD-010" is an ERP id and also reads as order number 10; the ERP id wins.
+    return toOrder(rows.find((r) => r.ERP_Order_Id__c && sameId(r.ERP_Order_Id__c, ref)) || rows[0]);
+  }
+
   async function verifyOrder(erpOrderId, verification, { customerName } = {}) {
     const factors = [].concat(verification).map((f) => String(f ?? '').trim()).filter(Boolean);
     if (!erpOrderId || (!factors.length && !customerName)) return { found: false };
-    const reference = String(erpOrderId).trim();
-    // Phone orders have no ERP id until the ERP picks them up, so their Salesforce order number also counts.
-    const orderNumber = orderNumberOf(reference);
-    const where = orderNumber
-      ? `(ERP_Order_Id__c IN (${idForms(reference)}) OR OrderNumber = '${orderNumber}')`
-      : `ERP_Order_Id__c IN (${idForms(reference)})`;
-    const rows = await salesforce.query(`SELECT ${ORDER_FIELDS} FROM Order WHERE ${where} LIMIT 2`);
-    // "ORD-010" is an ERP id and also reads as order number 10; the ERP id wins.
-    const order = toOrder(rows.find((r) => r.ERP_Order_Id__c && sameId(r.ERP_Order_Id__c, reference)) || rows[0]);
+    const order = await findOrderByReference(erpOrderId);
     if (!order) return { found: false };
 
     const byInvoice = Boolean(order.invoiceNumber) && factors.some((f) => sameId(f, order.invoiceNumber));
@@ -529,14 +544,16 @@ function createCrm({
     const verified = input.erpOrderId
       ? await verifyOrder(input.erpOrderId, [input.verification, input.invoiceNumber, input.phone])
       : { found: false };
-    const order = verified.found ? verified.order : null;
+    // The order the caller named is linked even when their mobile is not on it; the caller stays the case contact.
+    const order = verified.found ? verified.order : input.erpOrderId ? await findOrderByReference(input.erpOrderId) : null;
     if (!order && !input.phone) {
       return { created: false, error: 'A mobile number is needed to register the request.' };
     }
 
-    const customer = order
-      ? { id: verified.contactId, accountId: order.accountId }
-      : await resolveOrCreateContact(input.phone, input.customerName);
+    let customer;
+    if (verified.found) customer = { id: verified.contactId, accountId: order.accountId };
+    else if (input.phone) customer = await resolveOrCreateContact(input.phone, input.customerName);
+    else customer = { id: (await getOrderContact(order))?.id || null, accountId: order.accountId };
     const location = await serviceLocation(input, order);
     const withinBusinessHours = await businessHours.isOpen(new Date(now())).catch(() => true);
 
@@ -583,7 +600,8 @@ function createCrm({
       caseNumber: saved?.CaseNumber || null,
       serviceRoute: saved?.Service_Route__c || null,
       withinBusinessHours,
-      orderVerified: Boolean(order),
+      orderVerified: verified.found,
+      orderLinked: Boolean(order),
     };
   }
 
@@ -770,6 +788,8 @@ function createCrm({
     findRecentOrdersForAccount,
     getOrderContact,
     verifyOrder,
+    findOrderByReference,
+    findOrdersByInvoice,
     findCustomerByNameAndPin,
     findParts,
     findProducts,

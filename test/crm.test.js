@@ -175,7 +175,7 @@ test('createServiceCase saves a classified phone case linked to the verified ord
     quantity: 1,
   });
 
-  assert.deepEqual(result, { created: true, caseId: 'Case-1', caseNumber: '00001100', serviceRoute: 'Internal', withinBusinessHours: true, orderVerified: true });
+  assert.deepEqual(result, { created: true, caseId: 'Case-1', caseNumber: '00001100', serviceRoute: 'Internal', withinBusinessHours: true, orderVerified: true, orderLinked: true });
   assert.equal(sf.log.creates.length, 1, 'no account or contact is created for a known customer');
   const { sobject, fields } = sf.log.creates[0];
   assert.equal(sobject, 'Case');
@@ -274,8 +274,25 @@ test('requests without a description or a way to reach the customer are refused 
   const crm = createCrm({ salesforce: sf, businessHours: open });
   assert.deepEqual(await crm.createServiceCase({ issueType: 'general', description: '  ', phone: '+919810000001' }), { created: false, error: 'A description of the issue is required.' });
   assert.deepEqual(await crm.createServiceCase({ issueType: 'general', description: 'x' }), { created: false, error: 'A mobile number is needed to register the request.' });
-  assert.deepEqual(await crm.createServiceCase({ issueType: 'general', description: 'x', erpOrderId: 'TD-ORD-1001', invoiceNumber: 'INV-9' }), { created: false, error: 'A mobile number is needed to register the request.' });
+  const unknownOrder = createCrm({ salesforce: fakeSalesforce(), businessHours: open });
+  assert.deepEqual(await unknownOrder.createServiceCase({ issueType: 'general', description: 'x', erpOrderId: 'TD-ORD-9999' }), { created: false, error: 'A mobile number is needed to register the request.' });
   assert.equal(sf.log.creates.length, 0);
+});
+
+test('the order the caller named is linked even when their mobile is not on it, with the caller as the contact', async () => {
+  const sf = fakeSalesforce({ queries: ORG, search: [{ Id: '003C', FirstName: 'Satish', LastName: 'Chaudhary', AccountId: '001C', MobilePhone: '+917845784578' }] });
+  const result = await createCrm({ salesforce: sf, businessHours: open }).createServiceCase({
+    issueType: 'installation', description: 'Customer requested installation.', phone: '+917845784578', erpOrderId: 'TD-ORD-1001',
+  });
+  assert.equal(result.orderVerified, false);
+  assert.equal(result.orderLinked, true);
+  const { fields } = sf.log.creates.find((c) => c.sobject === 'Case');
+  assert.equal(fields.Order__c, '801A');
+  assert.equal(fields.ContactId, '003C', 'the caller, not the customer on the order');
+
+  const noMobile = createCrm({ salesforce: fakeSalesforce({ queries: ORG }), businessHours: open });
+  const linked = await noMobile.createServiceCase({ issueType: 'general', description: 'x', erpOrderId: 'TD-ORD-1001', invoiceNumber: 'INV-9' });
+  assert.equal(linked.created, true, 'without a mobile the customer on the order is used');
 });
 
 test('a verified order alone is enough to register without a mobile', async () => {

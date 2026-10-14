@@ -399,86 +399,54 @@ test.describe('agent tools used during a call', () => {
     assert.equal((await s.call('POST', '/api/agent/customer-lookup', { body: {}, headers: s.agent })).body.found, false);
   });
 
-  test('an order is shown only with a matching invoice number or registered mobile', async (t) => {
-    const s = await startTestServer();
-    t.after(s.close);
-    const byInvoice = await s.call('POST', '/api/agent/order-lookup', { body: { order_id: 'TD-ORD-1001', verification: 'inv-2001' }, headers: s.agent });
-    assert.equal(byInvoice.body.found, true);
-    assert.equal(byInvoice.body.delivery_status, 'Delivered');
-    assert.equal(byInvoice.body.products, 'Demo 3-Door Wardrobe');
-
-    const byCallerId = await s.call('POST', '/api/agent/order-lookup', { body: { order_id: 'TD-ORD-1001', phone: '9876543210' }, headers: s.agent });
-    assert.equal(byCallerId.body.found, true, 'the registered mobile is a valid second factor');
-
-    const wrongCaller = await s.call('POST', '/api/agent/order-lookup', { body: { order_id: 'TD-ORD-1001', phone: '9820011111' }, headers: s.agent });
-    assert.equal(wrongCaller.body.found, false, 'another customer cannot read the order');
-    assert.equal(wrongCaller.body.delivery_status, undefined);
-
-    const unknown = await s.call('POST', '/api/agent/order-lookup', { body: { order_id: 'TD-ORD-9999', verification: 'INV-1' }, headers: s.agent });
-    assert.equal(unknown.body.message, wrongCaller.body.message, 'unknown and unverified orders look the same');
-    assert.equal(byInvoice.body.message, 'Order TD-ORD-1001 for Demo 3-Door Wardrobe was delivered on Wednesday, 14 October.');
-  });
-
-  test('an order can be found by invoice number, but only with the registered mobile', async (t) => {
-    const s = await startTestServer();
-    t.after(s.close);
-    const ok = await s.call('POST', '/api/agent/order-lookup', { body: { invoice_number: 'INV-1111', phone: '9820011111' }, headers: s.agent });
-    assert.equal(ok.body.found, true);
-    assert.equal(ok.body.order_id, 'TD-ORD-1111');
-    assert.equal(ok.body.message, 'Order TD-ORD-1111 for Demo Bookcase is processing.');
-
-    const otherPhone = await s.call('POST', '/api/agent/order-lookup', { body: { invoice_number: 'INV-1111', phone: '9876543210' }, headers: s.agent });
-    assert.equal(otherPhone.body.found, false);
-
-    const noPhone = await s.call('POST', '/api/agent/order-lookup', { body: { invoice_number: 'INV-1111' }, headers: s.agent });
-    assert.equal(noPhone.body.found, false, 'the invoice number alone is not enough');
-  });
-
-  test('without the mobile, an order is found by order id, order number or invoice number with the full name', async (t) => {
+  test('an order is found by its order id, order number or invoice number alone, and its details are given', async (t) => {
     const s = await startTestServer();
     t.after(s.close);
     const lookup = (body) => s.call('POST', '/api/agent/order-lookup', { body, headers: s.agent }).then((r) => r.body);
 
-    const byId = await lookup({ order_id: 'TD-ORD-1111', customer_name: 'Meera Iyer' });
+    const byId = await lookup({ order_id: 'TD-ORD-1001' });
     assert.equal(byId.found, true);
-    assert.equal(byId.verified_by, 'name');
+    assert.equal(byId.delivery_status, 'Delivered');
+    assert.equal(byId.products, 'Demo 3-Door Wardrobe');
+    assert.equal(byId.message, 'Order TD-ORD-1001 for Demo 3-Door Wardrobe was delivered on Wednesday, 14 October.');
 
-    const byInvoice = await lookup({ invoice_number: 'INV-1111', customer_name: 'Meera Iyer' });
+    assert.equal((await lookup({ order_id: 'TD-ORD-1001', phone: '9820011111' })).found, true, 'a mobile that is not on the order does not block it');
+    assert.equal((await lookup({ order_id: 'td ord 1001' })).order_id, 'TD-ORD-1001', 'spoken forms of the id work');
+
+    const byInvoice = await lookup({ invoice_number: 'INV-1111' });
     assert.equal(byInvoice.order_id, 'TD-ORD-1111');
+    assert.equal(byInvoice.message, 'Order TD-ORD-1111 for Demo Bookcase is processing.');
+    assert.equal((await lookup({ order_id: 'INV-2001' })).order_id, 'TD-ORD-1001', 'an invoice number said as the order id is read as the invoice');
 
-    const idAndInvoice = await lookup({ order_id: 'TD-ORD-1111', invoice_number: 'INV-1111' });
-    assert.equal(idAndInvoice.found, true, 'the order id with its invoice number is proof enough');
-
-    for (const said of ['ORD-00000122', '122', 'order number 122']) {
-      const phoneOrder = await lookup({ order_number: said, customer_name: 'Meera Iyer' });
+    for (const said of ['ORD-00000122', '122', 'order number 122', '00000122']) {
+      const phoneOrder = await lookup({ order_number: said });
       assert.equal(phoneOrder.found, true, said);
       assert.equal(phoneOrder.order_id, null);
       assert.equal(phoneOrder.order_number, '00000122');
       assert.equal(phoneOrder.message, 'Order 122 for Demo Kids Bed is being processed.');
     }
-    assert.equal((await lookup({ order_id: 'ORD-00000122', phone: '9820011111' })).found, true, 'an order number said as the order id still works');
-
-    const invoiceAsId = await lookup({ order_id: 'INV-2001', customer_name: 'Aarav Sharma' });
-    assert.equal(invoiceAsId.order_id, 'TD-ORD-1001', 'an invoice number said as the order id is read as the invoice');
+    assert.equal((await lookup({ order_id: '122' })).order_number, '00000122', 'an order number said as the order id still works');
   });
 
-  test('an order reference alone, or with the wrong name, reveals nothing', async (t) => {
+  test('a misheard order id falls back to the invoice number; an unknown reference says so', async (t) => {
     const s = await startTestServer();
     t.after(s.close);
     const lookup = (body) => s.call('POST', '/api/agent/order-lookup', { body, headers: s.agent }).then((r) => r.body);
 
-    const alone = await lookup({ order_id: 'TD-ORD-1111' });
-    assert.equal(alone.found, false);
-    assert.match(alone.message, /registered mobile number, the invoice number or the full name/);
-    assert.equal((await lookup({ order_number: '122' })).found, false);
+    assert.equal((await lookup({ order_id: 'TD-ORD-1010', invoice_number: 'INV-1111' })).order_id, 'TD-ORD-1111');
 
-    const wrongName = await lookup({ order_id: 'TD-ORD-1111', customer_name: 'Aarav Sharma' });
-    const unknown = await lookup({ order_id: 'TD-ORD-9999', customer_name: 'Meera Iyer' });
-    assert.equal(wrongName.found, false);
-    assert.equal(wrongName.message, unknown.message, 'unknown and unverified orders look the same');
-    assert.equal(wrongName.delivery_status, undefined);
+    const shared = await lookup({ invoice_number: 'INV-7777' });
+    assert.equal(shared.found, false, 'an invoice number on two orders does not pick one at random');
+    assert.match(shared.message, /More than one order has this invoice number/);
+    assert.equal((await lookup({ order_id: 'TD-ORD-1008', invoice_number: 'INV-7777' })).order_number, '00000120', 'the order id settles it');
+
+    const unknown = await lookup({ order_id: 'TD-ORD-9999' });
+    assert.equal(unknown.found, false);
+    assert.match(unknown.message, /No order matches that number/);
+    const nothing = await lookup({});
+    assert.equal(nothing.found, false);
+    assert.match(nothing.message, /order id, order number or invoice number, or the registered mobile number/);
   });
-
   test('part lookup lists parts with part numbers for the order or a product', async (t) => {
     const s = await startTestServer();
     t.after(s.close);
@@ -526,28 +494,6 @@ test.describe('agent tools used during a call', () => {
     assert.equal(nothing.body.message, 'The registered mobile number is needed, or the full name with the six digit PIN code.');
   });
 
-  test('without the mobile, an order is shown with the full name on it', async (t) => {
-    const s = await startTestServer();
-    t.after(s.close);
-    const byId = await s.call('POST', '/api/agent/order-lookup', { headers: s.agent, body: { order_id: 'TD-ORD-1001', customer_name: 'Aarav Sharma' } });
-    assert.equal(byId.body.found, true);
-    assert.equal(byId.body.products, 'Demo 3-Door Wardrobe');
-    const byInvoice = await s.call('POST', '/api/agent/order-lookup', { headers: s.agent, body: { invoice_number: 'INV-1111', customer_name: 'meera iyer' } });
-    assert.equal(byInvoice.body.found, true);
-    assert.equal(byInvoice.body.order_id, 'TD-ORD-1111');
-
-    for (const body of [
-      { order_id: 'TD-ORD-1001', customer_name: 'Meera Iyer' },
-      { order_id: 'TD-ORD-1001', customer_name: 'Aarav' },
-      { order_id: 'TD-ORD-1001', customer_name: 'Demo Customer' },
-      { invoice_number: 'INV-1111' },
-    ]) {
-      const res = await s.call('POST', '/api/agent/order-lookup', { headers: s.agent, body });
-      assert.equal(res.body.found, false, JSON.stringify(body));
-      assert.equal(res.body.delivery_status, undefined, 'nothing about the order is given away');
-    }
-  });
-
   test('without the mobile, a request is shown with its number and the full name or the order id', async (t) => {
     const s = await startTestServer();
     t.after(s.close);
@@ -565,17 +511,6 @@ test.describe('agent tools used during a call', () => {
     const numberOnly = await s.call('POST', '/api/agent/case-status', { headers: s.agent, body: { case_number: '1063' } });
     assert.equal(numberOnly.body.found, false);
     assert.match(numberOnly.body.message, /request number with the full name or the order id/);
-  });
-
-  test('an order without an ERP id is found by its order number, with the same second factor', async (t) => {
-    const s = await startTestServer();
-    t.after(s.close);
-    const ok = await s.call('POST', '/api/agent/order-lookup', { body: { order_id: '114', phone: '9820011111' }, headers: s.agent });
-    assert.equal(ok.body.found, true);
-    assert.equal(ok.body.products, 'Demo Bookcase');
-    assert.equal(ok.body.delivery_status, 'Processing');
-    const otherCaller = await s.call('POST', '/api/agent/order-lookup', { body: { order_id: '114', phone: '9876543210' }, headers: s.agent });
-    assert.equal(otherCaller.body.found, false);
   });
 
   test('product search reads out names, codes and list prices', async (t) => {
@@ -1197,8 +1132,7 @@ test.describe('website call widget', () => {
     const page = await s.call('GET', '/test.html');
     assert.equal(page.status, 200);
     assert.match(page.headers.get('content-type'), /text\/html/);
-    assert.match(page.text, /<sarvam-widget[\s\S]*session-endpoint="https:\/\/tiffany-designs-customer-service\.onrender\.com\/api\/sarvam\/"/,
-      'a full address, so a copy on another computer or web server still reaches the Tiffany server');
+    assert.match(page.text, /<sarvam-widget[\s\S]*session-endpoint="https:\/\/[^"]+\/api\/sarvam\/"/, 'the server is named in full, so a copy works on another computer');
     assert.match(page.text, /app-id="Tiffany-Des-0db8e21d-e099"/);
     assert.doesNotMatch(page.text, /api-key=|sk_/, 'no API key in the page');
   });

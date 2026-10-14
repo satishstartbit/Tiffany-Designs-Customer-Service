@@ -36,6 +36,9 @@ function createFakeCrm({ now = () => Date.now() } = {}) {
     { id: '801B', orderNumber: '00000114', erpOrderId: 'TD-ORD-1111', invoiceNumber: 'INV-1111', orderSource: 'Flipkart', deliveryStatus: 'Processing', deliveryDate: null, accountId: '001B', accountName: 'Meera Iyer', contactId: '003B', city: 'Jaipur', postalCode: '302012', productSummary: 'Demo Bookcase' },
     { id: '801C', orderNumber: '00000117', erpOrderId: 'TD-ORD-3333', invoiceNumber: 'INV-3333', orderSource: 'Showroom', deliveryStatus: 'Delivered', deliveryDate: '2026-10-14', accountId: '001C', accountName: 'No Phone Customer', contactId: null, city: null, postalCode: null, productSummary: 'Demo Desk' },
     // A phone order: no ERP id or invoice yet, only the Salesforce order number.
+    // Two orders sharing one invoice number, as the org has (INV-2006).
+    { id: '801E', orderNumber: '00000105', erpOrderId: 'TD-ORD-1006', invoiceNumber: 'INV-7777', orderSource: 'Website', deliveryStatus: 'Delivered', deliveryDate: '2026-10-01', accountId: '001C', accountName: 'No Phone Customer', contactId: null, city: null, postalCode: null, productSummary: 'Demo Desk' },
+    { id: '801F', orderNumber: '00000120', erpOrderId: 'TD-ORD-1008', invoiceNumber: 'INV-7777', orderSource: 'Website', deliveryStatus: 'Delivered', deliveryDate: '2026-10-02', accountId: '001C', accountName: 'No Phone Customer', contactId: null, city: null, postalCode: null, productSummary: 'Demo Desk' },
     { id: '801D', orderNumber: '00000122', erpOrderId: null, invoiceNumber: null, orderSource: 'Other', deliveryStatus: null, deliveryDate: null, accountId: '001B', accountName: 'Meera Iyer', contactId: '003B', city: 'Jaipur', postalCode: '302012', productSummary: 'Demo Kids Bed' },
   ];
   const parts = [
@@ -126,6 +129,10 @@ function createFakeCrm({ now = () => Date.now() } = {}) {
     async getOrderByErpId(erpOrderId) {
       return orders.find((o) => o.erpOrderId === erpOrderId) || null;
     },
+    async findOrdersByInvoice(invoiceNumber) {
+      const plain = (v) => String(v || '').toUpperCase().replace(/[\s_-]+/g, '');
+      return orders.filter((o) => o.invoiceNumber && plain(o.invoiceNumber) === plain(invoiceNumber));
+    },
     async getOrderByInvoice(invoiceNumber) {
       return orders.find((o) => o.invoiceNumber && o.invoiceNumber.toLowerCase() === String(invoiceNumber).trim().toLowerCase()) || null;
     },
@@ -135,12 +142,16 @@ function createFakeCrm({ now = () => Date.now() } = {}) {
     async getOrderContact(order) {
       return contacts.find((c) => c.id === order.contactId) || contacts.find((c) => c.accountId === order.accountId) || null;
     },
-    async verifyOrder(reference, verification, { customerName } = {}) {
-      const factors = [].concat(verification).map((f) => String(f ?? '').trim()).filter(Boolean);
-      const ref = String(reference).trim();
+    async findOrderByReference(reference) {
+      const ref = String(reference || '').trim();
       const digits = (/^(?:ord(?:er)?)?(?:\s*(?:no|number))?[\s.#:-]*([\d\s]{1,14})$/i.exec(ref) || [])[1];
       const orderNumber = digits ? digits.replace(/\D/g, '').padStart(8, '0') : null;
-      const order = orders.find((o) => (o.erpOrderId && o.erpOrderId.toLowerCase() === ref.toLowerCase()) || (orderNumber && o.orderNumber === orderNumber));
+      const plain = (v) => String(v || '').toUpperCase().replace(/[\s_-]+/g, '');
+      return orders.find((o) => (o.erpOrderId && plain(o.erpOrderId) === plain(ref)) || (orderNumber && o.orderNumber === orderNumber)) || null;
+    },
+    async verifyOrder(reference, verification, { customerName } = {}) {
+      const factors = [].concat(verification).map((f) => String(f ?? '').trim()).filter(Boolean);
+      const order = await this.findOrderByReference(reference);
       if (!order || (!factors.length && !customerName)) return { found: false };
       const byInvoice = Boolean(order.invoiceNumber) && factors.some((f) => order.invoiceNumber.toLowerCase() === f.toLowerCase());
       const byPhone = contacts.some((c) => c.accountId === order.accountId && [c.mobile, c.phone].some((p) => p && factors.some((f) => lastTenDigits(f) && lastTenDigits(p) === lastTenDigits(f))));

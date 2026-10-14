@@ -30,8 +30,9 @@ function buildServer() {
     productCodePrefix: config.salesforce.productCodePrefix,
   });
   const sarvam = createSarvamClient(config.sarvam);
-  if (/^sk_/.test(config.sarvam.apiKey)) {
-    console.error('SARVAM_API_KEY is a Sarvam speech API key (sk_...), which the agents API refuses: web calls, instant calls and '
+  // Workspace keys start with sk_samvaad_ and are the right kind; other sk_ keys are speech API keys.
+  if (/^sk_(?!samvaad_)/.test(config.sarvam.apiKey)) {
+    console.error('SARVAM_API_KEY is a Sarvam speech API key (sk_..., not sk_samvaad_...), which the agents API refuses: web calls, instant calls and '
       + 'campaigns will fail. Create a workspace API key in the Sarvam agents dashboard (Settings, API keys).');
   }
   if (!sarvam.canStartCalls) {

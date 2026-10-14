@@ -18,9 +18,14 @@
             font-weight: 600;
         }
 
-        .warning {
+        #status {
             padding: 1rem;
-            border-left: 4px solid #b3261e;
+            border-left: 4px solid #6b3a1e;
+            background: #fff;
+        }
+
+        #status.problem {
+            border-left-color: #b3261e;
             background: #fdecea;
         }
     </style>
@@ -29,28 +34,83 @@
 <body>
     <h1>Tiffany Designs voice agent</h1>
     <p>Click <strong>Begin call</strong> at the bottom right and allow the microphone when your browser asks.</p>
-    <p id="opened-as-file" class="warning" hidden>
-        This page was opened as a file, so the call button cannot reach the server.
-        Start the server with <code>npm run dev</code> and open
-        <!-- <a href="http://localhost:8081/test.html">http://localhost:8081/test.html</a> instead. -->
-    </p>
+    <p id="status" role="status"></p>
 
-    <!-- The Sarvam API key stays on the server: the widget asks /api/sarvam/ for a signed call URL. -->
-    <sarvam-widget session-endpoint="/api/sarvam/" app-id="Tiffany-Des-0db8e21d-e099"
-        org-id="01a0c3a4-b74a-7441-813a-d7d799923769" workspace-id="01a0c3ef-4753-7a81-a20c-07f739dcf1d6"
-        button-text="Begin call" interaction-type="call" button-color="#6b3a1e" position="bottom-right">
+    <!-- The Sarvam API key stays on the server: the widget asks the Node server's /api/sarvam/ for a signed call URL.
+         The server is named in full, so a copy of this file works on any computer, opened directly or from any web server. -->
+    <sarvam-widget session-endpoint="https://tiffany-designs-customer-service.onrender.com/api/sarvam/"
+        app-id="Tiffany-Des-0db8e21d-e099" org-id="01a0c3a4-b74a-7441-813a-d7d799923769"
+        workspace-id="01a0c3ef-4753-7a81-a20c-07f739dcf1d6" button-text="Begin call" interaction-type="call"
+        button-color="#6b3a1e" position="bottom-right">
     </sarvam-widget>
 
     <script>
         const widget = document.querySelector('sarvam-widget');
-        // session-endpoint is relative, so it only works when the page comes from the Node server.
-        if (location.protocol === 'file:') {
-            document.getElementById('opened-as-file').hidden = false;
-            widget.remove();
-        } else {
-            // The user id is what Sarvam's Log Analyser searches by; one per visit, findable by its prefix.
-            widget.setAttribute('user-id', `tiffany-web-${Date.now()}`);
+        const statusLine = document.getElementById('status');
+        let server = new URL(widget.getAttribute('session-endpoint')).origin;
+
+        function show(text, problem = false) {
+            statusLine.textContent = text;
+            statusLine.classList.toggle('problem', problem);
         }
+
+        function showReady() {
+            if (window.isSecureContext) return show(`Ready. Calls go through ${server}.`);
+            // Browsers allow the microphone only on https://, on localhost and in files opened directly.
+            show(`This browser blocks the microphone on ${location.origin}. Open the page over https://, on http://localhost, or as a file.`, true);
+        }
+
+        function useServer(origin) {
+            server = origin.replace(/\/+$/, '');
+            widget.setAttribute('session-endpoint', `${server}/api/sarvam/`);
+            showReady();
+        }
+
+        // The user id is what Sarvam's Log Analyser searches by; one per visit, findable by its prefix.
+        widget.setAttribute('user-id', `tiffany-web-${Date.now()}`);
+        showReady();
+
+        // ?server=http://localhost:8081 points the page at another copy of the Node server.
+        const chosen = new URLSearchParams(location.search).get('server');
+        if (chosen) {
+            useServer(chosen);
+        } else if (location.protocol.startsWith('http')) {
+            // Served by the Node server itself (localhost, Render or a tunnel): use that server.
+            fetch('/health', { cache: 'no-store' })
+                .then((res) => (res.ok ? res.json() : null))
+                .then((body) => { if (body?.status === 'ok') useServer(location.origin); })
+                .catch(() => {});
+        }
+        // A sleeping Render server takes up to a minute to start, so wake it before the first click.
+        fetch(`${server}/health`, { mode: 'no-cors', cache: 'no-store' }).catch(() => {});
+
+        // The widget shows only raw errors ("Failed to fetch", "Server error: ..."), so name the cause here.
+        const waitFor = (res) => {
+            const seconds = Number(res.headers.get('Retry-After')) || 60;
+            return seconds < 3600 ? `${Math.ceil(seconds / 60)} min` : `${Math.ceil(seconds / 3600)} h`;
+        };
+        const reasons = {
+            403: () => `${server} does not accept calls from ${location.origin}: add it to WEB_CALL_ALLOWED_ORIGINS on the server.`,
+            404: () => `${server} does not know this agent. Check app-id, org-id and workspace-id in this page.`,
+            429: (res) => `Too many calls were started from this network. Try again in about ${waitFor(res)}.`,
+            503: () => `${server} is up but cannot start calls: its SARVAM_API_KEY is missing or Sarvam refused it. `
+                + 'Set the workspace key in the server environment (on Render: Environment), then try again.',
+        };
+        const nativeFetch = window.fetch.bind(window);
+        window.fetch = async (input, init) => {
+            const url = String(input instanceof Request ? input.url : input);
+            if (!url.startsWith(`${server}/api/sarvam/`)) return nativeFetch(input, init);
+            show(`Starting the call through ${server}...`);
+            try {
+                const res = await nativeFetch(input, init);
+                if (res.ok) show(`Connected to ${server}. If the call does not start, allow the microphone and try again.`);
+                else show(reasons[res.status]?.(res) || `${server} answered ${res.status}. Try again in a minute.`, true);
+                return res;
+            } catch (err) {
+                show(`Cannot reach ${server}. Check the internet connection and the server address, then try again.`, true);
+                throw err;
+            }
+        };
     </script>
     <script src="https://unpkg.com/sarvam-convai-embed@1.0.20/index.js"></script>
 </body>
