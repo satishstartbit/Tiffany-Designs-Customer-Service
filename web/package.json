@@ -2,15 +2,18 @@
   "name": "tiffany-designs-voice-web",
   "version": "1.0.0",
   "private": true,
-  "description": "Web page for calling the Tiffany Designs voice agent (Next.js, deployed on Vercel)",
+  "type": "module",
+  "description": "Tiffany Designs service console and voice agent call page (Next.js, deployed on Vercel)",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start"
   },
   "dependencies": {
+    "lucide-react": "^1.57.0",
     "next": "16.4.1",
     "react": "19.3.1",
-    "react-dom": "19.3.1"
+    "react-dom": "19.3.1",
+    "server-only": "^0.0.1"
   }
 }

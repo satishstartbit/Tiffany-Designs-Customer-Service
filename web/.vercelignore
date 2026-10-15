@@ -1,0 +1,4 @@
+# Keys are set in Vercel (Settings, Environment Variables); local env files never go up.
+.env
+.env.*
+!.env.example

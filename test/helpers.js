@@ -279,7 +279,7 @@ function createFakeSarvam({ canStartCalls = true, canStartWebCalls = true } = {}
   };
 }
 
-async function startTestServer({ nowMs = Date.parse('2026-10-14T06:30:00Z'), config = testConfig(), instantCalls = true, webCalls = true } = {}) {
+async function startTestServer({ nowMs = Date.parse('2026-10-14T06:30:00Z'), config = testConfig(), instantCalls = true, webCalls = true, consoleData } = {}) {
   const clock = { now: nowMs };
   const now = () => clock.now;
   const crm = createFakeCrm({ now });
@@ -298,6 +298,7 @@ async function startTestServer({ nowMs = Date.parse('2026-10-14T06:30:00Z'), con
     config,
     now,
     logger,
+    consoleData,
     checkSalesforce: async () => ({ dailyApiRequests: { Max: 15000, Remaining: 14999 } }),
   });
 

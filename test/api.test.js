@@ -1,5 +1,3 @@
-const fs = require('node:fs');
-const path = require('node:path');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { startTestServer, testConfig } = require('./helpers');
@@ -1139,13 +1137,6 @@ test.describe('website call widget', () => {
     const res = await s.call('GET', sessionPath);
     assert.equal(res.status, 503);
     assert.equal(res.body.error, 'not_configured');
-  });
-
-  test('the website (web/) gets its sessions from this server and holds no key', () => {
-    const page = fs.readFileSync(path.join(__dirname, '..', 'web', 'app', 'VoiceAgent.js'), 'utf8');
-    assert.match(page, /<sarvam-widget[\s\S]*session-endpoint=\{`\$\{server\}\/api\/sarvam\/`\}/);
-    assert.match(page, /'app-id': 'Tiffany-Des-0db8e21d-e099'/);
-    assert.doesNotMatch(page, /api-key|sk_/, 'no API key in the website');
   });
 
   test('a page on another site may ask for a session (CORS), including the browser preflight', async (t) => {

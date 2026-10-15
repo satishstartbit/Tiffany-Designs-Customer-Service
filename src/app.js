@@ -7,10 +7,11 @@ const callsRouter = require('./routes/calls');
 const agentToolsRouter = require('./routes/agentTools');
 const webhooksRouter = require('./routes/webhooks');
 const webCallsRouter = require('./routes/webCalls');
+const adminRouter = require('./routes/admin');
 
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 
-function createApp({ crm, sarvam, scheduler, config, checkSalesforce, limiter, webCallLimiter, now = () => Date.now(), logger = console }) {
+function createApp({ crm, sarvam, scheduler, config, checkSalesforce, limiter, webCallLimiter, consoleData, now = () => Date.now(), logger = console }) {
   const app = express();
   // Render and Vercel sit behind proxies; the visitor address comes from X-Forwarded-For.
   app.set('trust proxy', true);
@@ -61,6 +62,7 @@ function createApp({ crm, sarvam, scheduler, config, checkSalesforce, limiter, w
   app.get('/api/cron/jobs', cronSecret, async (req, res) => res.json(await scheduler.tick()));
   app.use('/api/agent', agentSecret, agentToolsRouter({ crm, now }));
   app.use('/api/webhooks', webhookToken, webhooksRouter({ crm, now, logger }));
+  if (consoleData) app.use('/api/admin', internalKey, adminRouter({ consoleData }));
   app.use('/api/sarvam', webCallsRouter({
     sarvam,
     config,

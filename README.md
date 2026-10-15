@@ -52,6 +52,7 @@ All business logic runs in Node (`src/crm/`). The server reads and writes record
 | `POST /api/calls/request` | `x-api-key` (internal or site key) | `{ phone, consent: true, name?, orderNumber?, recordId?, source? }`; the agent calls now (Sarvam Instant Outbound), rate-limited per number and overall |
 | `POST /api/calls/notify` | `x-api-key` | `{ caseId \| caseNumber, event }`, where `event` is `case_registered`, `appointment_scheduled` or `replacement_dispatched` |
 | `GET /api/jobs` | `x-api-key` | Scheduled calls and their status |
+| `GET /api/admin/*` | `x-api-key` (internal) | Read-only data for the service console (`web/`), from Salesforce: `summary`, `products` and `products/:id`, `orders` and `orders/:id`, `customers` and `customers/:id`, `cases` and `cases/:id`, `field-service`, `activities`, `requests`, `service`. Lists take `q`, filters checked against the org's picklists, `page` and `pageSize` (up to 100) |
 | `GET /api/cron/jobs` | `Authorization: Bearer <CRON_SECRET>` | Places the scheduled calls that are due (Vercel Cron, every 5 minutes) |
 | `POST /api/agent/*` | `x-agent-secret` | The 14 agent tools; see [sarvam/README.md](sarvam/README.md) |
 | `POST /api/webhooks/sarvam?token=…` | token | Sarvam call-end webhook |
@@ -96,13 +97,18 @@ Steps:
 
 `.vercelignore` keeps `salesforce/`, `sarvam/`, `scripts/`, `test/`, `web/` and `.env` out of the upload; only `public/` (robots.txt) is served as static files.
 
-## Voice call website (Next.js on Vercel)
+## Service console and voice call site (Next.js on Vercel)
 
-`web/` is a separate Next.js app (it replaced the old `public/test.html`): a page where a visitor clicks **Begin call** to talk to the agent in the browser. It holds no key: the widget gets each signed call URL from the Node server's `/api/sarvam/` (Render by default), and a line on the page names the server and, when a call cannot start, the reason.
+`web/` is a separate Next.js app (it replaced the old `public/test.html`) with two parts:
 
-- Local: `cd web`, `npm install`, `npm run dev`, then open http://localhost:3000 (add `?server=http://localhost:8081` to use the local Node server).
-- Vercel: add a new project from this repository with **Root Directory** `web` (framework Next.js is detected), or run `npx vercel --prod` inside `web/`. No variables are needed; `NEXT_PUBLIC_VOICE_SERVER_URL` changes the Node server it calls (default `https://tiffany-designs-customer-service.onrender.com`).
-- The Node server must accept the site: it does with the default `WEB_CALL_ALLOWED_ORIGINS=*`; if that is narrowed, add the Vercel domain. Calls also need a working `SARVAM_API_KEY` on that server.
+- **The service console** (`/`, behind a staff sign-in): dashboard, products by category, orders, customers, cases, requests (call backs, scheduled calls, to-dos), technician visits and replacement shipments, calls and emails, the voice agent's hours and coverage, and a search across all of them. Each page reads Salesforce live through the Node server's `/api/admin` (below), from the site's server with `NODE_API_KEY` (the Node server's `INTERNAL_API_KEY`); no browser holds that key. The sign-in is `ADMIN_EMAIL` / `ADMIN_PASSWORD`, kept in a signed cookie (`SESSION_SECRET`) for 12 hours, with wrong passwords limited per visitor. The look follows the ROCCO storefront: warm off-white, black uppercase buttons, maroon accents, Red Hat Display.
+- **The voice agent call** (the button at the bottom right of every console page, and the public page `/call`): the visitor clicks **Begin call** to talk to the agent in the browser.
+
+For calls, the site has its own session endpoint, `app/api/sarvam/orgs/[orgId]/workspaces/[workspaceId]/apps/[appId]/url/route.js` (logic in `lib/webSession.js`), so it needs no other server: the Sarvam key stays in the site's server environment, and the browser only gets the signed call URL. Like the Node server's route, it reaches only the Tiffany agent, allows each visitor 5 calls per 10 minutes and 20 per day (30 per hour and 200 per day overall), and counts only calls that got a link. A line on the page names the server it uses and, when a call cannot start, the reason. Variables are listed in `web/.env.example`.
+
+- **Local:** `cd web`, `npm install`, fill `web/.env.local` from `web/.env.example` (`SARVAM_API_KEY` is the `sk_samvaad_` key from `.env`, `NODE_API_URL=http://localhost:8081`, `NODE_API_KEY` is `INTERNAL_API_KEY` from `.env`), run the Node server (`npm run dev` at the root) and `npm run dev` in `web/`, then open http://localhost:3000 and sign in. `?server=http://localhost:8081` makes calls go through the local Node server.
+- **Vercel:** add a new project from this repository and set **Root Directory** to `web` (Next.js is detected; `web/vercel.json` runs the functions in Mumbai, `bom1`). Under Settings → Environment Variables add `SARVAM_API_KEY` (the value only, no quotes), `NODE_API_URL` (the Render URL), `NODE_API_KEY`, `ADMIN_EMAIL`, `ADMIN_PASSWORD` and `SESSION_SECRET`, optionally `SARVAM_APP_VERSION=3`, then deploy. The Node server must run the code with `/api/admin` (push it to Render first). For limits shared by all instances, connect Upstash Redis under Storage (it sets `KV_REST_API_URL` and `KV_REST_API_TOKEN`); without it each instance counts on its own. The CLI also works: `npx vercel --prod` inside `web/`; `web/.vercelignore` keeps local `.env` files out of the upload.
+- Do not set `NEXT_PUBLIC_VOICE_SERVER_URL` on Vercel unless the site should use another server's `/api/sarvam/` (for example Render); that server then needs the key, and must allow the site in `WEB_CALL_ALLOWED_ORIGINS` if that is narrowed.
 
 ## Remaining setup
 
