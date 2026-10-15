@@ -110,6 +110,14 @@
       "committed_id": null,
       "path": "/api/agent/details-on-file",
       "modules": [5, 6, 7, 8, 10]
+    },
+    {
+      "name": "get_installation_address",
+      "id": null,
+      "committed_id": null,
+      "path": "/api/agent/installation-address",
+      "modules": [6, 9],
+      "status": "Endpoint written; the Sarvam tool is not created yet. Body params: order_id, order_number, invoice_number (all optional strings, one is needed). Also to push: book_installation gets at_delivery_address (boolean), and book_installation and register_service_request get new_request (boolean)."
     }
   ],
   "ids_note": "Each version holds its own copy of the tools. committed_id is frozen in committed version 3; id is the editable draft (version 4), which is what any change edits before the next commit. The last five tools exist only in the draft until version 4 is committed, after their endpoints are deployed to Render. In the draft, register_service_request, book_installation and request_human_callback take use_details_on_file and no longer require phone."

@@ -319,10 +319,11 @@ function createFakeSarvam({ canStartCalls = true, canStartWebCalls = true } = {}
   };
 }
 
-async function startTestServer({ nowMs = Date.parse('2026-10-14T06:30:00Z'), config = testConfig(), instantCalls = true, webCalls = true, consoleData } = {}) {
+// `crm` replaces the in-memory fake, for example with the real one over a fake Salesforce.
+async function startTestServer({ nowMs = Date.parse('2026-10-14T06:30:00Z'), config = testConfig(), instantCalls = true, webCalls = true, consoleData, crm: realCrm } = {}) {
   const clock = { now: nowMs };
   const now = () => clock.now;
-  const crm = createFakeCrm({ now });
+  const crm = realCrm || createFakeCrm({ now });
   const sarvam = createFakeSarvam({ canStartCalls: instantCalls, canStartWebCalls: webCalls });
   const logger = { error() {}, warn() {}, log() {} };
   const scheduler = createScheduler({

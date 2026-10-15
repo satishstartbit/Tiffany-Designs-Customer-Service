@@ -645,15 +645,29 @@ function createCrm({
     if (onFile && !mobile) {
       return { created: false, error: 'No mobile number is on file for this order. Ask the customer for a mobile number to reach them on.' };
     }
-    const givenPlace = Boolean(input.city || input.postalCode);
-    const location = givenPlace || !(onFile?.city || onFile?.postalCode)
-      ? await serviceLocation(input, order)
-      : { city: onFile.city, state: onFile.state, postalCode: onFile.postalCode };
+
+    // The caller chose the address the order was delivered to, or the customer's address on file when the order has
+    // none; any address given with it is ignored.
+    let delivery = null;
+    if (input.atDeliveryAddress) {
+      if (!order) return { created: false, error: 'The order is needed to use its delivery address. Ask for the order id, order number or invoice number.' };
+      delivery = onFile || await getDetailsOnFile({ order });
+      if (!delivery.city && !delivery.postalCode) {
+        return { created: false, error: 'No delivery address is on record for this order. Ask for the house, street and area, the city and the six digit PIN code.' };
+      }
+    }
+    const addressSource = !delivery ? null : order.city || order.postalCode ? 'delivery' : 'customer';
+
+    const givenPlace = !delivery && Boolean(input.city || input.postalCode);
+    const fromFile = delivery || (!givenPlace && (onFile?.city || onFile?.postalCode) ? onFile : null);
+    const location = fromFile
+      ? { city: fromFile.city, state: fromFile.state, postalCode: fromFile.postalCode }
+      : await serviceLocation(input, order);
     if (onFile && !ADDRESS_FREE_ISSUES.has(input.issueType) && !location.city && !location.postalCode) {
       return { created: false, error: 'No address is on file for this order. Ask for the house, street and area, the city and the six digit PIN code.' };
     }
     // A new city or PIN code means a new address, so the street on file no longer applies.
-    const street = input.address || (onFile && !givenPlace ? onFile.street : null);
+    const street = delivery ? delivery.street : input.address || (onFile && !givenPlace ? onFile.street : null);
 
     let customer;
     if (verified.found) customer = { id: verified.contactId, accountId: order.accountId };
@@ -664,11 +678,13 @@ function createCrm({
 
     const changed = [
       onFile && input.phone && onFile.mobile && lastTenDigits(input.phone) !== lastTenDigits(onFile.mobile) && 'mobile number',
-      onFile && (givenPlace || input.address) && 'address',
+      onFile && !delivery && (givenPlace || input.address) && 'address',
     ].filter(Boolean);
     const detailsNote = !onFile ? null : changed.length
       ? `The customer gave a new ${changed.join(' and ')} for this request; the details on file are unchanged.`
       : 'The customer confirmed the mobile number and address on file.';
+    const placeNote = addressSource === 'delivery' ? 'The customer chose the delivery address of the order.'
+      : addressSource === 'customer' ? 'The customer chose their address on file; the order has no delivery address.' : null;
     const withinBusinessHours = await businessHours.isOpen(new Date(now())).catch(() => true);
 
     const description = [
@@ -683,6 +699,7 @@ function createCrm({
       input.erpOrderId && `Order id given: ${input.erpOrderId}`,
       street && `Address: ${street}`,
       (input.preferredDate || input.preferredTime) && `Preferred slot: ${[input.preferredDate, input.preferredTime].filter(Boolean).join(' ')}`,
+      placeNote,
       detailsNote,
       'Captured by the AI voice agent.',
     ].filter(Boolean).join('\n');
@@ -718,6 +735,7 @@ function createCrm({
       orderVerified: verified.found,
       orderLinked: Boolean(order),
       ...(onFile ? { usedDetailsOnFile: true } : {}),
+      ...(addressSource ? { addressSource } : {}),
     };
   }
 

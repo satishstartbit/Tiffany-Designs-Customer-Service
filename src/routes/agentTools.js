@@ -37,6 +37,13 @@ const capitalized = (text) => text.charAt(0).toUpperCase() + text.slice(1);
 // "302021" as "3 0 2 0 2 1", so the voice reads digits rather than a large number.
 const spokenDigits = (value) => String(value || '').replace(/\D/g, '').split('').join(' ');
 
+// " in Jaipur, Rajasthan, PIN code 3 0 2 0 2 1": the parts of an address on file the agent may say. "Delhi, Delhi" is
+// said once, and the street never.
+function placeWords({ city, state, postalCode }) {
+  const where = [...new Map([city, state].filter(Boolean).map((p) => [p.toLowerCase(), p])).values()].join(', ');
+  return `${where ? ` in ${where}` : ''}${postalCode ? `, PIN code ${spokenDigits(postalCode)}` : ''}`;
+}
+
 function callOutcome(disposition) {
   if (!disposition) return 'no outcome recorded';
   if (/^not connected/i.test(disposition)) return 'not answered';
@@ -154,6 +161,7 @@ module.exports = function agentToolsRouter({ crm, now = () => Date.now() }) {
       preferredTime: body.preferred_time,
       useDetailsOnFile: body.use_details_on_file === true || body.use_details_on_file === 'true',
       newRequest: body.new_request === true || body.new_request === 'true',
+      atDeliveryAddress: body.at_delivery_address === true || body.at_delivery_address === 'true',
     };
   }
 
@@ -308,11 +316,7 @@ module.exports = function agentToolsRouter({ crm, now = () => Date.now() }) {
     const ending = details.mobile ? lastTenDigits(details.mobile).slice(-4) : null;
     const hasAddress = Boolean(details.city || details.postalCode);
     const mobilePart = ending ? `the mobile number ending ${spokenDigits(ending)}` : null;
-    // "Delhi, Delhi" is said once.
-    const where = [...new Map([details.city, details.state].filter(Boolean).map((p) => [p.toLowerCase(), p])).values()].join(', ');
-    const addressPart = hasAddress
-      ? `the ${order ? 'delivery ' : ''}address${where ? ` in ${where}` : ''}${details.postalCode ? `, PIN code ${spokenDigits(details.postalCode)}` : ''}`
-      : null;
+    const addressPart = hasAddress ? `the ${order ? 'delivery ' : ''}address${placeWords(details)}` : null;
     let message;
     if (mobilePart && addressPart) message = `On file: ${mobilePart}, and ${addressPart}. Ask the customer whether to use these for the request.`;
     else if (addressPart) message = `On file: ${addressPart}. No mobile number is on file, so ask for one.`;
@@ -329,6 +333,45 @@ module.exports = function agentToolsRouter({ crm, now = () => Date.now() }) {
       state: details.state,
       postal_code: details.postalCode,
       message,
+    });
+  });
+
+  // Where to install: the address the order was delivered to (the customer's address on file when the order has
+  // none), so the agent asks the caller whether to install there or somewhere else, and the mobile number on file to
+  // confirm after that. As with get_details_on_file, only the city, state, PIN code and the mobile's last four digits
+  // are given; book_installation fills in the full address when the caller chooses it (at_delivery_address).
+  router.post('/installation-address', async (req, res) => {
+    const { order, problem } = await orderFromReferences(req.body || {});
+    if (problem) return res.json({ found: false, message: problem });
+    if (!order) {
+      return res.json({ found: false, message: 'The order id, order number or invoice number is needed to find where the order was delivered.' });
+    }
+
+    const details = await crm.getDetailsOnFile({ order });
+    const source = order.city || order.postalCode ? 'delivery' : details.city || details.postalCode ? 'customer' : null;
+    const ending = details.mobile ? lastTenDigits(details.mobile).slice(-4) : null;
+    const delivered = order.deliveryStatus === 'Delivered';
+    const name = order.erpOrderId || spokenCaseNumber(order.orderNumber);
+    const ask = 'Ask the customer whether the installation should be at this address or somewhere else.';
+    const address = {
+      delivery: `Order ${name} ${delivered ? 'was delivered' : 'is to be delivered'} to the address${placeWords(details)}. ${ask}`,
+      customer: `Order ${name} has no delivery address on record. The customer's address on file is${placeWords(details)}. ${ask}`,
+    }[source] || `No address is on record for order ${name}. Ask where the installation should be: the house, street and area, then the city, then the six digit PIN code.`;
+    const mobile = ending
+      ? ` After that, ask whether to use the mobile number ending ${spokenDigits(ending)}.`
+      : ' No mobile number is on file, so ask for one after that.';
+
+    return res.json({
+      found: true,
+      order_id: order.erpOrderId || null,
+      delivered,
+      address_source: source,
+      city: source ? details.city : null,
+      state: source ? details.state : null,
+      postal_code: source ? details.postalCode : null,
+      mobile_on_file: Boolean(ending),
+      mobile_ending: ending,
+      message: `${address}${mobile}`,
     });
   });
 
@@ -422,7 +465,8 @@ module.exports = function agentToolsRouter({ crm, now = () => Date.now() }) {
       reschedule ? 'installation_reschedule' : 'installation',
     ));
     const slot = [resolved.spoken, req.body.preferred_time].filter(Boolean).join(', ');
-    return caseResponse(res, result, (n) => `Installation request ${n} is registered with a preferred slot of ${slot}. The service team confirms the appointment.`);
+    const place = { delivery: ' at the delivery address', customer: ' at the address on file' }[result.addressSource] || '';
+    return caseResponse(res, result, (n) => `Installation request ${n} is registered${place} with a preferred slot of ${slot}. The service team confirms the appointment.`);
   });
 
   router.post('/escalate', async (req, res) => {
