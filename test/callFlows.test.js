@@ -4,9 +4,9 @@ const { openingLine, outboundOverrides, noticeFor, noticeJobId, createJobHandler
 const { createFakeSarvam } = require('./helpers');
 
 test('outbound calls open by confirming who answered, without mentioning the order', () => {
-  assert.equal(openingLine('delivery_followup', 'Aarav Sharma'), 'Hello, this is the Tiffany Designs service assistant. Am I speaking with Aarav Sharma?');
-  assert.equal(openingLine('delivery_followup', null), 'Hello, this is the Tiffany Designs service assistant. May I know who I am speaking with?');
-  assert.equal(openingLine('callback_request', 'Meera'), 'Hello, this is the Tiffany Designs service assistant, calling back as requested. Am I speaking with Meera?');
+  assert.equal(openingLine('delivery_followup', 'Aarav Sharma'), 'Hello, this is the Tiffany Designs AI service assistant. Am I speaking with Aarav Sharma?');
+  assert.equal(openingLine('delivery_followup', null), 'Hello, this is the Tiffany Designs AI service assistant. May I know who I am speaking with?');
+  assert.equal(openingLine('callback_request', 'Meera'), 'Hello, this is the Tiffany Designs AI service assistant, calling back as requested. Am I speaking with Meera?');
   for (const reason of ['delivery_followup', 'callback_request', 'service_update']) {
     assert.doesNotMatch(openingLine(reason, 'X'), /order|delivery|case|request \d/i, reason);
   }

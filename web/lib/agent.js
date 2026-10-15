@@ -1,5 +1,6 @@
-// The name the voice agent introduces itself by, shown to customers and staff.
-export const AGENT_NAME = 'Satish Choudhary';
+// What the voice agent calls itself, shown to customers and staff. It reads as a description, so sentences put
+// "the" before it.
+export const AGENT_NAME = 'Tiffany Designs AI service assistant';
 
 // The one voice agent this site may reach. These ids are public: the browser widget needs them.
 export const AGENT = {

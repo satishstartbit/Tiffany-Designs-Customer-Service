@@ -75,7 +75,7 @@ module.exports = function callsRouter({ crm, sarvam, scheduler, config, now, lim
     }
 
     await limiter.record({ phone });
-    return res.status(202).json({ queued: true, phone, ...result, message: 'The Tiffany Designs assistant will call this number in a few seconds.' });
+    return res.status(202).json({ queued: true, phone, ...result, message: 'The Tiffany Designs AI service assistant will call this number in a few seconds.' });
   });
 
   // Service update call (module 13): Salesforce reports a case event and the agent tells the customer.

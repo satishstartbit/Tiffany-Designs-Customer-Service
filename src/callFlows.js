@@ -26,7 +26,7 @@ function followUpJobId(orderId) {
 // Outbound calls open by confirming who answered; nothing about the order is said before that.
 function openingLine(reason, customerName) {
   const who = customerName ? `Am I speaking with ${customerName}?` : 'May I know who I am speaking with?';
-  const intro = 'Hello, this is the Tiffany Designs service assistant';
+  const intro = 'Hello, this is the Tiffany Designs AI service assistant';
   return reason === CALL_REASONS.callbackRequest ? `${intro}, calling back as requested. ${who}` : `${intro}. ${who}`;
 }
 

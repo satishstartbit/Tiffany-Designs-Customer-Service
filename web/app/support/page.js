@@ -14,7 +14,7 @@ import { dateTime, minutesOfDay, time } from '@/lib/format.js';
 
 export const metadata = {
   title: 'Customer care',
-  description: 'Talk to Satish Choudhary, the Tiffany Designs AI assistant, from your browser: order status, installation, damaged or missing parts, replacements and new orders.',
+  description: 'Talk to the Tiffany Designs AI service assistant from your browser: order status, installation, damaged or missing parts, replacements and new orders.',
 };
 
 const HELP = [
@@ -66,7 +66,7 @@ export default async function SupportPage() {
         <section className="site-hero">
           <div className="site-hero-text">
             <div className="eyebrow">Customer care</div>
-            <h1>Talk to {AGENT_NAME}, our AI assistant</h1>
+            <h1>Talk to the {AGENT_NAME}</h1>
             <p>
               Track an order, book installation, report a damaged or missing part, or order furniture, by voice, right here in your browser.
               No app to install and no waiting on hold.
@@ -76,14 +76,14 @@ export default async function SupportPage() {
               {/* <a className="btn btn-outline" href={telLink(SUPPORT_PHONE)}><Phone aria-hidden="true" /> Call {SUPPORT_PHONE}</a> */}
             </div>
             <p className="small muted" style={{ marginTop: 14 }}>
-              {AGENT_NAME} answers any time. Requests registered on the call go straight to our service team.
+              The {AGENT_NAME} answers any time. Requests registered on the call go straight to our service team.
             </p>
           </div>
           <div className="call-art" aria-hidden="true">
             <div className="call-card">
               <div className="call-ring"><Mic /></div>
-              <strong>{AGENT_NAME}</strong>
-              <span>Tiffany Designs AI assistant</span>
+              <strong>AI service assistant</strong>
+              <span>Tiffany Designs customer care</span>
               <div className="wave">{Array.from({ length: 13 }, (_, i) => <span key={i} style={{ animationDelay: `${(i % 7) * 0.12}s` }} />)}</div>
               <span className="call-live"><span className="dot on" /> Ready to talk</span>
             </div>
@@ -126,7 +126,7 @@ export default async function SupportPage() {
           <ol className="steps">
             <li><strong>Start the call</strong><span>Press Start a voice call, or the button at the bottom right of this page.</span></li>
             <li><strong>Allow the microphone</strong><span>Your browser asks once. Use a quiet place and your phone or computer&apos;s microphone.</span></li>
-            <li><strong>Speak naturally</strong><span>Tell {AGENT_NAME} what you need. You get a request or order number before the call ends.</span></li>
+            <li><strong>Speak naturally</strong><span>Tell the assistant what you need. You get a request or order number before the call ends.</span></li>
           </ol>
           <div style={{ textAlign: 'center', marginTop: 28 }}>
             <StartCallButton />
@@ -152,12 +152,12 @@ export default async function SupportPage() {
                   ))}
                 </div>
                 <p className="small muted" style={{ marginBottom: 0 }}>
-                  {openDays.length ? 'Times are India time. ' : ''}{AGENT_NAME} takes your request at any hour; our team picks it up when they are back.
+                  {openDays.length ? 'Times are India time. ' : ''}The AI service assistant takes your request at any hour; our team picks it up when they are back.
                 </p>
               </>
             ) : (
               <p className="muted" style={{ margin: 0, textAlign: 'center' }}>
-                {AGENT_NAME} takes your request at any hour; our service team picks it up on working days.
+                The AI service assistant takes your request at any hour; our service team picks it up on working days.
               </p>
             )}
           </div>

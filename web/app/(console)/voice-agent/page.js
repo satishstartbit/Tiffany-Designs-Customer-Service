@@ -34,7 +34,7 @@ export default async function VoiceAgentPage() {
       <PageHeader
         eyebrow={AGENT_NAME}
         title="AI voice agent"
-        description={`${AGENT_NAME} is the customer service voice agent. It works on the same Salesforce data as this console: what it creates on a call shows up here. Customers talk to it on the public customer care page, which needs no sign-in; open it to try a call.`}
+        description={`The ${AGENT_NAME} is the customer service voice agent. It works on the same Salesforce data as this console: what it creates on a call shows up here. Customers talk to it on the public customer care page, which needs no sign-in; open it to try a call.`}
         actions={<Link className="btn" href="/support" target="_blank">Open customer care page</Link>}
       />
 

@@ -8,7 +8,7 @@ import { SUPPORT_PHONE } from '@/lib/contact.js';
 
 // The widget titles its panel with its maker's name and has no setting for it, so the title is replaced with the
 // agent's own name, and any other mention of the maker with the brand.
-const PANEL_TITLE = `${AGENT_NAME}, Tiffany Designs`;
+const PANEL_TITLE = AGENT_NAME;
 
 // Only visible text: the widget's style sheet uses its maker's name in animation names, which must stay.
 const visibleText = {

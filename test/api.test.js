@@ -88,7 +88,7 @@ test.describe('delivery follow-up scheduling', () => {
         call_reason: 'delivery_followup',
       },
       overrides: {
-        initial_bot_message: 'Hello, this is the Tiffany Designs service assistant. Am I speaking with Aarav Sharma?',
+        initial_bot_message: 'Hello, this is the Tiffany Designs AI service assistant. Am I speaking with Aarav Sharma?',
         initial_language_name: 'English',
       },
     }]);
@@ -197,7 +197,7 @@ test.describe('customer callback requests (website "call me" panel)', () => {
     const [call] = s.sarvam.started;
     assert.equal(call.phone, '+919876543210');
     assert.deepEqual(call.variables, { customer_name: 'Aarav', customer_phone: '+919876543210', order_number: 'TD-ORD-1001', call_reason: 'callback_request' });
-    assert.equal(call.overrides.initial_bot_message, 'Hello, this is the Tiffany Designs service assistant, calling back as requested. Am I speaking with Aarav?');
+    assert.equal(call.overrides.initial_bot_message, 'Hello, this is the Tiffany Designs AI service assistant, calling back as requested. Am I speaking with Aarav?');
     assert.deepEqual(call.webhook, {
       url: 'https://voice.example.test/api/webhooks/sarvam?token=hook-token',
       metadata: { identifier: 'callback:+919876543210', source: 'website', record_id: '003gK000015ycGjQAI' },
