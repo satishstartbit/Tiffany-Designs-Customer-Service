@@ -90,9 +90,9 @@ export default function ConsoleShell({ email, children }) {
       <div className="main">
         <div className="utility-bar">
           <span>
-            <Phone aria-hidden="true" /> +91-98739-92500
+            <Phone aria-hidden="true" /> +91-98739-99999
             <span aria-hidden="true">·</span>
-            <Mail aria-hidden="true" /> info@tiffanydesigns.in
+            <Mail aria-hidden="true" /> demo@tiffanydesigns.in
           </span>
           <span>
             <Headset aria-hidden="true" /> Customer service console · Salesforce data, live
