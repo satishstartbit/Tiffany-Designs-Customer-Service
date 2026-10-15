@@ -1,4 +1,4 @@
-const { lastTenDigits, normalizePhone, nameWords, namesMatch } = require('../rules');
+const { lastTenDigits, normalizePhone, nameWords, namesMatch, joinDigits, trailingNumber, sameReference } = require('../rules');
 const { todayInIst } = require('../dates');
 const { createBusinessHours } = require('./businessHours');
 const { parseItems } = require('./orderItems');
@@ -132,11 +132,6 @@ function idForms(value) {
   return [...new Set([raw, dashed].filter(Boolean))].map((f) => `'${escapeSoql(f)}'`).join(', ');
 }
 
-function sameId(a, b) {
-  const plain = (v) => String(v || '').toUpperCase().replace(/[\s_-]+/g, '');
-  return plain(a) !== '' && plain(a) === plain(b);
-}
-
 // Salesforce order number as stored (8 digits) from "122", "00000122", "ORD-00000122" or "order number 122".
 function orderNumberOf(reference) {
   const match = /^(?:ord(?:er)?)?(?:\s*(?:no|number))?[\s.#:-]*([\d\s]{1,14})$/i.exec(String(reference || '').trim());
@@ -239,13 +234,21 @@ function createCrm({
   const getOrderByErpId = (erpOrderId) => queryOrder(`ERP_Order_Id__c = '${escapeSoql(String(erpOrderId).trim())}'`);
   const getOrderByInvoice = (invoiceNumber) => queryOrder(`Invoice_Number__c IN (${idForms(invoiceNumber)})`);
 
-  // Every order carrying an invoice number (the org has duplicates); line items are not loaded.
+  // Every order an invoice number names (the org has duplicates); line items are not loaded. The exact number
+  // first ("INV-009", "inv 009"); else the invoices ending in the number the caller said ("009" or "9" for INV-009).
   async function findOrdersByInvoice(invoiceNumber) {
-    if (!String(invoiceNumber || '').trim()) return [];
-    const rows = await salesforce.query(
-      `SELECT ${ORDER_FIELDS} FROM Order WHERE Invoice_Number__c IN (${idForms(invoiceNumber)}) ORDER BY CreatedDate DESC LIMIT 5`,
+    const ref = joinDigits(invoiceNumber);
+    if (!ref) return [];
+    const exact = await salesforce.query(
+      `SELECT ${ORDER_FIELDS} FROM Order WHERE Invoice_Number__c IN (${idForms(ref)}) ORDER BY CreatedDate DESC LIMIT 5`,
     );
-    return rows.map((r) => toOrder(r));
+    if (exact.length) return exact.map((r) => toOrder(r));
+    const number = trailingNumber(ref);
+    if (!number) return [];
+    const rows = await salesforce.query(
+      `SELECT ${ORDER_FIELDS} FROM Order WHERE Invoice_Number__c LIKE '%${number}%' ORDER BY CreatedDate DESC LIMIT 50`,
+    );
+    return rows.filter((r) => sameReference(ref, r.Invoice_Number__c)).slice(0, 5).map((r) => toOrder(r));
   }
 
   async function findRecentOrdersForAccount(accountId, limit = 5) {
@@ -273,18 +276,31 @@ function createCrm({
   // Unknown and unverified orders give the same answer, so order ids cannot be probed.
   // A caller without the mobile or invoice can give the full name on the order instead (first and last name).
   // `verification` is one factor or a list (invoice numbers and mobiles); any one of them is enough.
-  // The order a caller means by an ERP id ("TD-ORD-1001", "ORD-010") or, for a phone order, its Salesforce order
-  // number ("122", "ORD-00000122"). No ownership check; line items are not loaded.
-  async function findOrderByReference(reference) {
-    const ref = String(reference || '').trim();
-    if (!ref) return null;
+  // Every order a caller may mean by a reference, the surest kind first. The exact ERP id ("TD-ORD-1009",
+  // "td ord 1009"; "ORD-010" is an ERP id, not order number 10); else every order whose Salesforce order number is
+  // the number said ("120", "ORD-00000120") or whose ERP id ends in it ("1009" or "ORD 1009" for TD-ORD-1009,
+  // "9" for ORD-009). More than one means the caller has to say more. No ownership check; line items are not loaded.
+  async function findOrdersByReference(reference) {
+    const ref = joinDigits(reference);
+    if (!ref) return [];
+    const exact = await salesforce.query(`SELECT ${ORDER_FIELDS} FROM Order WHERE ERP_Order_Id__c IN (${idForms(ref)}) LIMIT 2`);
+    if (exact.length) return exact.map((r) => toOrder(r));
+    const number = trailingNumber(ref);
+    if (!number) return [];
     const orderNumber = orderNumberOf(ref);
-    const where = orderNumber
-      ? `(ERP_Order_Id__c IN (${idForms(ref)}) OR OrderNumber = '${orderNumber}')`
-      : `ERP_Order_Id__c IN (${idForms(ref)})`;
-    const rows = await salesforce.query(`SELECT ${ORDER_FIELDS} FROM Order WHERE ${where} LIMIT 2`);
-    // "ORD-010" is an ERP id and also reads as order number 10; the ERP id wins.
-    return toOrder(rows.find((r) => r.ERP_Order_Id__c && sameId(r.ERP_Order_Id__c, ref)) || rows[0]);
+    const rows = await salesforce.query(
+      `SELECT ${ORDER_FIELDS} FROM Order WHERE ${orderNumber ? `OrderNumber = '${orderNumber}' OR ` : ''}`
+      + `ERP_Order_Id__c LIKE '%${number}%' ORDER BY CreatedDate DESC LIMIT 50`,
+    );
+    return rows
+      .filter((r) => (orderNumber && r.OrderNumber === orderNumber) || (r.ERP_Order_Id__c && sameReference(ref, r.ERP_Order_Id__c)))
+      .map((r) => toOrder(r));
+  }
+
+  // The one order a reference names, or null when none or several do.
+  async function findOrderByReference(reference) {
+    const matches = await findOrdersByReference(reference);
+    return matches.length === 1 ? matches[0] : null;
   }
 
   async function verifyOrder(erpOrderId, verification, { customerName } = {}) {
@@ -293,7 +309,7 @@ function createCrm({
     const order = await findOrderByReference(erpOrderId);
     if (!order) return { found: false };
 
-    const byInvoice = Boolean(order.invoiceNumber) && factors.some((f) => sameId(f, order.invoiceNumber));
+    const byInvoice = Boolean(order.invoiceNumber) && factors.some((f) => sameReference(f, order.invoiceNumber));
     const contacts = order.accountId ? await accountContacts(order.accountId) : [];
     const mobiles = factors.map(lastTenDigits).filter(Boolean);
     const matched = contacts.find((c) => [c.mobile, c.phone].some((p) => p && mobiles.includes(lastTenDigits(p))));
@@ -557,7 +573,8 @@ function createCrm({
   async function findParts({ erpOrderId, productName }) {
     let where;
     if (erpOrderId) {
-      const order = await getOrderByErpId(erpOrderId);
+      const found = await findOrderByReference(erpOrderId);
+      const order = found ? await getOrderById(found.id) : null;
       const productIds = (order?.items || []).map((i) => i.productId).filter(Boolean);
       if (!productIds.length) return [];
       where = `Product__c IN (${productIds.map((id) => `'${escapeSoql(id)}'`).join(', ')})`;
@@ -866,6 +883,7 @@ function createCrm({
     getOrderContact,
     verifyOrder,
     findOrderByReference,
+    findOrdersByReference,
     findOrdersByInvoice,
     getDetailsOnFile,
     findCustomerByNameAndPin,

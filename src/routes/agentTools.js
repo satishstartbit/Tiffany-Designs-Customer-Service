@@ -1,5 +1,5 @@
 const express = require('express');
-const { normalizePhone, normalizeIssueType, namesMatch, lastTenDigits } = require('../rules');
+const { normalizePhone, normalizeIssueType, namesMatch, lastTenDigits, sameReference } = require('../rules');
 const { formatDate, formatDateTime, formatClock, describeWeek, spokenCaseNumber, shortName } = require('../speech');
 const { resolveDate, todayInIst, MAX_DAYS_AHEAD } = require('../dates');
 const { formatRupees } = require('../crm/orderItems');
@@ -200,24 +200,32 @@ module.exports = function agentToolsRouter({ crm, now = () => Date.now() }) {
     references = references.filter((r) => r !== invoiceNumber);
     if (!references.length && !invoiceNumber) return {};
 
-    let found = null;
-    for (const reference of references) {
-      found = await crm.findOrderByReference(reference);
-      if (found) break;
-    }
-    if (!found && invoiceNumber) {
-      let matches = await crm.findOrdersByInvoice(invoiceNumber);
-      // One invoice number on several orders: the caller's mobile picks theirs, otherwise the order id is needed.
+    // A short number can match several orders, and one invoice number can be on several: the caller's mobile picks
+    // theirs, otherwise more is needed.
+    const narrow = async (matches) => {
       if (matches.length > 1 && phone) {
         const contact = await crm.findContactByPhone(phone);
         const own = matches.filter((o) => contact?.accountId && o.accountId === contact.accountId);
-        if (own.length) matches = own;
+        if (own.length) return own;
       }
-      if (matches.length > 1) return { problem: 'More than one order has this invoice number. Ask for the order id or the order number.' };
-      [found] = matches;
+      return matches;
+    };
+    const chosen = async (matches) => ({ order: await crm.getOrderById(matches[0].id) || matches[0] });
+
+    // The order id or order number, said in full or as the number at its end ("1009" for TD-ORD-1009).
+    for (const reference of references) {
+      const matches = await narrow(await crm.findOrdersByReference(reference));
+      if (matches.length === 1) return chosen(matches);
+      if (matches.length > 1) return { problem: 'More than one order ends in these digits. Ask for the full order id or the invoice number.' };
     }
-    if (!found) return { problem: 'No order matches that number. Ask the customer to read the order id, order number or invoice number again.' };
-    return { order: await crm.getOrderById(found.id) || found };
+    // The invoice number, in full or as its digits ("009" for INV-009). Digits that named no order are tried as an
+    // invoice number too, since callers often say only the number.
+    for (const reference of [invoiceNumber, ...references.filter((r) => !/[a-z]/i.test(r))].filter(Boolean)) {
+      const matches = await narrow(await crm.findOrdersByInvoice(reference));
+      if (matches.length === 1) return chosen(matches);
+      if (matches.length > 1) return { problem: 'More than one order has this invoice number. Ask for the order id or the order number.' };
+    }
+    return { problem: 'No order matches that number. Ask the customer to read the order id, order number or invoice number again.' };
   }
 
   // Any one reference finds the order and its details are given at once (the business chose no ownership check):
@@ -406,10 +414,9 @@ module.exports = function agentToolsRouter({ crm, now = () => Date.now() }) {
       if (!caseNumber || (!customerName && !orderId)) {
         return res.json({ found: false, message: 'The registered mobile number is needed, or the request number with the full name or the order id.' });
       }
-      const orderRef = String(orderId || '').trim().toLowerCase();
       const cases = await crm.getCaseStatus({ caseNumber });
       own = cases.filter((c) => (customerName && (namesMatch(customerName, c.contactName) || namesMatch(customerName, c.accountName)))
-        || (orderRef && String(c.erpOrderId || '').toLowerCase() === orderRef));
+        || (orderId && sameReference(orderId, c.erpOrderId)));
       if (!own.length) return res.json({ found: false, message: 'No request matches these details.' });
     }
 

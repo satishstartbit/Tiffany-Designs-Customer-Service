@@ -104,4 +104,35 @@ function namesMatch(spoken, recorded) {
   return said.length >= 2 && said.every((w) => known.some((k) => sameWord(w, k)));
 }
 
-module.exports = { ISSUE_TYPES, normalizePhone, lastTenDigits, normalizeIssueType, nameWords, namesMatch };
+// Order ids and invoice numbers as callers say them: "1 0 0 9" read digit by digit is 1009.
+function joinDigits(value) {
+  return String(value ?? '').trim().replace(/(\d)\s+(?=\d)/g, '$1');
+}
+
+// The number at the end of an id, without leading zeros: TD-ORD-1009 is 1009, INV-009 is 9, "1 0 0 9" is 1009.
+function trailingNumber(value) {
+  const match = /(\d+)\D*$/.exec(joinDigits(value));
+  return match ? Number(match[1]) : null;
+}
+
+// Words a caller puts around an id that are not part of it: "my order number is 1009", "invoice 009".
+const REFERENCE_FILLER = /\b(MY|IS|THE|ORDER|ORDERS|NUMBER|NUM|NO|ID|INVOICE|BILL)\b/g;
+const referenceLetters = (value) => joinDigits(value).toUpperCase().replace(REFERENCE_FILLER, ' ').replace(/[^A-Z]/g, '');
+const plainReference = (value) => joinDigits(value).toUpperCase().replace(/[^A-Z0-9]/g, '');
+
+// Whether what a caller said names a stored order id or invoice number. Either it is the same id ("td ord 1009"),
+// or it ends in the same number and any letters said are part of the id: "1009", "ORD 1009" and "TD 1009" all name
+// TD-ORD-1009, and "9" or "009" names INV-009. "INV 1009" does not name TD-ORD-1009.
+function sameReference(said, stored) {
+  const plainSaid = plainReference(said);
+  if (!plainSaid || !stored) return false;
+  if (plainSaid === plainReference(stored)) return true;
+  const number = trailingNumber(said);
+  if (!number || number !== trailingNumber(stored)) return false;
+  const letters = referenceLetters(said);
+  return !letters || referenceLetters(stored).includes(letters);
+}
+
+module.exports = {
+  ISSUE_TYPES, normalizePhone, lastTenDigits, normalizeIssueType, nameWords, namesMatch, joinDigits, trailingNumber, sameReference,
+};

@@ -630,57 +630,121 @@ test('indianStateCode reads the Indian states from the Order describe, by name, 
   assert.deepEqual(sf.log.describes, ['Order'], 'described once');
 });
 
-test('verifyOrder also accepts the Salesforce order number of a phone order', async () => {
-  const sf = fakeSalesforce({
+// Answers order queries as Salesforce would: the exact ERP id query, then the order number or ERP id ending query.
+function ordersOrg(rows) {
+  return fakeSalesforce({
     queries: {
-      'FROM Order ': () => [{ Id: '801P', OrderNumber: '00000120', AccountId: '001A', Account: { Name: 'Aarav Sharma' } }],
+      'FROM Order ': (soql) => {
+        const exact = /ERP_Order_Id__c IN \(([^)]*)\)/.exec(soql);
+        if (exact) {
+          const ids = exact[1].split(',').map((s) => s.trim().replace(/^'|'$/g, '').toUpperCase());
+          return rows.filter((r) => r.ERP_Order_Id__c && ids.includes(r.ERP_Order_Id__c.toUpperCase()));
+        }
+        const invoice = /Invoice_Number__c IN \(([^)]*)\)/.exec(soql);
+        if (invoice) {
+          const ids = invoice[1].split(',').map((s) => s.trim().replace(/^'|'$/g, '').toUpperCase());
+          return rows.filter((r) => r.Invoice_Number__c && ids.includes(r.Invoice_Number__c.toUpperCase()));
+        }
+        const orderNumber = /OrderNumber = '(\d+)'/.exec(soql)?.[1];
+        const erpLike = /ERP_Order_Id__c LIKE '%(\d+)%'/.exec(soql)?.[1];
+        const invoiceLike = /Invoice_Number__c LIKE '%(\d+)%'/.exec(soql)?.[1];
+        return rows.filter((r) => (orderNumber && r.OrderNumber === orderNumber)
+          || (erpLike && String(r.ERP_Order_Id__c || '').includes(erpLike))
+          || (invoiceLike && String(r.Invoice_Number__c || '').includes(invoiceLike)));
+      },
       "FROM Contact WHERE AccountId = '001A'": ORG["FROM Contact WHERE AccountId = '001A'"],
     },
   });
+}
+
+test('verifyOrder also accepts the Salesforce order number of a phone order', async () => {
+  const sf = ordersOrg([{ Id: '801P', OrderNumber: '00000120', AccountId: '001A', Account: { Name: 'Aarav Sharma' } }]);
   const crm = createCrm({ salesforce: sf, businessHours: open });
   const result = await crm.verifyOrder(' 120 ', '9810000001');
-  assert.match(sf.log.queries[0], /WHERE \(ERP_Order_Id__c IN \('120'\) OR OrderNumber = '00000120'\) LIMIT 2$/);
+  assert.match(sf.log.queries[0], /WHERE ERP_Order_Id__c IN \('120'\) LIMIT 2$/, 'the exact order id first');
+  assert.match(sf.log.queries[1], /WHERE OrderNumber = '00000120' OR ERP_Order_Id__c LIKE '%120%'/);
   assert.equal(result.found, true);
   assert.equal(result.order.id, '801P');
   assert.equal(result.contactId, '003A');
 
   await crm.verifyOrder('TD-ORD-1001', '9810000001');
   const orderQueries = sf.log.queries.filter((q) => q.includes('FROM Order '));
-  assert.doesNotMatch(orderQueries[1], /OrderNumber =/, 'an ERP id is never read as an order number');
+  assert.ok(orderQueries.slice(2).every((q) => !/OrderNumber =/.test(q)), 'an ERP id is never read as an order number');
 });
 
 test('verifyOrder reads the order number however the caller says it, and tries every factor', async () => {
-  const sf = fakeSalesforce({
-    queries: {
-      'FROM Order ': () => [{ Id: '801P', OrderNumber: '00000122', AccountId: '001A', Account: { Name: 'Aarav Sharma' } }],
-      "FROM Contact WHERE AccountId = '001A'": ORG["FROM Contact WHERE AccountId = '001A'"],
-    },
-  });
+  const sf = ordersOrg([{ Id: '801P', OrderNumber: '00000122', AccountId: '001A', Account: { Name: 'Aarav Sharma' } }]);
   const crm = createCrm({ salesforce: sf, businessHours: open });
-  for (const said of ['ORD-00000122', 'ord 122', 'Order number 122', '00000122']) {
+  for (const said of ['ORD-00000122', 'ord 122', 'Order number 122', '00000122', '1 2 2']) {
     const result = await crm.verifyOrder(said, ['INV-0000', '9810000001']);
     assert.equal(result.found, true, said);
     assert.equal(result.verifiedBy, 'phone');
   }
-  assert.ok(sf.log.queries.every((q) => !q.includes('FROM Order ') || q.includes("OrderNumber = '00000122'")));
 
   await crm.verifyOrder('td ord 1001', '9810000001');
-  assert.match(sf.log.queries.filter((q) => q.includes('FROM Order ')).pop(), /ERP_Order_Id__c IN \('td ord 1001', 'TD-ORD-1001'\)\)?/);
+  assert.ok(sf.log.queries.some((q) => /ERP_Order_Id__c IN \('td ord 1001', 'TD-ORD-1001'\)/.test(q)));
 });
 
 test('verifyOrder prefers the order whose ERP id was said over one with the same order number', async () => {
-  const sf = fakeSalesforce({
-    queries: {
-      'FROM Order ': () => [
-        { Id: '801N', OrderNumber: '00000010', AccountId: '001A', Account: { Name: 'Aarav Sharma' } },
-        { Id: '801E', OrderNumber: '00000117', ERP_Order_Id__c: 'ORD-010', Invoice_Number__c: 'INV-010', AccountId: '001A', Account: { Name: 'Aarav Sharma' } },
-      ],
-      "FROM Contact WHERE AccountId = '001A'": ORG["FROM Contact WHERE AccountId = '001A'"],
-    },
-  });
+  const sf = ordersOrg([
+    { Id: '801N', OrderNumber: '00000010', AccountId: '001A', Account: { Name: 'Aarav Sharma' } },
+    { Id: '801E', OrderNumber: '00000117', ERP_Order_Id__c: 'ORD-010', Invoice_Number__c: 'INV-010', AccountId: '001A', Account: { Name: 'Aarav Sharma' } },
+  ]);
   const result = await createCrm({ salesforce: sf, businessHours: open }).verifyOrder('ORD-010', 'INV 010');
   assert.equal(result.order.id, '801E');
   assert.equal(result.verifiedBy, 'invoice', 'invoice numbers match without regard to spaces or dashes');
+  const short = await createCrm({ salesforce: sf, businessHours: open }).verifyOrder('ORD-010', '010');
+  assert.equal(short.verifiedBy, 'invoice', 'the digits of the invoice number are enough');
+});
+
+// The org's real numbering: TD-ORD-1009 is order 00000125, ORD-009 has INV-009, and INV-2006 is on two orders.
+const ORG_ORDERS = [
+  { Id: '801A', OrderNumber: '00000100', ERP_Order_Id__c: 'TD-ORD-1001', Invoice_Number__c: 'INV-2001', AccountId: '001A', Account: { Name: 'Aarav Sharma' } },
+  { Id: '801K', OrderNumber: '00000105', ERP_Order_Id__c: 'TD-ORD-1006', Invoice_Number__c: 'INV-2006', AccountId: '001A', Account: { Name: 'Aarav Sharma' } },
+  { Id: '801G', OrderNumber: '00000116', ERP_Order_Id__c: 'ORD-009', Invoice_Number__c: 'INV-009', AccountId: '001A', Account: { Name: 'Aarav Sharma' } },
+  { Id: '801F', OrderNumber: '00000120', ERP_Order_Id__c: 'TD-ORD-1008', Invoice_Number__c: 'INV-2006', AccountId: '001A', Account: { Name: 'Aarav Sharma' } },
+  { Id: '801M', OrderNumber: '00000125', ERP_Order_Id__c: 'TD-ORD-1009', Invoice_Number__c: 'INV-2007', AccountId: '001A', Account: { Name: 'Aarav Sharma' } },
+];
+
+test('an order is found from the short number a caller says', async () => {
+  const crm = createCrm({ salesforce: ordersOrg(ORG_ORDERS), businessHours: open });
+  const found = async (said) => (await crm.findOrdersByReference(said)).map((o) => o.erpOrderId);
+
+  assert.deepEqual(await found('1009'), ['TD-ORD-1009'], 'the number at the end of the order id');
+  assert.deepEqual(await found('1 0 0 9'), ['TD-ORD-1009'], 'said digit by digit');
+  assert.deepEqual(await found('ORD 1009'), ['TD-ORD-1009'], 'part of the letters');
+  assert.deepEqual(await found('TD 1009'), ['TD-ORD-1009']);
+  assert.deepEqual(await found('order number 1009'), ['TD-ORD-1009']);
+  assert.deepEqual(await found('9'), ['ORD-009'], 'leading zeros do not matter');
+  assert.deepEqual(await found('009'), ['ORD-009']);
+  assert.deepEqual(await found('120'), ['TD-ORD-1008'], 'the Salesforce order number of the order');
+  assert.deepEqual(await found('td-ord-1009'), ['TD-ORD-1009'], 'the full id still works');
+  assert.deepEqual(await found('INV 1009'), [], 'other letters do not name the order');
+  assert.deepEqual(await found('5555'), []);
+  assert.equal((await crm.findOrderByReference('1009')).id, '801M');
+});
+
+test('several orders ending in the same number are all returned, so the agent asks for more', async () => {
+  const crm = createCrm({
+    salesforce: ordersOrg([...ORG_ORDERS, { Id: '801Z', OrderNumber: '00000130', ERP_Order_Id__c: 'WEB-1009', AccountId: '001B', Account: { Name: 'Meera Iyer' } }]),
+    businessHours: open,
+  });
+  assert.deepEqual((await crm.findOrdersByReference('1009')).map((o) => o.erpOrderId).sort(), ['TD-ORD-1009', 'WEB-1009']);
+  assert.equal(await crm.findOrderByReference('1009'), null, 'no guess between them');
+  assert.deepEqual((await crm.findOrdersByReference('TD-ORD-1009')).map((o) => o.erpOrderId), ['TD-ORD-1009'], 'the full id picks one');
+});
+
+test('an invoice is found from its digits: 009 or 9 for INV-009', async () => {
+  const sf = ordersOrg(ORG_ORDERS);
+  const crm = createCrm({ salesforce: sf, businessHours: open });
+  const invoices = async (said) => (await crm.findOrdersByInvoice(said)).map((o) => o.erpOrderId);
+  assert.deepEqual(await invoices('009'), ['ORD-009']);
+  assert.deepEqual(await invoices('9'), ['ORD-009']);
+  assert.deepEqual(await invoices('inv 009'), ['ORD-009']);
+  assert.deepEqual(await invoices('2007'), ['TD-ORD-1009']);
+  assert.deepEqual((await invoices('2006')).sort(), ['TD-ORD-1006', 'TD-ORD-1008'], 'one invoice number on two orders');
+  assert.deepEqual(await invoices('INV-2001'), ['TD-ORD-1001']);
+  assert.deepEqual(await invoices('1009'), [], 'an order id is not an invoice number');
 });
 
 test('findVoiceOrderSince finds the order placed during the call by number, else by the caller', async () => {

@@ -1,7 +1,7 @@
 const { createApp } = require('../src/app');
 const { createScheduler, createMemoryJobStore } = require('../src/scheduler');
 const { createJobHandlers } = require('../src/callFlows');
-const { lastTenDigits, nameWords, namesMatch } = require('../src/rules');
+const { lastTenDigits, nameWords, namesMatch, sameReference } = require('../src/rules');
 
 const SECRETS = { internalApiKey: 'internal-key', siteCallApiKey: 'site-key', agentToolSecret: 'agent-secret', webhookToken: 'hook-token', cronSecret: 'cron-secret' };
 
@@ -131,7 +131,8 @@ function createFakeCrm({ now = () => Date.now() } = {}) {
     },
     async findOrdersByInvoice(invoiceNumber) {
       const plain = (v) => String(v || '').toUpperCase().replace(/[\s_-]+/g, '');
-      return orders.filter((o) => o.invoiceNumber && plain(o.invoiceNumber) === plain(invoiceNumber));
+      const exact = orders.filter((o) => o.invoiceNumber && plain(o.invoiceNumber) === plain(invoiceNumber));
+      return exact.length ? exact : orders.filter((o) => sameReference(invoiceNumber, o.invoiceNumber));
     },
     async getOrderByInvoice(invoiceNumber) {
       return orders.find((o) => o.invoiceNumber && o.invoiceNumber.toLowerCase() === String(invoiceNumber).trim().toLowerCase()) || null;
@@ -142,12 +143,19 @@ function createFakeCrm({ now = () => Date.now() } = {}) {
     async getOrderContact(order) {
       return contacts.find((c) => c.id === order.contactId) || contacts.find((c) => c.accountId === order.accountId) || null;
     },
-    async findOrderByReference(reference) {
+    // Like the real one: the exact ERP id first, else the order number or ERP ids ending in the number said.
+    async findOrdersByReference(reference) {
       const ref = String(reference || '').trim();
+      const plain = (v) => String(v || '').toUpperCase().replace(/[\s_-]+/g, '');
+      const exact = orders.filter((o) => o.erpOrderId && plain(o.erpOrderId) === plain(ref));
+      if (exact.length) return exact;
       const digits = (/^(?:ord(?:er)?)?(?:\s*(?:no|number))?[\s.#:-]*([\d\s]{1,14})$/i.exec(ref) || [])[1];
       const orderNumber = digits ? digits.replace(/\D/g, '').padStart(8, '0') : null;
-      const plain = (v) => String(v || '').toUpperCase().replace(/[\s_-]+/g, '');
-      return orders.find((o) => (o.erpOrderId && plain(o.erpOrderId) === plain(ref)) || (orderNumber && o.orderNumber === orderNumber)) || null;
+      return orders.filter((o) => (orderNumber && o.orderNumber === orderNumber) || (o.erpOrderId && sameReference(ref, o.erpOrderId)));
+    },
+    async findOrderByReference(reference) {
+      const matches = await this.findOrdersByReference(reference);
+      return matches.length === 1 ? matches[0] : null;
     },
     async verifyOrder(reference, verification, { customerName } = {}) {
       const factors = [].concat(verification).map((f) => String(f ?? '').trim()).filter(Boolean);
