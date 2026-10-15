@@ -34,8 +34,8 @@ export default async function VoiceAgentPage() {
       <PageHeader
         eyebrow="Sarvam AI"
         title="AI voice agent"
-        description="The customer service voice agent works on the same Salesforce data as this console: what it creates on a call shows up here. Start a test call with the Begin call button at the bottom right."
-        actions={<Link className="btn btn-outline" href="/call" target="_blank">Public call page</Link>}
+        description="The customer service voice agent works on the same Salesforce data as this console: what it creates on a call shows up here. Customers talk to it on the public customer care page, which needs no sign-in; open it to try a call."
+        actions={<Link className="btn" href="/support" target="_blank">Open customer care page</Link>}
       />
 
       <div className="grid grid-main">
@@ -56,6 +56,7 @@ export default async function VoiceAgentPage() {
           <Card title="Agent">
             <Fields one items={[
               ['Agent id', <span key="a" className="mono">{AGENT.appId}</span>],
+              ['Customer page', <Link key="s" className="row-link" href="/support" target="_blank">/support</Link>],
               ['Web calls', 'Through this site; the Sarvam key stays on the server'],
               ['Limits', '5 calls per visitor every 10 minutes, 20 a day'],
             ]} />

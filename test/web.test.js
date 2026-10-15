@@ -177,7 +177,24 @@ test('the console key and session code never reach browser code', () => {
     assert.match(fs.readFileSync(path.join(WEB, 'lib', lib), 'utf8'), /^import 'server-only';/, `lib/${lib} is marked server-only`);
   }
   assert.match(fs.readFileSync(path.join(WEB, 'app', '(console)', 'layout.js'), 'utf8'), /await requireSession\(\)/, 'every console page needs a sign-in');
-  assert.match(fs.readFileSync(path.join(WEB, 'lib', 'api.js'), 'utf8'), /await requireSession\(\);/, 'every data read checks the sign-in');
+  const api = fs.readFileSync(path.join(WEB, 'lib', 'api.js'), 'utf8');
+  assert.match(api, /signedIn = true \} = \{\}\) \{\n\s+const session = signedIn \? await requireSession\(\) : null;/, 'data reads check the sign-in by default');
+  assert.deepEqual(api.match(/signedIn: false/g), ['signedIn: false'], 'only one read goes without a sign-in');
+  assert.match(api, /callAdmin\('service', \{ signedIn: false \}\)/, 'and it is the service hours');
+  assert.match(api, /answer\.hours/, 'of which only the hours are passed on');
+});
+
+test('the voice agent is on the public customer page, not in the staff console', () => {
+  const read = (...parts) => fs.readFileSync(path.join(WEB, 'app', ...parts), 'utf8');
+  assert.doesNotMatch(read('(console)', 'layout.js'), /VoiceAgent/, 'the console has no call widget');
+  const support = read('support', 'page.js');
+  assert.match(support, /<VoiceAgent \/>/);
+  assert.match(support, /<StartCallButton/);
+  assert.doesNotMatch(support, /requireSession|loadAdmin|sendAdmin/, 'the customer page needs no sign-in and reads no staff data');
+  assert.match(read('call', 'page.js'), /permanentRedirect\('\/support'\)/, 'the old call page link still works');
+  const widget = fs.readFileSync(path.join(WEB, 'components', 'VoiceAgent.js'), 'utf8');
+  assert.match(widget, /console\.warn\(`\[voice\] \$\{explain\(res, active\)\}`\)/, 'server details go to the console for staff');
+  assert.doesNotMatch(widget, /show\(explain/, 'customers never see server details');
 });
 
 test('the sign-in details are shown only while developing, never on a deployed site', () => {

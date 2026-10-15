@@ -1,19 +1,21 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
-import { LifeBuoy, Mail, Phone, User } from 'lucide-react';
+import { CircleCheck, LifeBuoy, Mail, Pencil, Phone, User } from 'lucide-react';
 import ActivityList from '@/components/ActivityList.js';
 import CaseTable from '@/components/CaseTable.js';
-import { Card, Empty, Fields, PageHeader, Problem, Status } from '@/components/ui.js';
+import { Card, Empty, Fields, PageHeader, Problem, Status, readParams } from '@/components/ui.js';
 import { loadAdmin } from '@/lib/api.js';
 import { date, money } from '@/lib/format.js';
 
 export const metadata = { title: 'Order' };
 
-export default async function OrderPage({ params }) {
+export default async function OrderPage({ params, searchParams }) {
   const { id } = await params;
+  const { saved } = readParams(await searchParams, ['saved']);
   const { data: o, error } = await loadAdmin(`orders/${encodeURIComponent(id)}`);
   if (error) return <Problem message={error} />;
   if (!o) notFound();
+  const savedCount = Number(saved);
 
   return (
     <>
@@ -22,8 +24,22 @@ export default async function OrderPage({ params }) {
         eyebrow={o.erpOrderId ? `Order #${o.orderNumber}` : 'Order'}
         title={o.erpOrderId || `#${o.orderNumber}`}
         description={`Placed ${date(o.orderDate)}${o.source ? ` on ${o.source}` : ''} by ${o.customerName || 'an unknown customer'}.`}
-        actions={<><Status value={o.status} /><Status value={o.deliveryStatus} fallback="Not shipped" /></>}
+        actions={(
+          <>
+            <Status value={o.status} />
+            <Status value={o.deliveryStatus} fallback="Not shipped" />
+            <Link className="btn" href={`/orders/${o.id}/edit`}><Pencil aria-hidden="true" /> Edit order</Link>
+          </>
+        )}
       />
+      {saved !== '' && (
+        <div className="notice" role="status">
+          <CircleCheck aria-hidden="true" />
+          {savedCount > 0
+            ? `Saved ${savedCount} ${savedCount === 1 ? 'change' : 'changes'} to Salesforce. They are noted in the history below.`
+            : 'Nothing was changed.'}
+        </div>
+      )}
 
       <div className="grid grid-main">
         <div className="grid" style={{ alignContent: 'start' }}>
@@ -60,8 +76,8 @@ export default async function OrderPage({ params }) {
             {o.cases.length ? <CaseTable cases={o.cases} /> : <Empty icon={LifeBuoy} title="No cases for this order" />}
           </Card>
 
-          <Card title="Calls and emails" flush>
-            <ActivityList activities={o.activities} empty="No calls or emails linked to this order" />
+          <Card title="History: calls, emails and edits" flush>
+            <ActivityList activities={o.activities} empty="No calls, emails or edits for this order yet" />
           </Card>
         </div>
 

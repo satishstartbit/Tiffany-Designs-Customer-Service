@@ -1,7 +1,8 @@
-const { escapeSoql, escapeSoqlLike } = require('./crm');
+const { escapeSoql, escapeSoqlLike, indianStatesOf } = require('./crm');
+const { todayInIst } = require('../dates');
 
-// Read-only views of Salesforce for the staff console (web/): lists with filters and one-record details.
-// Every value placed in SOQL is escaped, and filters are checked against the org's picklist values.
+// Views of Salesforce for the staff console (web/): lists with filters and one-record details, and order edits.
+// Every value placed in SOQL is escaped, and filters and edits are checked against the org's picklist values.
 
 const PAGE_SIZE = 25;
 const MAX_PAGE_SIZE = 100;
@@ -43,6 +44,38 @@ const VISIT_FIELDS = 'Id, Name, Status__c, Scheduled_Start__c, Remarks__c, Techn
 
 const SHIPMENT_FIELDS = 'Id, Name, Shipment_Status__c, Courier__c, Tracking_Number__c, Tracking_URL__c, Dispatch_Date__c, Expected_Delivery_Date__c, '
   + 'Actual_Delivery_Date__c, Quantity__c, Component__r.Name, Component__r.Part_Number__c, Case__c, Case__r.CaseNumber, Case__r.Contact.Name';
+
+// What staff may change on an order from the console, and the label each change is recorded under.
+const ORDER_EDITS = {
+  status: ['Status', 'Status'],
+  deliveryStatus: ['Delivery_Status__c', 'Delivery status'],
+  deliveryDate: ['Delivery_Date__c', 'Delivered on'],
+  erpOrderId: ['ERP_Order_Id__c', 'Order id'],
+  invoiceNumber: ['Invoice_Number__c', 'Invoice number'],
+  source: ['Order_Source__c', 'Channel'],
+  fulfilment: ['Fulfilment_Type__c', 'Fulfilment'],
+  orderDate: ['EffectiveDate', 'Order date'],
+  description: ['Description', 'Notes'],
+  shippingStreet: ['ShippingStreet', 'Ship to street'],
+  shippingCity: ['ShippingCity', 'Ship to city'],
+  shippingState: ['ShippingStateCode', 'Ship to state'],
+  shippingPostalCode: ['ShippingPostalCode', 'Ship to PIN code'],
+};
+const SCHEMA_TTL_MS = 60 * 60 * 1000;
+
+// Salesforce answers a refused save with "Salesforce request failed (400): [{message, errorCode, fields}]".
+// Returns the message and, when Salesforce names one, the edit field it is about.
+function salesforceRefusal(err) {
+  const match = /^Salesforce request failed \((4\d\d)\): (.*)$/s.exec(err?.message || '');
+  if (!match) return null;
+  let errors = [];
+  try { errors = [].concat(JSON.parse(match[2]) || []); } catch { /* not JSON */ }
+  // The order id is the only unique field that can be edited.
+  if (errors.some((e) => e.errorCode === 'DUPLICATE_VALUE')) return { message: 'Another order already uses this order id.', field: 'erpOrderId' };
+  const named = errors.flatMap((e) => e.fields || []);
+  const field = Object.keys(ORDER_EDITS).find((key) => named.includes(ORDER_EDITS[key][0])) || null;
+  return { message: errors.map((e) => e.message).filter(Boolean).join(' ') || `Salesforce refused the change (${match[1]}).`, field };
+}
 
 const isId = (value) => /^[a-zA-Z0-9]{15,18}$/.test(String(value || ''));
 const quoted = (value) => `'${escapeSoql(value)}'`;
@@ -189,7 +222,27 @@ function toContactRow(r) {
   };
 }
 
-function createConsoleData({ salesforce, crm, scheduler, productCodePrefix = 'TD-' }) {
+function createConsoleData({ salesforce, crm, scheduler, productCodePrefix = 'TD-', now = () => Date.now(), logger = console }) {
+  let schemaCache = null;
+
+  // The org's own rules for each editable Order field: type, length, whether it may be empty, allowed values.
+  async function orderSchema() {
+    if (schemaCache && now() - schemaCache.loadedAt < SCHEMA_TTL_MS) return schemaCache;
+    const described = await salesforce.describe('Order');
+    const fields = Object.fromEntries(Object.values(ORDER_EDITS).map(([name]) => {
+      const f = described.fields.find((x) => x.name === name) || {};
+      return [name, {
+        type: f.type,
+        length: f.length || 0,
+        nillable: f.nillable !== false,
+        updateable: f.updateable !== false,
+        values: (f.picklistValues || []).filter((p) => p.active).map((p) => p.value),
+      }];
+    }));
+    schemaCache = { loadedAt: now(), fields, states: indianStatesOf(described) };
+    return schemaCache;
+  }
+
   const count = async (soql) => {
     const [row] = await salesforce.query(soql);
     return Number(row?.n || 0);
@@ -316,6 +369,114 @@ function createConsoleData({ salesforce, crm, scheduler, productCodePrefix = 'TD
       cases: cases.map(toCaseRow),
       activities: activities.map(toActivity),
     };
+  }
+
+  const EDIT_FIELDS = Object.values(ORDER_EDITS).map(([name]) => name);
+
+  async function editableOrder(id) {
+    const [row] = await salesforce.query(
+      `SELECT Id, OrderNumber, Account.Name, CustomerAuthorizedById, ShippingCountryCode, ${EDIT_FIELDS.join(', ')} FROM Order WHERE Id = ${quoted(id)} LIMIT 1`,
+    );
+    return row || null;
+  }
+
+  // The order's current values, the allowed choices and the limits, for the console's edit form.
+  async function getOrderForEdit(id) {
+    if (!isId(id)) return null;
+    const [row, schema] = await Promise.all([editableOrder(id), orderSchema()]);
+    if (!row) return null;
+    const meta = (key) => schema.fields[ORDER_EDITS[key][0]];
+    return {
+      id: row.Id,
+      orderNumber: row.OrderNumber,
+      customerName: row.Account?.Name || null,
+      values: Object.fromEntries(Object.entries(ORDER_EDITS).map(([key, [name]]) => [key, row[name] ?? null])),
+      options: {
+        statuses: meta('status').values,
+        deliveryStatuses: meta('deliveryStatus').values,
+        sources: meta('source').values,
+        fulfilmentTypes: meta('fulfilment').values,
+        states: schema.states,
+      },
+      maxLengths: Object.fromEntries(Object.keys(ORDER_EDITS).filter((k) => ['string', 'textarea'].includes(meta(k).type)).map((k) => [k, meta(k).length])),
+      required: Object.keys(ORDER_EDITS).filter((k) => !meta(k).nillable),
+    };
+  }
+
+  function checkValue(key, raw, schema, row) {
+    const [name, label] = ORDER_EDITS[key];
+    const meta = schema.fields[name];
+    if (raw !== null && typeof raw !== 'string') return { error: `${label} must be text.` };
+    const value = raw === null ? null : raw.replace(/\r\n?/g, '\n').trim() || null;
+    if (value === null) return meta.nillable ? { value } : { error: `${label} cannot be empty.` };
+    if (meta.type === 'date') {
+      const day = new Date(`${value}T00:00:00Z`);
+      const valid = /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(day.getTime()) && day.toISOString().slice(0, 10) === value;
+      return valid ? { value } : { error: `${label} must be a date.` };
+    }
+    if (name === 'ShippingStateCode') return schema.states.some((s) => s.value === value) ? { value } : { error: `${label} must be a state of India.` };
+    if (meta.type === 'picklist') return meta.values.includes(value) ? { value } : { error: `${label} must be one of: ${meta.values.join(', ')}.` };
+    if (meta.length && value.length > meta.length) return { error: `${label} can be at most ${meta.length} characters.` };
+    if (name === 'ShippingPostalCode' && [null, undefined, 'IN'].includes(row.ShippingCountryCode) && !/^[1-9]\d{5}$/.test(value)) {
+      return { error: `${label} must be a six digit PIN code.` };
+    }
+    return { value };
+  }
+
+  // Saves what staff changed on an order. Only the fields listed in ORDER_EDITS are accepted, each value is checked
+  // against the org's own rules first, only real changes are sent, and a completed task on the order records who
+  // changed what (every console save reaches Salesforce as the integration user).
+  async function updateOrder(id, changes, { editedBy = 'The service console' } = {}) {
+    if (!isId(id)) return null;
+    if (!changes || typeof changes !== 'object' || Array.isArray(changes)) {
+      return { error: 'invalid', message: 'Send the changes as a JSON object.' };
+    }
+    const unknown = Object.keys(changes).filter((k) => !Object.hasOwn(ORDER_EDITS, k));
+    if (unknown.length) return { error: 'invalid', field: unknown[0], message: `These cannot be changed here: ${unknown.join(', ')}.` };
+
+    const [row, schema] = await Promise.all([editableOrder(id), orderSchema()]);
+    if (!row) return null;
+    const stateName = (code) => schema.states.find((s) => s.value === code)?.label || code;
+
+    const fields = {};
+    const changed = [];
+    for (const [key, raw] of Object.entries(changes)) {
+      if (raw === undefined) continue;
+      const [name, label] = ORDER_EDITS[key];
+      const checked = checkValue(key, raw, schema, row);
+      if (checked.error) return { error: 'invalid', field: key, message: checked.error };
+      const before = row[name] ?? null;
+      if (checked.value === before) continue;
+      fields[name] = checked.value;
+      changed.push({ field: key, label, from: before, to: checked.value });
+    }
+    if (!changed.length) return { updated: false, changes: [], order: await getOrder(id) };
+    if (fields.ShippingStateCode && !row.ShippingCountryCode) fields.ShippingCountryCode = 'IN';
+
+    try {
+      await salesforce.update('Order', id, fields);
+    } catch (err) {
+      const refusal = salesforceRefusal(err);
+      if (refusal) return { error: 'rejected', ...refusal };
+      throw err;
+    }
+
+    const shown = (c, value) => {
+      if (value === null) return '(empty)';
+      const text = c.field === 'shippingState' ? stateName(value) : String(value);
+      return text.length > 200 ? `${text.slice(0, 200)}…` : text;
+    };
+    await salesforce.create('Task', Object.fromEntries(Object.entries({
+      WhatId: id,
+      WhoId: row.CustomerAuthorizedById,
+      Subject: 'Order edited in the service console',
+      Description: [`${editedBy} changed:`, ...changed.map((c) => `- ${c.label}: ${shown(c, c.from)} → ${shown(c, c.to)}`)].join('\n'),
+      Status: 'Completed',
+      Priority: 'Normal',
+      ActivityDate: todayInIst(now()).toISOString().slice(0, 10),
+    }).filter(([, v]) => v))).catch((err) => logger.error(`Order ${id} was saved, but its history note failed: ${err.message}`));
+
+    return { updated: true, changes: changed, order: await getOrder(id) };
   }
 
   async function listCustomers(filters = {}) {
@@ -505,6 +666,8 @@ function createConsoleData({ salesforce, crm, scheduler, productCodePrefix = 'TD
     getProduct,
     listOrders,
     getOrder,
+    getOrderForEdit,
+    updateOrder,
     listCustomers,
     getCustomer,
     listCases,
@@ -516,4 +679,4 @@ function createConsoleData({ salesforce, crm, scheduler, productCodePrefix = 'TD
   };
 }
 
-module.exports = { createConsoleData, categoryOf, isId };
+module.exports = { createConsoleData, categoryOf, isId, ORDER_EDITS };

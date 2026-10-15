@@ -138,6 +138,19 @@ function orderNumberOf(reference) {
   return digits && digits.length <= 10 ? digits.padStart(8, '0') : null;
 }
 
+// Salesforce's state picklist entries that belong to India (the org uses state and country picklists).
+function indianStatesOf(described) {
+  const field = (n) => described.fields.find((f) => f.name === n)?.picklistValues || [];
+  const india = field('ShippingCountryCode').findIndex((c) => c.value === 'IN');
+  if (india < 0) return [];
+  return field('ShippingStateCode')
+    .filter((state) => {
+      const bits = state.validFor ? Buffer.from(state.validFor, 'base64') : null;
+      return state.active && bits && (bits[india >> 3] & (0x80 >> (india % 8)));
+    })
+    .map((state) => ({ value: state.value, label: state.label }));
+}
+
 function compact(fields) {
   return Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined && v !== null && v !== ''));
 }
@@ -400,13 +413,8 @@ function createCrm({
   async function indianStateCode(name) {
     if (!name) return undefined;
     if (!indianStates) {
-      const described = await salesforce.describe('Order');
-      const field = (n) => described.fields.find((f) => f.name === n)?.picklistValues || [];
-      const india = field('ShippingCountryCode').findIndex((c) => c.value === 'IN');
       indianStates = new Map();
-      for (const state of field('ShippingStateCode')) {
-        const bits = state.validFor ? Buffer.from(state.validFor, 'base64') : null;
-        if (india < 0 || !state.active || !bits || !(bits[india >> 3] & (0x80 >> (india % 8)))) continue;
+      for (const state of indianStatesOf(await salesforce.describe('Order'))) {
         indianStates.set(state.label.toLowerCase(), state.value);
         indianStates.set(state.value.toLowerCase(), state.value);
       }
@@ -808,4 +816,4 @@ function createCrm({
   };
 }
 
-module.exports = { createCrm, SERVICE_TYPES, escapeSoql, escapeSoqlLike, escapeSosl, soqlDateTime };
+module.exports = { createCrm, SERVICE_TYPES, escapeSoql, escapeSoqlLike, escapeSosl, soqlDateTime, indianStatesOf };

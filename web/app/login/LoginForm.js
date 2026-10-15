@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useActionState } from 'react';
 import { KeyRound, LogIn } from 'lucide-react';
 import { Problem } from '@/components/ui.js';
@@ -36,6 +37,9 @@ export default function LoginForm({ localSignIn }) {
       <button className="btn btn-block" type="submit" disabled={pending}>
         <LogIn aria-hidden="true" /> {pending ? 'Signing in…' : 'Sign in'}
       </button>
+      <p className="small muted" style={{ margin: 0, textAlign: 'center' }}>
+        A customer? <Link className="row-link" href="/support">Talk to our AI service assistant</Link>
+      </p>
     </form>
   );
 }

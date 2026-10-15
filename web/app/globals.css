@@ -414,13 +414,36 @@ h3 {
   height: 18px;
 }
 
+.icon-button.small {
+  width: 32px;
+  height: 32px;
+}
+
+.icon-button.small svg {
+  width: 15px;
+  height: 15px;
+}
+
+.icon-button:hover {
+  border-color: var(--ink);
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
 .field {
   display: grid;
   gap: 6px;
+  align-content: start;
 }
 
-.field label,
-.field > span {
+.field > label {
   color: var(--muted);
   font-size: 11px;
   font-weight: 600;
@@ -453,6 +476,75 @@ h3 {
 .select:focus {
   border-color: var(--ink);
   outline: none;
+}
+
+.textarea {
+  height: auto;
+  min-height: 120px;
+  padding: 10px 12px;
+  line-height: 1.55;
+  resize: vertical;
+}
+
+.input[aria-invalid="true"],
+.select[aria-invalid="true"] {
+  border-color: var(--red);
+  background-color: var(--red-soft);
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px 20px;
+}
+
+.form-grid.four {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.field.wide {
+  grid-column: 1 / -1;
+}
+
+.form-grid.four .field.wide {
+  grid-column: span 4;
+}
+
+.hint {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.field-error {
+  color: var(--red);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+/* Left-aligned, so the voice agent's button at the bottom right never covers them. */
+.form-actions {
+  display: flex;
+  gap: 10px;
+  padding: 4px 0 8px;
+}
+
+.notice {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 20px;
+  padding: 14px 18px;
+  border: 1px solid rgba(47, 122, 79, 0.3);
+  border-left: 4px solid var(--green);
+  border-radius: var(--radius);
+  background: var(--green-soft);
+}
+
+.notice svg {
+  width: 18px;
+  height: 18px;
+  color: var(--green);
+  flex: none;
 }
 
 /* ---------- Page structure ---------- */
@@ -1417,7 +1509,372 @@ a.stat:hover {
   text-transform: uppercase;
 }
 
-/* ---------- Public call page ---------- */
+/* ---------- Public customer care page (/support) ---------- */
+
+.site {
+  background: var(--surface);
+}
+
+.site-utility {
+  display: flex;
+  justify-content: center;
+  gap: 28px;
+  padding: 7px 16px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.site-utility a,
+.site-footer a {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.site-utility a:hover,
+.site-footer a:hover {
+  color: var(--maroon);
+}
+
+.site-utility svg {
+  width: 13px;
+  height: 13px;
+}
+
+.site-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 18px 24px;
+}
+
+.site-nav {
+  display: flex;
+  gap: 26px;
+}
+
+.site-nav a {
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  border-bottom: 1px solid transparent;
+  padding-bottom: 2px;
+}
+
+.site-nav a:hover {
+  border-bottom-color: var(--ink);
+}
+
+.site-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+  gap: 40px;
+  align-items: center;
+  padding: 56px max(24px, calc((100% - 1132px) / 2));
+  background: linear-gradient(115deg, #ece0d1 0%, #f5eee5 55%, #fbf8f3 100%);
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.site-hero h1 {
+  max-width: 560px;
+  font-size: 44px;
+  font-weight: 600;
+  line-height: 1.12;
+}
+
+.site-hero-text > p {
+  max-width: 540px;
+  margin: 18px 0 26px;
+  color: var(--ink-soft);
+  font-size: 16px;
+}
+
+.site-hero .hero-actions {
+  align-items: center;
+}
+
+.call-art {
+  display: grid;
+  place-items: center;
+}
+
+.call-card {
+  display: grid;
+  justify-items: center;
+  gap: 6px;
+  width: min(320px, 100%);
+  padding: 34px 24px 26px;
+  border-radius: 14px;
+  background: var(--surface);
+  box-shadow: 0 18px 50px rgba(110, 42, 36, 0.12);
+  text-align: center;
+}
+
+.call-card > span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.call-ring {
+  display: grid;
+  place-items: center;
+  width: 84px;
+  height: 84px;
+  margin-bottom: 10px;
+  border-radius: 50%;
+  background: var(--maroon);
+  color: #fff;
+  box-shadow: 0 0 0 10px var(--maroon-soft), 0 0 0 20px rgba(245, 233, 230, 0.5);
+}
+
+.call-ring svg {
+  width: 34px;
+  height: 34px;
+}
+
+.wave {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 42px;
+  margin: 12px 0 6px;
+}
+
+.wave span {
+  width: 4px;
+  height: 100%;
+  border-radius: 4px;
+  background: var(--teal);
+  opacity: 0.75;
+  animation: wave 1.1s ease-in-out infinite;
+  transform-origin: center;
+}
+
+@keyframes wave {
+  0%, 100% { transform: scaleY(0.25); }
+  50% { transform: scaleY(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wave span,
+  .skeleton {
+    animation: none;
+  }
+}
+
+.call-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.site-section {
+  max-width: 1132px;
+  margin: 0 auto;
+  padding: 64px 24px 8px;
+}
+
+.site-title {
+  margin-bottom: 32px;
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-align: center;
+  text-transform: uppercase;
+}
+
+.help-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.help-card {
+  display: grid;
+  gap: 8px;
+  align-content: start;
+  justify-items: center;
+  padding: 26px 18px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  text-align: center;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.help-card:hover {
+  border-color: var(--line-strong);
+  box-shadow: var(--shadow);
+}
+
+.help-card svg {
+  width: 30px;
+  height: 30px;
+  color: var(--maroon);
+  stroke-width: 1.4;
+}
+
+.help-card strong {
+  font-weight: 600;
+}
+
+.help-card span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.site-band {
+  margin-top: 64px;
+  background: var(--cream);
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.site-band-inner {
+  max-width: 1132px;
+  margin: 0 auto;
+  padding: 52px 24px;
+}
+
+.handy-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 24px;
+}
+
+.safety {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 30px;
+  padding: 12px 16px;
+  border: 1px dashed var(--maroon);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--maroon);
+  font-weight: 500;
+  text-align: center;
+}
+
+.safety svg {
+  width: 20px;
+  height: 20px;
+  flex: none;
+}
+
+.steps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 24px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: step;
+}
+
+.steps li {
+  display: grid;
+  gap: 6px;
+  justify-items: center;
+  text-align: center;
+  counter-increment: step;
+}
+
+.steps li::before {
+  content: counter(step);
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  margin-bottom: 6px;
+  border: 1px solid var(--ink);
+  border-radius: 50%;
+  font-weight: 600;
+}
+
+.steps span {
+  max-width: 300px;
+  color: var(--muted);
+  font-size: 13.5px;
+}
+
+.hours-card {
+  max-width: 520px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+.site-footer {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 24px;
+  margin-top: 72px;
+  padding: 36px max(24px, calc((100% - 1132px) / 2));
+  border-top: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.site-footer > div {
+  display: grid;
+  gap: 6px;
+  align-content: start;
+}
+
+.site-footer > div:last-child {
+  justify-items: end;
+}
+
+.site-footer strong {
+  color: var(--ink);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+@media (max-width: 900px) {
+  .site-hero,
+  .handy-grid,
+  .steps,
+  .site-footer {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .help-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .site-hero h1 {
+    font-size: 32px;
+  }
+
+  .site-nav {
+    display: none;
+  }
+
+  .site-footer > div:last-child {
+    justify-items: start;
+  }
+}
+
+@media (max-width: 520px) {
+  .help-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .site-utility {
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+}
+
+/* ---------- Not found ---------- */
 
 .call-page {
   max-width: 760px;
@@ -1497,8 +1954,14 @@ a.stat:hover {
   .grid-2,
   .product-hero,
   .fields,
-  .auth {
+  .auth,
+  .form-grid,
+  .form-grid.four {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .form-grid.four .field.wide {
+    grid-column: auto;
   }
 
   .auth-art {

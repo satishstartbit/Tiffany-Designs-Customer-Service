@@ -122,7 +122,7 @@ export default async function DashboardPage() {
       </div>
 
       <div className="promise-strip">
-        <Link className="promise" href="/voice-agent"><Mic aria-hidden="true" /><span><strong>AI voice agent</strong><span>Test a call from the button at the bottom right</span></span></Link>
+        <Link className="promise" href="/support" target="_blank"><Mic aria-hidden="true" /><span><strong>Customer care page</strong><span>Where customers talk to the AI assistant</span></span></Link>
         <Link className="promise" href="/requests"><CalendarClock aria-hidden="true" /><span><strong>{number(counts.scheduledCalls)} scheduled calls</strong><span>Delivery follow-ups and case updates</span></span></Link>
         <Link className="promise" href="/voice-agent#coverage"><MapPin aria-hidden="true" /><span><strong>Service coverage</strong><span>Delhi NCR by our team, the rest by partners</span></span></Link>
         <Link className="promise" href="/activity?kind=call"><PhoneCall aria-hidden="true" /><span><strong>Call log</strong><span>Every voice agent call, saved in Salesforce</span></span></Link>      </div>

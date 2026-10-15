@@ -1,5 +1,5 @@
 import Link from 'next/link';
-import { Package } from 'lucide-react';
+import { Package, Pencil } from 'lucide-react';
 import { Card, Empty, Filters, PageHeader, Pagination, Problem, Status, readParams } from '@/components/ui.js';
 import { loadAdmin } from '@/lib/api.js';
 import { date, money } from '@/lib/format.js';
@@ -38,6 +38,7 @@ export default async function OrdersPage({ searchParams }) {
                   <thead>
                     <tr>
                       <th>Order</th><th>Customer</th><th>Products</th><th>Channel</th><th>Status</th><th>Delivery</th><th className="num">Total</th>
+                      <th><span className="sr-only">Edit</span></th>
                     </tr>
                   </thead>
                   <tbody>
@@ -59,6 +60,11 @@ export default async function OrdersPage({ searchParams }) {
                         <td><Status value={o.status} /></td>
                         <td><Status value={o.deliveryStatus} fallback="Not shipped" /></td>
                         <td className="num price">{money(o.total)}</td>
+                        <td className="num">
+                          <Link className="icon-button small" href={`/orders/${o.id}/edit`} aria-label={`Edit order ${o.erpOrderId || o.orderNumber}`} title="Edit order">
+                            <Pencil aria-hidden="true" />
+                          </Link>
+                        </td>
                       </tr>
                     ))}
                   </tbody>
