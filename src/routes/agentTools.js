@@ -1,5 +1,5 @@
 const express = require('express');
-const { normalizePhone, normalizeIssueType, namesMatch } = require('../rules');
+const { normalizePhone, normalizeIssueType, namesMatch, lastTenDigits } = require('../rules');
 const { formatDate, formatDateTime, formatClock, describeWeek, spokenCaseNumber, shortName } = require('../speech');
 const { resolveDate, todayInIst, MAX_DAYS_AHEAD } = require('../dates');
 const { formatRupees } = require('../crm/orderItems');
@@ -23,6 +23,9 @@ const CALL_OUTCOMES = {
   wrong_person: 'the customer was not reached',
   not_resolved: 'nothing was resolved',
 };
+
+// "302021" as "3 0 2 0 2 1", so the voice reads digits rather than a large number.
+const spokenDigits = (value) => String(value || '').replace(/\D/g, '').split('').join(' ');
 
 function callOutcome(disposition) {
   if (!disposition) return 'no outcome recorded';
@@ -119,6 +122,7 @@ module.exports = function agentToolsRouter({ crm, now = () => Date.now() }) {
       postalCode: body.postal_code,
       preferredDate: body.preferred_date,
       preferredTime: body.preferred_time,
+      useDetailsOnFile: body.use_details_on_file === true || body.use_details_on_file === 'true',
     };
   }
 
@@ -184,11 +188,9 @@ module.exports = function agentToolsRouter({ crm, now = () => Date.now() }) {
     };
   }
 
-  // Any one reference finds the order and its details are given at once (the business chose no ownership check):
-  // the order id, the Salesforce order number of a phone order, or the invoice number. Addresses and phone numbers
-  // on the order are never returned.
-  router.post('/order-lookup', async (req, res) => {
-    const body = req.body || {};
+  // The order a caller means by an order id, the Salesforce order number of a phone order, or an invoice number.
+  // Returns { order }, { problem } to say, or {} when no reference was given.
+  async function orderFromReferences(body) {
     const text = (value) => String(value ?? '').trim();
     const phone = normalizePhone(body.phone);
     let invoiceNumber = text(body.invoice_number);
@@ -196,31 +198,37 @@ module.exports = function agentToolsRouter({ crm, now = () => Date.now() }) {
     // An invoice number said where the order id was expected.
     if (!invoiceNumber) invoiceNumber = references.find((r) => /^inv/i.test(r)) || '';
     references = references.filter((r) => r !== invoiceNumber);
+    if (!references.length && !invoiceNumber) return {};
 
-    if (references.length || invoiceNumber) {
-      let found = null;
-      for (const reference of references) {
-        found = await crm.findOrderByReference(reference);
-        if (found) break;
-      }
-      if (!found && invoiceNumber) {
-        let matches = await crm.findOrdersByInvoice(invoiceNumber);
-        // One invoice number on several orders: the caller's mobile picks theirs, otherwise the order id is needed.
-        if (matches.length > 1 && phone) {
-          const contact = await crm.findContactByPhone(phone);
-          const own = matches.filter((o) => contact?.accountId && o.accountId === contact.accountId);
-          if (own.length) matches = own;
-        }
-        if (matches.length > 1) {
-          return res.json({ found: false, message: 'More than one order has this invoice number. Ask for the order id or the order number.' });
-        }
-        [found] = matches;
-      }
-      if (!found) {
-        return res.json({ found: false, message: 'No order matches that number. Ask the customer to read the order id, order number or invoice number again.' });
-      }
-      return res.json(orderAnswer(await crm.getOrderById(found.id) || found));
+    let found = null;
+    for (const reference of references) {
+      found = await crm.findOrderByReference(reference);
+      if (found) break;
     }
+    if (!found && invoiceNumber) {
+      let matches = await crm.findOrdersByInvoice(invoiceNumber);
+      // One invoice number on several orders: the caller's mobile picks theirs, otherwise the order id is needed.
+      if (matches.length > 1 && phone) {
+        const contact = await crm.findContactByPhone(phone);
+        const own = matches.filter((o) => contact?.accountId && o.accountId === contact.accountId);
+        if (own.length) matches = own;
+      }
+      if (matches.length > 1) return { problem: 'More than one order has this invoice number. Ask for the order id or the order number.' };
+      [found] = matches;
+    }
+    if (!found) return { problem: 'No order matches that number. Ask the customer to read the order id, order number or invoice number again.' };
+    return { order: await crm.getOrderById(found.id) || found };
+  }
+
+  // Any one reference finds the order and its details are given at once (the business chose no ownership check):
+  // the order id, the Salesforce order number of a phone order, or the invoice number. Addresses and phone numbers
+  // on the order are never returned here; get_details_on_file gives only the parts needed to confirm them.
+  router.post('/order-lookup', async (req, res) => {
+    const body = req.body || {};
+    const phone = normalizePhone(body.phone);
+    const { order, problem } = await orderFromReferences(body);
+    if (problem) return res.json({ found: false, message: problem });
+    if (order) return res.json(orderAnswer(order));
 
     if (!phone) {
       return res.json({ found: false, message: 'An order id, order number or invoice number, or the registered mobile number, is needed.' });
@@ -229,6 +237,57 @@ module.exports = function agentToolsRouter({ crm, now = () => Date.now() }) {
     const [latest] = contact?.accountId ? await crm.findRecentOrdersForAccount(contact.accountId, 1) : [];
     if (!latest) return res.json({ found: false, message: 'No order is linked to this phone number. Ask for the order id, order number or invoice number.' });
     return res.json(orderAnswer(await crm.getOrderById(latest.id), 'The latest order on this number: '));
+  });
+
+  // The mobile number and address on file for an order (its customer and delivery address) or for a caller's own
+  // mobile number, so the agent confirms them instead of asking again. The agent gets only what it needs to confirm:
+  // the last four digits of the mobile, and the city, state and PIN code. The full number and the street stay here,
+  // and the server fills them into the request when the caller agrees (use_details_on_file).
+  router.post('/details-on-file', async (req, res) => {
+    const body = req.body || {};
+    const { order, problem } = await orderFromReferences(body);
+    if (problem) return res.json({ found: false, message: problem });
+
+    let details;
+    if (order) {
+      details = await crm.getDetailsOnFile({ order });
+    } else {
+      const phone = normalizePhone(body.phone);
+      if (!phone) {
+        return res.json({ found: false, message: 'An order id, order number or invoice number, or the registered mobile number, is needed.' });
+      }
+      const contact = await crm.findContactByPhone(phone);
+      if (!contact) {
+        return res.json({ found: false, message: 'No customer record matches this number, so nothing is on file. Ask for the address: house, street and area, city and PIN code.' });
+      }
+      details = await crm.getDetailsOnFile({ contact });
+    }
+
+    const ending = details.mobile ? lastTenDigits(details.mobile).slice(-4) : null;
+    const hasAddress = Boolean(details.city || details.postalCode);
+    const mobilePart = ending ? `the mobile number ending ${spokenDigits(ending)}` : null;
+    // "Delhi, Delhi" is said once.
+    const where = [...new Map([details.city, details.state].filter(Boolean).map((p) => [p.toLowerCase(), p])).values()].join(', ');
+    const addressPart = hasAddress
+      ? `the ${order ? 'delivery ' : ''}address${where ? ` in ${where}` : ''}${details.postalCode ? `, PIN code ${spokenDigits(details.postalCode)}` : ''}`
+      : null;
+    let message;
+    if (mobilePart && addressPart) message = `On file: ${mobilePart}, and ${addressPart}. Ask the customer whether to use these for the request.`;
+    else if (addressPart) message = `On file: ${addressPart}. No mobile number is on file, so ask for one.`;
+    else if (mobilePart) message = `On file: ${mobilePart}. No address is on file, so ask for the house, street and area, the city and the PIN code.`;
+    else message = 'No mobile number or address is on file. Ask the customer for both.';
+
+    return res.json({
+      found: true,
+      source: order ? 'order' : 'customer',
+      mobile_on_file: Boolean(ending),
+      mobile_ending: ending,
+      address_on_file: hasAddress,
+      city: details.city,
+      state: details.state,
+      postal_code: details.postalCode,
+      message,
+    });
   });
 
   router.post('/products', async (req, res) => {

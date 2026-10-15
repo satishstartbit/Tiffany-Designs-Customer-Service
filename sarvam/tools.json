@@ -103,7 +103,14 @@
       "committed_id": null,
       "path": "/api/agent/history",
       "modules": [14]
+    },
+    {
+      "name": "get_details_on_file",
+      "id": "d8871fe5-7471-4a4c-bef0-3daca6f71f75",
+      "committed_id": null,
+      "path": "/api/agent/details-on-file",
+      "modules": [5, 6, 7, 8, 10]
     }
   ],
-  "ids_note": "Each version holds its own copy of the tools. committed_id is frozen in committed version 3; id is the editable draft (version 4), which is what any change edits before the next commit. The last four tools exist only in the draft until version 4 is committed, after their endpoints are deployed to Render."
+  "ids_note": "Each version holds its own copy of the tools. committed_id is frozen in committed version 3; id is the editable draft (version 4), which is what any change edits before the next commit. The last five tools exist only in the draft until version 4 is committed, after their endpoints are deployed to Render. In the draft, register_service_request, book_installation and request_human_callback take use_details_on_file and no longer require phone."
 }

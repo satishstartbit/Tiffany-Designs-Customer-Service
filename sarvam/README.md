@@ -2,7 +2,7 @@
 
 Agent `Tiffany-Des-0db8e21d-e099`, committed as **version 3**: the same instructions as version 2, with every tool calling the Render deployment (version 2's tools call a test tunnel that no longer exists, and version 1 had no phone orders). The instructions are in [agent-prompt.md](agent-prompt.md), and the tool IDs and endpoints are in [tools.json](tools.json). Only this agent may be changed; the Sarvam workspace is shared with other agents.
 
-**Draft version 4** adds four tools for modules 2, 3, 9 and 14: `check_service_hours`, `save_customer_details`, `check_service_area` and `get_service_history`. It also adds Phase 13 (customer details) to the instructions. Their endpoints are in this repository but not yet on Render. Commit version 4 only after the code is deployed, then set `SARVAM_APP_VERSION=4` on Render.
+**Draft version 4** adds four tools for modules 2, 3, 9 and 14: `check_service_hours`, `save_customer_details`, `check_service_area` and `get_service_history`. It also adds Phase 13 (customer details) to the instructions. It also stops asking for details Salesforce already has: `get_details_on_file` gives the last four digits of the mobile number and the city and PIN code on file for the order (or the caller's registered mobile), the agent confirms them, and `register_service_request`, `book_installation` and `request_human_callback` take `use_details_on_file` (their `phone` is no longer required), so the server fills in the full mobile number and address (Phase 5 step 6). Their endpoints are in this repository but not yet on Render. Commit version 4 only after the code is deployed, then set `SARVAM_APP_VERSION=4` on Render.
 
 ## Module coverage
 
@@ -55,9 +55,10 @@ All tools POST to the server with the `x-agent-secret` header and speak the `mes
 | `find_order` | `/api/agent/order-lookup` | Order by `order_id`, `order_number` (phone orders, for example 122 or ORD-00000122) or `invoice_number`; the details are returned as soon as one matches, with no mobile or name check (draft 4). An invoice number on several orders asks for the order id. With only `phone`, the latest order on that number |
 | `find_parts` | `/api/agent/part-lookup` | Parts and part numbers (`Product_Component__c`) for the order or product |
 | `resolve_date` | `/api/agent/resolve-date` | "tomorrow", "Saturday", "17/10" → calendar date in IST; refuses past dates. The model never does date arithmetic |
-| `register_service_request` | `/api/agent/cases` | Node creates the classified Salesforce Case (record type, order, contact, part, `Origin = Phone`); the routing flow picks the queue |
-| `book_installation` | `/api/agent/installation` | Installation or reschedule request with the preferred slot |
-| `request_human_callback` | `/api/agent/escalate` | Escalated case for a service team callback (no live transfer yet) |
+| `register_service_request` | `/api/agent/cases` | Node creates the classified Salesforce Case (record type, order, contact, part, `Origin = Phone`); the routing flow picks the queue. With `use_details_on_file` (draft 4) the order customer's mobile and the delivery address are used, and a new number or address the caller gives replaces them for this request only, noted on the case |
+| `book_installation` | `/api/agent/installation` | Installation or reschedule request with the preferred slot; `use_details_on_file` as above (draft 4) |
+| `request_human_callback` | `/api/agent/escalate` | Escalated case for a service team callback (no live transfer yet); `use_details_on_file` as above (draft 4) |
+| `get_details_on_file` (draft 4) | `/api/agent/details-on-file` | For an order (`order_id`, `order_number`, `invoice_number`) or a registered `phone`: the last four digits of the mobile number and the city, state and PIN code on file (the order's delivery address, else the account's billing address), and what is missing. The full number and street never leave the server |
 | `check_request_status` | `/api/agent/case-status` | Open cases, service visit and replacement shipment; only the caller's own cases. Without the mobile (draft 4): the request number with the full name on it or the order id it is about |
 | `find_products` | `/api/agent/products` | Products and list prices from the standard price book (codes starting `TD-`); generic words such as "furniture" list everything |
 | `place_order` | `/api/agent/orders` | Draft `Order` with its lines at list price, on the account of the given mobile (or a new account), shipped to the given address. The sales team confirms price, delivery and payment |
@@ -125,7 +126,7 @@ The first runs asked for a PIN code even when the caller had already given the n
 
 All 10 tools call the Render deployment, `https://tiffany-designs-customer-service.onrender.com` (`current_base_url` in tools.json). Before committing version 3 (2026-10-14), a chat test ran with the local server and test tunnel switched off. `find_products`, `find_order`, `check_request_status` and `resolve_date` all answered from Render with live Salesforce data.
 
-If the server moves again, change the base URL of all 14 tools together. Either ask Claude ("re-point the Tiffany tools to https://…") or edit each tool's URL in the Sarvam dashboard. Then commit a new version, set `SARVAM_APP_VERSION` to it wherever the server runs, and move any campaign or deployment to it. The website panel's Salesforce credential follows `PUBLIC_BASE_URL` through `npm run deploy:salesforce`.
+If the server moves again, change the base URL of all 15 tools together. Either ask Claude ("re-point the Tiffany tools to https://…") or edit each tool's URL in the Sarvam dashboard. Then commit a new version, set `SARVAM_APP_VERSION` to it wherever the server runs, and move any campaign or deployment to it. The website panel's Salesforce credential follows `PUBLIC_BASE_URL` through `npm run deploy:salesforce`.
 
 ## Going live
 

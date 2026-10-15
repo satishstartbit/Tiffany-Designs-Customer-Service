@@ -175,8 +175,21 @@ function createFakeCrm({ now = () => Date.now() } = {}) {
       }
       return parts.filter((p) => p.productName.toLowerCase().includes(String(productName).toLowerCase()));
     },
+    async getDetailsOnFile({ order, contact }) {
+      const person = order ? await this.getOrderContact(order) : contact;
+      return {
+        contactId: person?.id || null,
+        accountId: order?.accountId || person?.accountId || null,
+        name: person?.name || order?.accountName || null,
+        mobile: person?.mobile || person?.phone || null,
+        street: order ? order.street || null : person?.street || null,
+        city: order ? order.city : person?.city || null,
+        state: null,
+        postalCode: order ? order.postalCode : person?.postalCode || null,
+      };
+    },
     async createServiceCase(input) {
-      if (!input.phone && !(input.erpOrderId && (input.verification || input.invoiceNumber))) {
+      if (!input.phone && !(input.erpOrderId && (input.verification || input.invoiceNumber || input.useDetailsOnFile))) {
         return { created: false, error: 'Customer mobile or email (or a verifiable order) is required.' };
       }
       const verified = input.erpOrderId ? (await this.verifyOrder(input.erpOrderId, [input.verification, input.invoiceNumber, input.phone])).found : false;

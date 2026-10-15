@@ -22,6 +22,9 @@ const RECORD_TYPE_BY_SERVICE_TYPE = {
   'General Query': 'General_Service_Query',
 };
 
+// Requests that need no visit or pickup, so no address.
+const ADDRESS_FREE_ISSUES = new Set(['general', 'escalation']);
+
 // Voice issue types -> the org's restricted Service_Type__c / Service_Sub_Type__c values.
 const SERVICE_TYPES = {
   installation: { serviceType: 'Installation', subType: 'Initial Installation' },
@@ -42,11 +45,11 @@ const SERVICE_TYPES = {
 
 const ORDER_FIELDS = [
   'Id', 'OrderNumber', 'ERP_Order_Id__c', 'Invoice_Number__c', 'Order_Source__c', 'Delivery_Status__c',
-  'Delivery_Date__c', 'AccountId', 'Account.Name', 'CustomerAuthorizedById', 'ShippingCity', 'ShippingPostalCode',
+  'Delivery_Date__c', 'AccountId', 'Account.Name', 'CustomerAuthorizedById', 'ShippingStreet', 'ShippingCity', 'ShippingPostalCode',
   'ShippingState',
 ].join(', ');
 
-const CONTACT_FIELDS = 'Id, FirstName, LastName, AccountId, MobilePhone, Phone, MailingCity, MailingPostalCode';
+const CONTACT_FIELDS = 'Id, FirstName, LastName, AccountId, MobilePhone, Phone, MailingStreet, MailingCity, MailingState, MailingPostalCode';
 
 const VISIT_SUBQUERY = '(SELECT Id, Status__c, Scheduled_Start__c, Technician__r.Name FROM Service_Visits__r ORDER BY Scheduled_Start__c DESC NULLS LAST LIMIT 1)';
 const SHIPMENT_SUBQUERY = '(SELECT Id, Shipment_Status__c, Expected_Delivery_Date__c, Courier__c, Tracking_Number__c, Component__r.Name FROM Replacement_Shipments__r ORDER BY CreatedDate DESC LIMIT 1)';
@@ -80,6 +83,7 @@ function toOrder(row, items = []) {
     accountId: row.AccountId,
     accountName: row.Account?.Name || null,
     contactId: row.CustomerAuthorizedById,
+    street: row.ShippingStreet,
     city: row.ShippingCity,
     postalCode: row.ShippingPostalCode,
     state: row.ShippingState,
@@ -97,7 +101,9 @@ function toContact(row) {
     accountId: row.AccountId,
     mobile: row.MobilePhone,
     phone: row.Phone,
+    street: row.MailingStreet,
     city: row.MailingCity,
+    state: row.MailingState,
     postalCode: row.MailingPostalCode,
   };
 }
@@ -359,14 +365,42 @@ function createCrm({
     return createCustomer(phone, customerName, accountFields);
   }
 
+  async function accountAddress(accountId) {
+    if (!accountId) return {};
+    const [account] = await salesforce.query(
+      `SELECT BillingStreet, BillingCity, BillingState, BillingPostalCode FROM Account WHERE Id = '${escapeSoql(accountId)}' LIMIT 1`,
+    );
+    return { street: account?.BillingStreet, city: account?.BillingCity, state: account?.BillingState, postalCode: account?.BillingPostalCode };
+  }
+
   async function serviceLocation(input, order) {
     if (input.city || input.postalCode) return { city: input.city, state: input.state, postalCode: input.postalCode };
     if (!order) return {};
     if (order.city || order.postalCode) return { city: order.city, state: order.state, postalCode: order.postalCode };
-    const [account] = await salesforce.query(
-      `SELECT BillingCity, BillingState, BillingPostalCode FROM Account WHERE Id = '${escapeSoql(order.accountId)}' LIMIT 1`,
-    );
-    return { city: account?.BillingCity, state: account?.BillingState, postalCode: account?.BillingPostalCode };
+    const { city, state, postalCode } = await accountAddress(order.accountId);
+    return { city, state, postalCode };
+  }
+
+  // What Salesforce holds for an order (its customer's mobile and the delivery address) or for a customer (mobile and
+  // mailing address), with the account's billing address when the record has none. The agent confirms these with the
+  // caller instead of asking again; it hears only the last digits of the mobile, the city and the PIN code.
+  async function getDetailsOnFile({ order, contact }) {
+    const person = order ? await getOrderContact(order) : contact;
+    const accountId = order?.accountId || person?.accountId || null;
+    let address = order
+      ? { street: order.street, city: order.city, state: order.state, postalCode: order.postalCode }
+      : { street: person?.street, city: person?.city, state: person?.state, postalCode: person?.postalCode };
+    if (!address.city && !address.postalCode) address = await accountAddress(accountId);
+    return {
+      contactId: person?.id || null,
+      accountId,
+      name: person?.name || order?.accountName || null,
+      mobile: normalizePhone(person?.mobile) || normalizePhone(person?.phone) || null,
+      street: address.street || null,
+      city: address.city || null,
+      state: address.state || null,
+      postalCode: address.postalCode || null,
+    };
   }
 
   async function componentId(partNumber) {
@@ -554,15 +588,48 @@ function createCrm({
       : { found: false };
     // The order the caller named is linked even when their mobile is not on it; the caller stays the case contact.
     const order = verified.found ? verified.order : input.erpOrderId ? await findOrderByReference(input.erpOrderId) : null;
-    if (!order && !input.phone) {
+
+    // When the caller agreed to use the details on file (for the order, or for the caller's own number), they are used;
+    // a number or address the caller gives instead replaces them for this request only.
+    let onFile = null;
+    if (input.useDetailsOnFile) {
+      if (order) onFile = await getDetailsOnFile({ order });
+      else if (input.phone) {
+        const known = await findContactByPhone(input.phone);
+        if (known) onFile = await getDetailsOnFile({ contact: known });
+      }
+    }
+    const mobile = input.phone || onFile?.mobile || null;
+    if (!order && !mobile) {
       return { created: false, error: 'A mobile number is needed to register the request.' };
     }
+    if (onFile && !mobile) {
+      return { created: false, error: 'No mobile number is on file for this order. Ask the customer for a mobile number to reach them on.' };
+    }
+    const givenPlace = Boolean(input.city || input.postalCode);
+    const location = givenPlace || !(onFile?.city || onFile?.postalCode)
+      ? await serviceLocation(input, order)
+      : { city: onFile.city, state: onFile.state, postalCode: onFile.postalCode };
+    if (onFile && !ADDRESS_FREE_ISSUES.has(input.issueType) && !location.city && !location.postalCode) {
+      return { created: false, error: 'No address is on file for this order. Ask for the house, street and area, the city and the six digit PIN code.' };
+    }
+    // A new city or PIN code means a new address, so the street on file no longer applies.
+    const street = input.address || (onFile && !givenPlace ? onFile.street : null);
 
     let customer;
     if (verified.found) customer = { id: verified.contactId, accountId: order.accountId };
+    // The order's own customer; a different number given for this request does not make a new customer.
+    else if (onFile && (order || onFile.contactId)) customer = { id: onFile.contactId, accountId: onFile.accountId || order?.accountId };
     else if (input.phone) customer = await resolveOrCreateContact(input.phone, input.customerName);
     else customer = { id: (await getOrderContact(order))?.id || null, accountId: order.accountId };
-    const location = await serviceLocation(input, order);
+
+    const changed = [
+      onFile && input.phone && onFile.mobile && lastTenDigits(input.phone) !== lastTenDigits(onFile.mobile) && 'mobile number',
+      onFile && (givenPlace || input.address) && 'address',
+    ].filter(Boolean);
+    const detailsNote = !onFile ? null : changed.length
+      ? `The customer gave a new ${changed.join(' and ')} for this request; the details on file are unchanged.`
+      : 'The customer confirmed the mobile number and address on file.';
     const withinBusinessHours = await businessHours.isOpen(new Date(now())).catch(() => true);
 
     const description = [
@@ -575,8 +642,9 @@ function createCrm({
       input.quantity && `Quantity: ${input.quantity}`,
       input.productName && `Product: ${input.productName}`,
       input.erpOrderId && `Order id given: ${input.erpOrderId}`,
-      input.address && `Address: ${input.address}`,
+      street && `Address: ${street}`,
       (input.preferredDate || input.preferredTime) && `Preferred slot: ${[input.preferredDate, input.preferredTime].filter(Boolean).join(' ')}`,
+      detailsNote,
       'Captured by the Sarvam AI voice agent.',
     ].filter(Boolean).join('\n');
 
@@ -593,7 +661,7 @@ function createCrm({
       Order__c: order?.id,
       Invoice_Number__c: order ? order.invoiceNumber : input.invoiceNumber,
       Order_Source__c: order ? order.orderSource : input.orderSource,
-      Customer_Mobile__c: input.phone,
+      Customer_Mobile__c: mobile,
       Damaged_Component__c: await componentId(input.partNumber),
       Service_City__c: location.city,
       Service_State__c: location.state,
@@ -610,6 +678,7 @@ function createCrm({
       withinBusinessHours,
       orderVerified: verified.found,
       orderLinked: Boolean(order),
+      ...(onFile ? { usedDetailsOnFile: true } : {}),
     };
   }
 
@@ -798,6 +867,7 @@ function createCrm({
     verifyOrder,
     findOrderByReference,
     findOrdersByInvoice,
+    getDetailsOnFile,
     findCustomerByNameAndPin,
     findParts,
     findProducts,
