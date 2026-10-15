@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { createSarvamClient, cohortName } = require('../src/sarvam');
+const { createSarvamClient, cohortName, cleanApiKey } = require('../src/sarvam');
 
 const config = { baseUrl: 'https://apps.sarvam.ai', apiKey: 'sk_test', orgId: 'org1', workspaceId: 'ws1' };
 
@@ -124,6 +124,14 @@ test('getWebCallUrl asks the app runtime for a signed URL with the key and passe
   assert.equal(requests[0].url, 'https://apps.sarvam.ai/api/app-runtime/orgs/org1/workspaces/ws1/apps/Tiffany-Des-1/url?interaction_type=call&version=3');
   assert.equal(requests[0].options.method, 'GET');
   assert.equal(requests[0].options.headers['X-API-Key'], 'sk_test');
+});
+
+test('a key pasted with its quotes, spaces or variable name is cleaned, because Sarvam refuses it as written', () => {
+  for (const pasted of ['sk_samvaad_abc', ' sk_samvaad_abc\n', '"sk_samvaad_abc"', "'sk_samvaad_abc'", 'SARVAM_API_KEY=sk_samvaad_abc', 'SARVAM_API_KEY="sk_samvaad_abc" ']) {
+    assert.equal(cleanApiKey(pasted), 'sk_samvaad_abc', JSON.stringify(pasted));
+  }
+  assert.equal(cleanApiKey(undefined), '');
+  assert.equal(cleanApiKey('"sk_samvaad_abc'), '"sk_samvaad_abc', 'an unmatched quote is left for Sarvam to refuse');
 });
 
 test('web calls stay off without an API key or an agent', async () => {

@@ -1,3 +1,5 @@
+const fs = require('node:fs');
+const path = require('node:path');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { startTestServer, testConfig } = require('./helpers');
@@ -1087,6 +1089,19 @@ test.describe('website call widget', () => {
     assert.equal((await s.call('GET', sessionPath)).status, 200, 'allowed again after ten minutes');
   });
 
+  test('attempts that get no call link do not count toward the limits', async (t) => {
+    const s = await startTestServer();
+    t.after(s.close);
+    s.sarvam.webResponse = { status: 401, body: '{"error":"invalid key"}', retryAfter: null };
+    for (let i = 0; i < 6; i += 1) assert.equal((await s.call('GET', sessionPath)).status, 503);
+    s.sarvam.failNext = 1;
+    assert.equal((await s.call('GET', sessionPath)).status, 502);
+
+    s.sarvam.webResponse = { status: 200, body: '{"url":"wss://apps.sarvam.test/session?token=t2","reference_id":"ref-2"}', retryAfter: null };
+    for (let i = 0; i < 5; i += 1) assert.equal((await s.call('GET', sessionPath)).status, 200, 'the failed attempts were not counted');
+    assert.equal((await s.call('GET', sessionPath)).status, 429);
+  });
+
   test('an overall hourly cap stops a flood from many addresses', async (t) => {
     const s = await startTestServer({ config: testConfig({ webCalls: { maxPerHour: 2, maxPerDay: 200 } }) });
     t.after(s.close);
@@ -1126,15 +1141,11 @@ test.describe('website call widget', () => {
     assert.equal(res.body.error, 'not_configured');
   });
 
-  test('the test page is served with the widget and without any key', async (t) => {
-    const s = await startTestServer();
-    t.after(s.close);
-    const page = await s.call('GET', '/test.html');
-    assert.equal(page.status, 200);
-    assert.match(page.headers.get('content-type'), /text\/html/);
-    assert.match(page.text, /<sarvam-widget[\s\S]*session-endpoint="https:\/\/[^"]+\/api\/sarvam\/"/, 'the server is named in full, so a copy works on another computer');
-    assert.match(page.text, /app-id="Tiffany-Des-0db8e21d-e099"/);
-    assert.doesNotMatch(page.text, /api-key=|sk_/, 'no API key in the page');
+  test('the website (web/) gets its sessions from this server and holds no key', () => {
+    const page = fs.readFileSync(path.join(__dirname, '..', 'web', 'app', 'VoiceAgent.js'), 'utf8');
+    assert.match(page, /<sarvam-widget[\s\S]*session-endpoint=\{`\$\{server\}\/api\/sarvam\/`\}/);
+    assert.match(page, /'app-id': 'Tiffany-Des-0db8e21d-e099'/);
+    assert.doesNotMatch(page, /api-key|sk_/, 'no API key in the website');
   });
 
   test('a page on another site may ask for a session (CORS), including the browser preflight', async (t) => {

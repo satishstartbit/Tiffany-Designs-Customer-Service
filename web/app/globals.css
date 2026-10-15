@@ -1,0 +1,26 @@
+body {
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  margin: 0;
+  padding: 2rem;
+  color: #2b2b2b;
+  background: #f8f4ee;
+}
+
+h1 {
+  font-weight: 600;
+}
+
+.status {
+  padding: 1rem;
+  border-left: 4px solid #6b3a1e;
+  background: #fff;
+}
+
+.status:empty {
+  display: none;
+}
+
+.status.problem {
+  border-left-color: #b3261e;
+  background: #fdecea;
+}

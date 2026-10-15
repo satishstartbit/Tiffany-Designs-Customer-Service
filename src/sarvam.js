@@ -11,6 +11,15 @@ function strings(map) {
   );
 }
 
+// A key pasted into a hosting dashboard often keeps its .env quotes or the whole NAME=value line,
+// and Sarvam refuses a quoted key as "Invalid API key format".
+function cleanApiKey(value) {
+  return String(value || '').trim()
+    .replace(/^SARVAM_API_KEY\s*=\s*/, '')
+    .replace(/^(['"])(.*)\1$/, '$2')
+    .trim();
+}
+
 function createSarvamClient({ baseUrl, apiKey, orgId, workspaceId, agentId, appVersion, connectionId, agentPhone }, fetchImpl = fetch) {
   async function request(service, path, body) {
     if (!apiKey || !orgId || !workspaceId) {
@@ -83,4 +92,4 @@ function createSarvamClient({ baseUrl, apiKey, orgId, workspaceId, agentId, appV
   return { addToCampaign, startCall, canStartCalls, getWebCallUrl, canStartWebCalls };
 }
 
-module.exports = { createSarvamClient, cohortName };
+module.exports = { createSarvamClient, cohortName, cleanApiKey };

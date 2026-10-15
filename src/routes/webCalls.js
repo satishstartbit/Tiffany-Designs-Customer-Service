@@ -2,7 +2,7 @@ const express = require('express');
 
 const INTERACTION_TYPES = ['call', 'chat'];
 
-// The website's Sarvam call widget (session-endpoint="/api/sarvam/") asks here for a signed call URL, so the
+// The website's Sarvam call widget (the Next.js site in web/) asks here for a signed call URL, so the
 // Sarvam API key stays on the server. The route is public, so it is limited to this project's agent and rate-limited.
 module.exports = function webCallsRouter({ sarvam, config, limiter, logger = console }) {
   const router = express.Router();
@@ -44,7 +44,6 @@ module.exports = function webCallsRouter({ sarvam, config, limiter, logger = con
       res.set('Retry-After', String(verdict.retryAfterSeconds));
       return res.status(429).json({ error: 'rate_limited', message: 'Too many calls were started. Please try again later.' });
     }
-    await limiter.record(visitor);
 
     const interactionType = INTERACTION_TYPES.includes(req.query.interaction_type) ? req.query.interaction_type : 'call';
     try {
@@ -57,6 +56,8 @@ module.exports = function webCallsRouter({ sarvam, config, limiter, logger = con
           + 'a speech API key or a deleted workspace key is refused.');
         return res.status(503).json({ error: 'not_configured', message: 'Calls are not available right now. Please try again later.' });
       }
+      // Only a call link counts toward the limits, so attempts that fail on the server's side cost the visitor nothing.
+      if (upstream.status >= 200 && upstream.status < 300) await limiter.record(visitor);
       if (upstream.retryAfter) res.set('Retry-After', upstream.retryAfter);
       res.set('Cache-Control', 'no-store');
       return res.status(upstream.status).type('application/json').send(upstream.body);

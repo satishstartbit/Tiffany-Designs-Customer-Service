@@ -1,3 +1,5 @@
+const { cleanApiKey } = require('./sarvam');
+
 const env = process.env;
 
 function int(value, fallback) {
@@ -21,7 +23,7 @@ module.exports = {
 
   sarvam: {
     baseUrl: (env.SARVAM_APPS_BASE_URL || 'https://apps.sarvam.ai').replace(/\/+$/, ''),
-    apiKey: env.SARVAM_API_KEY || '',
+    apiKey: cleanApiKey(env.SARVAM_API_KEY),
     orgId: env.SARVAM_ORG_ID || '',
     workspaceId: env.SARVAM_WORKSPACE_ID || '',
     agentId: env.SARVAM_APP_ID || env.SARVAM_AGENT_ID || '',
