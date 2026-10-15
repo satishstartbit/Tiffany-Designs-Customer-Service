@@ -1,6 +1,6 @@
 /**
  * "Call me" panel on the Tiffany Designs site: asks the voice server (Named Credential Tiffany_Voice_API) to have
- * the Sarvam voice assistant call the visitor now.
+ * the Tiffany Designs AI voice assistant call the visitor now.
  *
  * The server enforces consent, valid Indian mobiles and the per-number and overall call limits, and words its
  * refusals for customers, so those are passed through; anything else becomes one generic message.

@@ -24,14 +24,16 @@ Agent `Tiffany-Des-0db8e21d-e099`, committed as **version 3**: the same instruct
 | 14 | Service history and call logging | `get_service_history`; every call is logged as a Task by the webhook |
 | 15 | ERP and telephony integration | All tools go through the Node server to Salesforce; Sarvam handles telephony |
 
+**Name.** The agent introduces itself as Satish Choudhary from Tiffany Designs, and says it is an AI assistant when asked. Nothing a customer or staff member hears or sees names the voice platform: not the agent, the website (the call widget's own panel title is replaced in the page), the console, the Salesforce panel, or the text written to Salesforce records. Only technical names stay: environment variables (`SARVAM_*`), code modules, the `/api/sarvam` address and the widget library.
+
 ## Call types
 
 `call_reason` selects the flow. Outbound calls get their opening line from the server (`app_overrides.initial_bot_message`), and that line only confirms who answered.
 
 | `call_reason` | Who starts it | Opening line |
 | --- | --- | --- |
-| `inbound` | Customer calls the Tiffany number | Namaste, welcome to Tiffany Designs customer care. This is the Tiffany Designs service assistant. How can I help you today? (translated into all 11 languages) |
-| `delivery_followup` | Server, 1 hour after `Delivery_Status__c` becomes Delivered | Hello, this is the Tiffany Designs service assistant. Am I speaking with {name}? |
+| `inbound` | Customer calls the Tiffany number | Namaste, welcome to Tiffany Designs customer care. This is Satish Choudhary. How can I help you today? (translated into all 11 languages) |
+| `delivery_followup` | Server, 1 hour after `Delivery_Status__c` becomes Delivered | Hello, this is Satish Choudhary from Tiffany Designs. Am I speaking with {name}? |
 | `callback_request` | Server, when a customer leaves a number | …calling back as requested. Am I speaking with {name}? |
 | `service_update` | Server, on a case event (module 13) | Same as delivery follow-up; the update text is passed in `notice_details` |
 

@@ -520,7 +520,7 @@ function createCrm({
       Pricebook2Id: lines[0].pricebookId,
       Order_Source__c: 'Other',
       Description: [
-        'Placed by phone through the Sarvam AI voice agent.',
+        'Placed by phone through the AI voice agent.',
         'Confirm the final price, delivery charges, delivery date and payment with the customer before activating.',
         !customer.created && givenName && givenName.toLowerCase() !== String(customer.name || '').toLowerCase()
           ? `The caller gave the name ${givenName}; the mobile belongs to ${customer.name}.`
@@ -662,7 +662,7 @@ function createCrm({
       street && `Address: ${street}`,
       (input.preferredDate || input.preferredTime) && `Preferred slot: ${[input.preferredDate, input.preferredTime].filter(Boolean).join(' ')}`,
       detailsNote,
-      'Captured by the Sarvam AI voice agent.',
+      'Captured by the AI voice agent.',
     ].filter(Boolean).join('\n');
 
     const fields = compact({

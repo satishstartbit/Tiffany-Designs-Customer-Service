@@ -3,7 +3,7 @@
     <apiVersion>62.0</apiVersion>
     <isExposed>true</isExposed>
     <masterLabel>Tiffany Voice Call</masterLabel>
-    <description>A customer enters a mobile number and the Tiffany Designs AI voice assistant (Sarvam) calls it straight away.</description>
+    <description>A customer enters a mobile number and the Tiffany Designs AI voice assistant, Satish Choudhary, calls it straight away.</description>
     <targets>
         <target>lightningCommunity__Page</target>
         <target>lightningCommunity__Default</target>
@@ -15,7 +15,7 @@
     <targetConfigs>
         <targetConfig targets="lightningCommunity__Default">
             <property name="heading" type="String" label="Heading" default="Talk to Tiffany Designs"/>
-            <property name="subheading" type="String" label="Subheading" default="Our AI assistant calls you right away"/>
+            <property name="subheading" type="String" label="Subheading" default="Satish Choudhary, our AI assistant, calls you right away"/>
             <property name="buttonLabel" type="String" label="Button label" default="Call me now"/>
         </targetConfig>
     </targetConfigs>

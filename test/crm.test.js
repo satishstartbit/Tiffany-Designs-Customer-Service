@@ -196,7 +196,7 @@ test('createServiceCase saves a classified phone case linked to the verified ord
     Service_State__c: 'Delhi',
     Service_PIN__c: '110001',
   });
-  assert.match(fields.Description, /^Side panel cracked when the box was opened\nPart \/ component: Side Panel\nPart number: S01-PNL-002\nQuantity: 1\nOrder id given: TD-ORD-1001\nCaptured by the Sarvam AI voice agent\.$/);
+  assert.match(fields.Description, /^Side panel cracked when the box was opened\nPart \/ component: Side Panel\nPart number: S01-PNL-002\nQuantity: 1\nOrder id given: TD-ORD-1001\nCaptured by the AI voice agent\.$/);
   assert.equal('Status' in fields, false, 'new cases keep the default status');
   assert.equal(sf.log.updates.length, 0, 'everything is set when the case is created');
 });
@@ -507,7 +507,7 @@ test('createOrder saves a Draft order with price book lines for a known caller',
     ShippingStateCode: 'DL',
   });
   assert.equal(fields.Description, [
-    'Placed by phone through the Sarvam AI voice agent.',
+    'Placed by phone through the AI voice agent.',
     'Confirm the final price, delivery charges, delivery date and payment with the customer before activating.',
     'Customer notes: Ring the bell twice',
   ].join('\n'));

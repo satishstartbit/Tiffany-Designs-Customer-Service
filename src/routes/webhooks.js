@@ -26,7 +26,7 @@ module.exports = function webhooksRouter({ crm, now = () => Date.now(), logger =
   router.post('/sarvam', async (req, res) => {
     const p = req.body || {};
     if (!p.user_phone_number || (!p.campaign_id && !p.deployment_id && !p.attempt_id)) {
-      return res.status(400).json({ error: 'Not a Sarvam call payload' });
+      return res.status(400).json({ error: 'Not a voice call payload' });
     }
 
     // Campaign and instant calls are outbound; only a deployment answers inbound calls.
@@ -51,7 +51,7 @@ module.exports = function webhooksRouter({ crm, now = () => Date.now(), logger =
     if (connected && issueType && !callCase && !vars.case_number) {
       fallbackCase = await crm.createServiceCase({
         issueType,
-        description: `${vars.issue_description || vars.call_summary || 'Issue reported on voice agent call.'} (registered after the call; Sarvam interaction ${p.interaction_id})`,
+        description: `${vars.issue_description || vars.call_summary || 'Issue reported on voice agent call.'} (registered after the call; voice call ${p.interaction_id})`,
         phone,
         customerName: vars.customer_name,
         erpOrderId: vars.order_number,
@@ -86,7 +86,7 @@ module.exports = function webhooksRouter({ crm, now = () => Date.now(), logger =
       connected ? null : `Not connected: ${p.connectivity_status || 'unknown'}${p.failure_reason ? ` (${p.failure_reason})` : ''}`,
       ...outcome,
       p.recording_url && `Recording: ${p.recording_url}`,
-      p.interaction_id && `Sarvam interaction: ${p.interaction_id}`,
+      p.interaction_id && `Voice call id: ${p.interaction_id}`,
       '',
       transcriptText(p.interaction_transcript),
     ].filter((line) => line !== null && line !== undefined && line !== false).join('\n').slice(0, MAX_DESCRIPTION);

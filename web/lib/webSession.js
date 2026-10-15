@@ -28,7 +28,9 @@ export async function startWebSession({ params, searchParams, ip }, { limiter, e
   }
   const apiKey = cleanApiKey(env.SARVAM_API_KEY);
   if (!apiKey) {
-    return reply(503, { error: 'not_configured', message: 'Web calls need SARVAM_API_KEY on the server.' });
+    // The visitor's widget shows this message, so it names no setting; the log says what is missing.
+    logger.error('Web calls are off: set SARVAM_API_KEY in this site\'s environment.');
+    return reply(503, { error: 'not_configured', message: 'Calls are not available right now. Please try again later.' });
   }
 
   const verdict = await limiter.check(ip);

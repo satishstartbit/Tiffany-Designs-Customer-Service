@@ -3,8 +3,29 @@
 import Script from 'next/script';
 import { useEffect, useState } from 'react';
 import { X } from 'lucide-react';
-import { AGENT } from '@/lib/agent.js';
+import { AGENT, AGENT_NAME } from '@/lib/agent.js';
 import { SUPPORT_PHONE } from '@/lib/contact.js';
+
+// The widget titles its panel with its maker's name and has no setting for it, so the title is replaced with the
+// agent's own name, and any other mention of the maker with the brand.
+const PANEL_TITLE = `${AGENT_NAME}, Tiffany Designs`;
+
+// Only visible text: the widget's style sheet uses its maker's name in animation names, which must stay.
+const visibleText = {
+  acceptNode: (node) => (['STYLE', 'SCRIPT'].includes(node.parentElement?.tagName) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT),
+};
+
+function renameWidget(root) {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, visibleText);
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    if (/sarvam/i.test(node.nodeValue)) {
+      node.nodeValue = node.nodeValue.replace(/sarvam voice assistant/gi, PANEL_TITLE).replace(/sarvam/gi, 'Tiffany Designs');
+    }
+  }
+  for (const img of root.querySelectorAll('img[alt]')) {
+    if (/sarvam/i.test(img.alt)) img.alt = PANEL_TITLE;
+  }
+}
 
 // By default this site's own /api/sarvam/ (app/api/sarvam/...) gives each signed call URL, with the Sarvam key kept
 // in the server environment. NEXT_PUBLIC_VOICE_SERVER_URL, or ?server= in the address, uses another server's
@@ -26,8 +47,8 @@ function explain(res, server) {
     case 404:
       return `${server} does not know this agent. Check the agent ids in lib/agent.js.`;
     case 503:
-      return `${server} cannot start calls: its SARVAM_API_KEY is missing or Sarvam refused it. `
-        + 'Set the current Sarvam workspace key in that server\'s environment and redeploy.';
+      return `${server} cannot start calls: its voice service key is missing or was refused. `
+        + 'Check the server log, set the current workspace key in that server\'s environment and redeploy.';
     default:
       return `${server} answered ${res.status}.`;
   }
@@ -38,7 +59,7 @@ function customerMessage(res) {
   return `Our voice assistant is not available right now. Please try again in a little while, or call us on ${SUPPORT_PHONE}.`;
 }
 
-// The Sarvam call widget (bottom right) for customers. A short note above it says what is happening while a call
+// The voice call widget (bottom right) for customers. A short note above it says what is happening while a call
 // starts, and what to do when it cannot.
 export default function VoiceAgent() {
   const [server, setServer] = useState('');
@@ -49,7 +70,7 @@ export default function VoiceAgent() {
     const show = (text, problem = false) => setNote({ text, problem });
     const active = withoutTrailingSlash(new URLSearchParams(location.search).get('server') || CONFIGURED_SERVER || location.origin);
     setServer(active);
-    // The user id is what Sarvam's Log Analyser searches by; one per visit, findable by its prefix.
+    // The user id is what the voice platform's Log Analyser searches by; one per visit, findable by its prefix.
     setUserId(`tiffany-web-${Date.now()}`);
     if (!window.isSecureContext) {
       show('Your browser blocks the microphone on this address. Please open the secure (https) version of this page.', true);
@@ -82,6 +103,26 @@ export default function VoiceAgent() {
       window.fetch = nativeFetch;
     };
   }, []);
+
+  // The widget renders inside its own shadow root, and again whenever it opens or a call starts, so its text is
+  // watched and renamed each time.
+  useEffect(() => {
+    if (!userId) return undefined;
+    let observer = null;
+    const attach = () => {
+      const root = document.querySelector('sarvam-widget')?.shadowRoot;
+      if (!root) return false;
+      renameWidget(root);
+      observer = new MutationObserver(() => renameWidget(root));
+      observer.observe(root, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['alt'] });
+      return true;
+    };
+    const timer = attach() ? null : setInterval(() => attach() && clearInterval(timer), 200);
+    return () => {
+      if (timer) clearInterval(timer);
+      observer?.disconnect();
+    };
+  }, [userId]);
 
   return (
     <>

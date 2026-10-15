@@ -38,7 +38,7 @@ export default function LoginForm({ localSignIn }) {
         <LogIn aria-hidden="true" /> {pending ? 'Signing in…' : 'Sign in'}
       </button>
       <p className="small muted" style={{ margin: 0, textAlign: 'center' }}>
-        A customer? <Link className="row-link" href="/support">Talk to our AI service assistant</Link>
+        A customer? <Link className="row-link" href="/support">Talk to Satish Choudhary, our AI assistant</Link>
       </p>
     </form>
   );

@@ -64,7 +64,7 @@ private class TiffanyVoiceCallControllerTest {
 
     @IsTest
     static void hidesServerFailuresBehindOneMessage() {
-        Test.setMock(HttpCalloutMock.class, new ServerMock(502, '{"error":"Upstream request failed","detail":"Sarvam rejected the API key"}'));
+        Test.setMock(HttpCalloutMock.class, new ServerMock(502, '{"error":"Upstream request failed","detail":"The voice service rejected the API key"}'));
         Assert.areEqual(TiffanyVoiceCallController.UNAVAILABLE, errorFrom('9876543210', true));
 
         Test.setMock(HttpCalloutMock.class, new ServerMock(422, 'not json'));

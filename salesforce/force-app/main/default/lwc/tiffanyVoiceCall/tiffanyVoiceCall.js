@@ -10,7 +10,7 @@ export default class TiffanyVoiceCall extends LightningElement {
     @api recordId;
     @api objectApiName;
     @api heading = 'Talk to Tiffany Designs';
-    @api subheading = 'Our AI assistant calls you right away';
+    @api subheading = 'Satish Choudhary, our AI assistant, calls you right away';
     @api buttonLabel = 'Call me now';
 
     phone = '';
@@ -76,7 +76,7 @@ export default class TiffanyVoiceCall extends LightningElement {
                 name: this.recordName,
                 recordId: this.recordId
             });
-            this.successText = (result && result.message) || 'Our assistant is calling you now.';
+            this.successText = (result && result.message) || 'Satish Choudhary, our AI assistant, is calling you now.';
             this.started = true;
         } catch (error) {
             this.errorText = (error && error.body && error.body.message) || GENERIC_ERROR;

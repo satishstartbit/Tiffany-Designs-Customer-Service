@@ -35,7 +35,9 @@ module.exports = function webCallsRouter({ sarvam, config, limiter, logger = con
       return res.status(404).json({ error: 'not_found' });
     }
     if (!sarvam.canStartWebCalls) {
-      return res.status(503).json({ error: 'not_configured', message: 'Web calls need SARVAM_API_KEY on the server.' });
+      // The visitor's widget shows this message, so it names no setting; the log says what is missing.
+      logger.error('Web calls are off: set SARVAM_API_KEY, SARVAM_ORG_ID, SARVAM_WORKSPACE_ID and SARVAM_AGENT_ID.');
+      return res.status(503).json({ error: 'not_configured', message: 'Calls are not available right now. Please try again later.' });
     }
 
     const visitor = { ip: req.ip };

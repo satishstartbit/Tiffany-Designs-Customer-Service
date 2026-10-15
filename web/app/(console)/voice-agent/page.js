@@ -4,7 +4,7 @@ import {
 } from 'lucide-react';
 import { Badge, Card, Fields, PageHeader, Problem } from '@/components/ui.js';
 import { loadAdmin } from '@/lib/api.js';
-import { AGENT } from '@/lib/agent.js';
+import { AGENT, AGENT_NAME } from '@/lib/agent.js';
 import { dateTime, minutesOfDay, time } from '@/lib/format.js';
 
 export const metadata = { title: 'AI voice agent' };
@@ -32,9 +32,9 @@ export default async function VoiceAgentPage() {
   return (
     <>
       <PageHeader
-        eyebrow="Sarvam AI"
+        eyebrow={AGENT_NAME}
         title="AI voice agent"
-        description="The customer service voice agent works on the same Salesforce data as this console: what it creates on a call shows up here. Customers talk to it on the public customer care page, which needs no sign-in; open it to try a call."
+        description={`${AGENT_NAME} is the customer service voice agent. It works on the same Salesforce data as this console: what it creates on a call shows up here. Customers talk to it on the public customer care page, which needs no sign-in; open it to try a call.`}
         actions={<Link className="btn" href="/support" target="_blank">Open customer care page</Link>}
       />
 
@@ -55,9 +55,10 @@ export default async function VoiceAgentPage() {
         <div className="grid" style={{ alignContent: 'start' }}>
           <Card title="Agent">
             <Fields one items={[
+              ['Name', AGENT_NAME],
               ['Agent id', <span key="a" className="mono">{AGENT.appId}</span>],
               ['Customer page', <Link key="s" className="row-link" href="/support" target="_blank">/support</Link>],
-              ['Web calls', 'Through this site; the Sarvam key stays on the server'],
+              ['Web calls', 'Through this site; the voice service key stays on the server'],
               ['Limits', '5 calls per visitor every 10 minutes, 20 a day'],
             ]} />
           </Card>

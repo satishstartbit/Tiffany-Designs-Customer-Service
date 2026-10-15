@@ -201,3 +201,10 @@ test('the sign-in details are shown only while developing, never on a deployed s
   const page = fs.readFileSync(path.join(WEB, 'app', 'login', 'page.js'), 'utf8');
   assert.match(page, /process\.env\.NODE_ENV !== 'production' && config\.ready \? \{ email: config\.email, password: config\.password \} : null/);
 });
+
+test('the call widget shows the agent name instead of its maker\'s, and its style sheet is left alone', () => {
+  const widget = fs.readFileSync(path.join(WEB, 'components', 'VoiceAgent.js'), 'utf8');
+  assert.match(widget, /const PANEL_TITLE = `\$\{AGENT_NAME\}, Tiffany Designs`;/);
+  assert.match(widget, /\['STYLE', 'SCRIPT'\]\.includes\(node\.parentElement\?\.tagName\) \? NodeFilter\.FILTER_REJECT/, 'animation names in the widget CSS keep working');
+  assert.match(fs.readFileSync(path.join(WEB, 'lib', 'agent.js'), 'utf8'), /export const AGENT_NAME = 'Satish Choudhary';/);
+});

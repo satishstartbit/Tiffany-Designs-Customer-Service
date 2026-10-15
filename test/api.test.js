@@ -984,7 +984,7 @@ test.describe('Sarvam call-end webhook', () => {
     const [created] = s.crm.created;
     assert.equal(created.input.issueType, 'missing_parts');
     assert.equal(created.input.erpOrderId, 'TD-ORD-1001');
-    assert.match(created.input.description, /Drawer handles missing \(registered after the call; Sarvam interaction int-1\)/);
+    assert.match(created.input.description, /Drawer handles missing \(registered after the call; voice call int-1\)/);
   });
 
   test('an unanswered attempt that will be retried is not logged yet', async (t) => {
