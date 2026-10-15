@@ -71,8 +71,14 @@ module.exports = function webhooksRouter({ crm, now = () => Date.now(), logger =
       ? await crm.findVoiceOrderSince({ orderNumber: vars.placed_order_number, contactId: contact?.id, since: callStart }).catch(() => null)
       : null;
 
+    // The language the caller chose on the call, kept on their contact so the service team knows it.
+    const language = connected && contact?.id && vars.preferred_language
+      ? await crm.savePreferredLanguage(contact.id, vars.preferred_language).catch(() => null)
+      : null;
+
     const outcome = [
       vars.call_outcome && `Outcome: ${vars.call_outcome}`,
+      vars.preferred_language && `Language: ${vars.preferred_language}`,
       placedOrder && `Order placed: ${placedOrder.orderNumber}`,
       vars.call_summary && `Summary: ${vars.call_summary}`,
       vars.delivery_status && `Delivery status: ${vars.delivery_status}`,
@@ -110,6 +116,7 @@ module.exports = function webhooksRouter({ crm, now = () => Date.now(), logger =
       caseNumber: callCase?.caseNumber || null,
       fallbackCaseNumber: fallbackCase?.created ? fallbackCase.caseNumber : null,
       orderNumber: placedOrder?.orderNumber || null,
+      languageSaved: Boolean(language?.saved),
     });
   });
 

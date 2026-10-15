@@ -43,6 +43,19 @@ const SERVICE_TYPES = {
   escalation: { serviceType: 'General Query', subType: null },
 };
 
+// What a request is about: installation, installation_followup, damage or replacement. A new request of the same kind
+// as one open on the same order is registered only when the caller wants a second one. Older cases often have no sub
+// type, so kinds are broad; general queries and call backs are not compared.
+function requestKind(serviceType, subType) {
+  if (serviceType === 'Installation') return ['Installation Follow-up', 'Re-installation'].includes(subType) ? 'installation_followup' : 'installation';
+  if (serviceType === 'Damage or Defect') return 'damage';
+  if (serviceType === 'Replacement') return 'replacement';
+  return null;
+}
+
+// The languages the voice agent speaks, as Salesforce stores a caller's choice.
+const AGENT_LANGUAGES = ['English', 'Hindi', 'Bengali', 'Gujarati', 'Kannada', 'Malayalam', 'Marathi', 'Odia', 'Punjabi', 'Tamil', 'Telugu'];
+
 const ORDER_FIELDS = [
   'Id', 'OrderNumber', 'ERP_Order_Id__c', 'Invoice_Number__c', 'Order_Source__c', 'Delivery_Status__c',
   'Delivery_Date__c', 'AccountId', 'Account.Name', 'CustomerAuthorizedById', 'ShippingStreet', 'ShippingCity', 'ShippingPostalCode',
@@ -606,6 +619,15 @@ function createCrm({
     // The order the caller named is linked even when their mobile is not on it; the caller stays the case contact.
     const order = verified.found ? verified.order : input.erpOrderId ? await findOrderByReference(input.erpOrderId) : null;
 
+    // A reschedule changes the open installation request, so only new requests are compared.
+    const kind = input.issueType === 'installation_reschedule' ? null : requestKind(mapping.serviceType, mapping.subType);
+    if (order && kind && !input.newRequest) {
+      const existing = (await getOpenRequests(order.id)).find((r) => r.kind === kind);
+      if (existing) {
+        return { created: false, existingRequest: existing, error: `Request ${existing.caseNumber} of this kind is already open for the order.` };
+      }
+    }
+
     // When the caller agreed to use the details on file (for the order, or for the caller's own number), they are used;
     // a number or address the caller gives instead replaces them for this request only.
     let onFile = null;
@@ -727,6 +749,37 @@ function createCrm({
       visit: toVisit(r.Service_Visits__r?.records?.[0]),
       shipment: toShipment(r.Replacement_Shipments__r?.records?.[0]),
     }));
+  }
+
+  // The order's open installation, damage and replacement requests, newest first.
+  async function getOpenRequests(orderId) {
+    if (!orderId) return [];
+    const rows = await salesforce.query(
+      'SELECT Id, CaseNumber, Service_Type__c, Service_Sub_Type__c, Status, CreatedDate FROM Case '
+      + `WHERE Order__c = '${escapeSoql(orderId)}' AND IsClosed = false ORDER BY CreatedDate DESC LIMIT 20`,
+    );
+    return rows
+      .map((r) => ({
+        id: r.Id,
+        caseNumber: r.CaseNumber,
+        serviceType: r.Service_Type__c,
+        subType: r.Service_Sub_Type__c,
+        status: r.Status,
+        createdDate: r.CreatedDate,
+        kind: requestKind(r.Service_Type__c, r.Service_Sub_Type__c),
+      }))
+      .filter((r) => r.kind);
+  }
+
+  // The language a caller chose on a voice call, saved on their contact so staff (and later calls) know it.
+  async function savePreferredLanguage(contactId, language) {
+    const name = AGENT_LANGUAGES.find((l) => l.toLowerCase() === String(language || '').trim().toLowerCase());
+    if (!contactId || !name) return { saved: false };
+    const [row] = await salesforce.query(`SELECT Languages__c FROM Contact WHERE Id = '${escapeSoql(contactId)}' LIMIT 1`);
+    if (!row) return { saved: false };
+    if (row.Languages__c === name) return { saved: false, language: name };
+    await salesforce.update('Contact', contactId, { Languages__c: name });
+    return { saved: true, language: name };
   }
 
   // Everything a notification call needs: who to call and what changed.
@@ -894,14 +947,18 @@ function createCrm({
     findVoiceOrderSince,
     createServiceCase,
     getCaseStatus,
+    getOpenRequests,
     getCaseNotice,
     findVoiceCaseSince,
     getServiceHours,
     checkServiceArea,
     saveCustomerDetails,
+    savePreferredLanguage,
     getServiceHistory,
     logCall,
   };
 }
 
-module.exports = { createCrm, SERVICE_TYPES, escapeSoql, escapeSoqlLike, escapeSosl, soqlDateTime, indianStatesOf };
+module.exports = {
+  createCrm, SERVICE_TYPES, AGENT_LANGUAGES, requestKind, escapeSoql, escapeSoqlLike, escapeSosl, soqlDateTime, indianStatesOf,
+};

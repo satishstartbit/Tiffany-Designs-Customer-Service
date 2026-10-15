@@ -2,6 +2,7 @@ const { createApp } = require('../src/app');
 const { createScheduler, createMemoryJobStore } = require('../src/scheduler');
 const { createJobHandlers } = require('../src/callFlows');
 const { lastTenDigits, nameWords, namesMatch, sameReference } = require('../src/rules');
+const { SERVICE_TYPES, requestKind } = require('../src/crm/crm');
 
 const SECRETS = { internalApiKey: 'internal-key', siteCallApiKey: 'site-key', agentToolSecret: 'agent-secret', webhookToken: 'hook-token', cronSecret: 'cron-secret' };
 
@@ -74,6 +75,9 @@ function createFakeCrm({ now = () => Date.now() } = {}) {
   const created = [];
   const tasks = [];
   const savedCustomers = [];
+  // Open requests on orders as the duplicate check sees them, newest first; tests add their own.
+  const openRequests = [];
+  const savedLanguages = [];
   const weekly = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
     .map((day) => ({ day, window: day === 'Sunday' ? null : { start: 9 * 60, end: 18 * 60 } }));
   const state = {
@@ -96,6 +100,15 @@ function createFakeCrm({ now = () => Date.now() } = {}) {
     tasks,
     state,
     savedCustomers,
+    openRequests,
+    savedLanguages,
+    async getOpenRequests(orderId) {
+      return openRequests.filter((r) => r.orderId === orderId);
+    },
+    async savePreferredLanguage(contactId, language) {
+      savedLanguages.push({ contactId, language });
+      return { saved: true, language };
+    },
     async getServiceHours() {
       return state.serviceHours;
     },
@@ -200,6 +213,12 @@ function createFakeCrm({ now = () => Date.now() } = {}) {
       if (!input.phone && !(input.erpOrderId && (input.verification || input.invoiceNumber || input.useDetailsOnFile))) {
         return { created: false, error: 'Customer mobile or email (or a verifiable order) is required.' };
       }
+      // Like the real one: a new request of a kind already open on the order is refused unless the caller wants a second.
+      const linked = input.erpOrderId ? await this.findOrderByReference(input.erpOrderId) : null;
+      const { serviceType, subType } = SERVICE_TYPES[input.issueType];
+      const kind = input.issueType === 'installation_reschedule' ? null : requestKind(serviceType, subType);
+      const existing = linked && kind && !input.newRequest ? openRequests.find((r) => r.orderId === linked.id && r.kind === kind) : null;
+      if (existing) return { created: false, existingRequest: existing, error: `Request ${existing.caseNumber} of this kind is already open for the order.` };
       const verified = input.erpOrderId ? (await this.verifyOrder(input.erpOrderId, [input.verification, input.invoiceNumber, input.phone])).found : false;
       const order = verified ? orders.find((o) => o.erpOrderId === input.erpOrderId) : null;
       const city = (input.city || order?.city || '').toLowerCase();

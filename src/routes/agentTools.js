@@ -24,6 +24,16 @@ const CALL_OUTCOMES = {
   not_resolved: 'nothing was resolved',
 };
 
+// The kinds of request compared before a new one is registered on an order (crm requestKind), as the agent says them.
+const REQUEST_KINDS = {
+  installation: 'an installation request',
+  installation_followup: 'an installation follow-up request',
+  damage: 'a request about a damaged, defective or missing part',
+  replacement: 'a replacement or return request',
+};
+
+const capitalized = (text) => text.charAt(0).toUpperCase() + text.slice(1);
+
 // "302021" as "3 0 2 0 2 1", so the voice reads digits rather than a large number.
 const spokenDigits = (value) => String(value || '').replace(/\D/g, '').split('').join(' ');
 
@@ -66,12 +76,32 @@ function caseSummary(c) {
   return parts.join(' ');
 }
 
+// The open requests on an order, one of each kind, so the agent can ask before registering the same kind again. The
+// request numbers are left out: with the order id they would unlock request details without the mobile number.
+function openRequestsLine(requests) {
+  const kinds = new Set();
+  const newestOfKind = requests.filter((r) => !kinds.has(r.kind) && kinds.add(r.kind));
+  if (!newestOfKind.length) return '';
+  const listed = newestOfKind.map((r) => `${REQUEST_KINDS[r.kind]}, registered on ${formatDate(r.createdDate)}`).join('; ');
+  return ` Open requests on this order: ${listed}. Before registering another request of the same kind, ask whether the customer wants an update on it or a new request.`;
+}
+
 // Refusals are HTTP 200 so the agent hears the reason; a non-2xx makes Sarvam speak the generic failure line.
 function refused(res, message) {
   return res.json({ created: false, case_number: null, message });
 }
 
 function caseResponse(res, result, successMessage) {
+  if (result.existingRequest) {
+    const open = result.existingRequest;
+    return res.json({
+      created: false,
+      case_number: null,
+      existing_request: true,
+      message: `${capitalized(REQUEST_KINDS[open.kind])} for this order is already open, registered on ${formatDate(open.createdDate)}. `
+        + 'Ask the customer whether they want an update on that request or a new request. For a new request, call this tool again with new_request set to true.',
+    });
+  }
   if (!result.created) return refused(res, result.error);
   return res.json({
     created: true,
@@ -123,6 +153,7 @@ module.exports = function agentToolsRouter({ crm, now = () => Date.now() }) {
       preferredDate: body.preferred_date,
       preferredTime: body.preferred_time,
       useDetailsOnFile: body.use_details_on_file === true || body.use_details_on_file === 'true',
+      newRequest: body.new_request === true || body.new_request === 'true',
     };
   }
 
@@ -173,8 +204,9 @@ module.exports = function agentToolsRouter({ crm, now = () => Date.now() }) {
     });
   });
 
-  function orderAnswer(order, lead = '') {
+  async function orderAnswer(order, lead = '') {
     const spokenId = order.erpOrderId || spokenCaseNumber(order.orderNumber);
+    const openRequests = await crm.getOpenRequests(order.id);
     return {
       found: true,
       order_id: order.erpOrderId || null,
@@ -184,7 +216,9 @@ module.exports = function agentToolsRouter({ crm, now = () => Date.now() }) {
       delivery_date: order.deliveryDate,
       order_source: order.orderSource,
       products: order.productSummary || '',
-      message: `${lead}${describeOrder({ orderId: spokenId, products: order.productSummary, deliveryStatus: order.deliveryStatus, deliveryDate: order.deliveryDate })}`,
+      open_requests: [...new Set(openRequests.map((r) => r.kind))],
+      message: `${lead}${describeOrder({ orderId: spokenId, products: order.productSummary, deliveryStatus: order.deliveryStatus, deliveryDate: order.deliveryDate })}`
+        + openRequestsLine(openRequests),
     };
   }
 
@@ -236,7 +270,7 @@ module.exports = function agentToolsRouter({ crm, now = () => Date.now() }) {
     const phone = normalizePhone(body.phone);
     const { order, problem } = await orderFromReferences(body);
     if (problem) return res.json({ found: false, message: problem });
-    if (order) return res.json(orderAnswer(order));
+    if (order) return res.json(await orderAnswer(order));
 
     if (!phone) {
       return res.json({ found: false, message: 'An order id, order number or invoice number, or the registered mobile number, is needed.' });
@@ -244,7 +278,7 @@ module.exports = function agentToolsRouter({ crm, now = () => Date.now() }) {
     const contact = await crm.findContactByPhone(phone);
     const [latest] = contact?.accountId ? await crm.findRecentOrdersForAccount(contact.accountId, 1) : [];
     if (!latest) return res.json({ found: false, message: 'No order is linked to this phone number. Ask for the order id, order number or invoice number.' });
-    return res.json(orderAnswer(await crm.getOrderById(latest.id), 'The latest order on this number: '));
+    return res.json(await orderAnswer(await crm.getOrderById(latest.id), 'The latest order on this number: '));
   });
 
   // The mobile number and address on file for an order (its customer and delivery address) or for a caller's own
