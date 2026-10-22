@@ -195,32 +195,31 @@ test('without instant call settings a real run is refused with a 503; a dry run 
   assert.deepEqual((await deliveryCalls.run({ dryRun: true })).wouldCall, ['TD-ORD-1']);
 });
 
-test('/cron/run needs CRON_API_KEY, as a Bearer token or in x-api-key', async (t) => {
+test('/cron/run is open to anyone, at most once every two minutes', async (t) => {
   const runs = [];
+  const clock = { now: NOW };
   const deliveryCalls = { run: async (options) => { runs.push(options); return { placed: [] }; } };
-  const start = async (config) => {
-    const app = createApp({
-      crm: createFakeCrm(),
-      sarvam: createFakeSarvam(),
-      scheduler: createScheduler({ store: createMemoryJobStore(), handlers: {}, logger: quiet }),
-      config,
-      logger: quiet,
-      deliveryCalls,
-    });
-    const server = await new Promise((resolve) => { const s = app.listen(0, () => resolve(s)); });
-    t.after(() => new Promise((resolve) => server.close(resolve)));
-    return (method, path, headers = {}) => fetch(`http://127.0.0.1:${server.address().port}${path}`, { method, headers });
-  };
+  const app = createApp({
+    crm: createFakeCrm(),
+    sarvam: createFakeSarvam(),
+    scheduler: createScheduler({ store: createMemoryJobStore(), handlers: {}, logger: quiet }),
+    config: testConfig(),
+    now: () => clock.now,
+    logger: quiet,
+    deliveryCalls,
+  });
+  const server = await new Promise((resolve) => { const s = app.listen(0, () => resolve(s)); });
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const call = (method, path) => fetch(`http://127.0.0.1:${server.address().port}${path}`, { method });
 
-  const unset = await start(testConfig({ cronApiKey: '' }));
-  assert.equal((await unset('GET', '/cron/run', { authorization: 'Bearer anything' })).status, 503);
+  assert.equal((await call('GET', '/cron/run')).status, 200, 'no key is needed');
+  const early = await call('GET', '/cron/run');
+  assert.equal(early.status, 429);
+  assert.equal(early.headers.get('retry-after'), '120');
+  assert.deepEqual(await early.json(), { error: 'too_soon', retryAfterSeconds: 120 });
 
-  const call = await start(testConfig({ cronApiKey: 'cron-api-key' }));
-  assert.equal((await call('GET', '/cron/run')).status, 401);
-  assert.equal((await call('GET', '/cron/run', { authorization: 'Bearer wrong' })).status, 401);
-  assert.equal((await call('GET', '/cron/run', { authorization: 'Bearer cron-secret' })).status, 401, 'CRON_SECRET is a different key');
-  assert.equal((await call('GET', '/cron/run', { authorization: 'Bearer cron-api-key' })).status, 200);
-  assert.equal((await call('POST', '/cron/run?dryRun=true', { 'x-api-key': 'cron-api-key' })).status, 200);
+  clock.now += 2 * 60 * 1000;
+  assert.equal((await call('POST', '/cron/run?dryRun=true')).status, 200);
   assert.deepEqual(runs, [{ dryRun: false }, { dryRun: true }]);
 });
 

@@ -16,8 +16,6 @@ module.exports = {
   publicBaseUrl: (env.PUBLIC_BASE_URL || vercelUrl).replace(/\/+$/, ''),
   internalApiKey: env.INTERNAL_API_KEY || '',
   cronSecret: env.CRON_SECRET || '',
-  // Sent by cron-job.org to /cron/run.
-  cronApiKey: env.CRON_API_KEY || '',
   // Narrow key for the website "call me" panel: it can only request a callback.
   siteCallApiKey: env.SITE_CALL_API_KEY || '',
   agentToolSecret: env.AGENT_TOOL_SECRET || '',

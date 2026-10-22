@@ -57,7 +57,7 @@ All business logic runs in Node (`src/crm/`). The server reads and writes record
 | `GET /api/admin/orders/:id/edit` | `x-api-key` (internal) | An order's editable values with the org's choices (statuses, delivery statuses, channels, fulfilment, Indian states) and field lengths |
 | `PATCH /api/admin/orders/:id` | `x-api-key` (internal) | Edits an order: `status`, `deliveryStatus`, `deliveryDate`, `erpOrderId`, `invoiceNumber`, `source`, `fulfilment`, `orderDate`, `description`, `shippingStreet`, `shippingCity`, `shippingState` (state code), `shippingPostalCode`; an empty string clears a field. Each value is checked against the org's own rules (picklists, lengths, dates, six-digit PIN, required fields) before saving, only real changes are sent, and a completed task on the order records who changed what (`X-Console-User`). Answers 400 with `field` for a bad value, 422 when Salesforce refuses (for example a duplicate order id), 404 for an unknown order |
 | `GET /api/cron/jobs` | `Authorization: Bearer <CRON_SECRET>` | Places the scheduled calls that are due (Vercel Cron, every 5 minutes) |
-| `GET` or `POST /cron/run` | `Authorization: Bearer <CRON_API_KEY>` (or `x-api-key`) | Delivery check calls (cron-job.org, every 15 minutes); see [Delivery check calls](#delivery-check-calls). `?dryRun=true` lists who would be called and calls nobody |
+| `GET` or `POST /cron/run` | none (public, one run every 2 minutes) | Delivery check calls (cron-job.org, every 15 minutes); see [Delivery check calls](#delivery-check-calls). `?dryRun=true` lists who would be called and calls nobody. Sooner than 2 minutes after the last run it answers 429 with `Retry-After` |
 | `POST /api/agent/*` | `x-agent-secret` | The 15 agent tools; see [sarvam/README.md](sarvam/README.md) |
 | `POST /api/webhooks/sarvam?token=…` | token | Sarvam call-end webhook |
 | `GET /api/sarvam/orgs/{org}/workspaces/{ws}/apps/{app}/url` | none (public, rate-limited) | Session endpoint for the Sarvam web call widget: returns Sarvam's signed call URL, adding the API key on the server. Only the Tiffany agent; 5 calls per visitor per 10 minutes and 20 per day, 30 per hour and 200 per day overall (`WEB_CALLS_MAX_PER_HOUR`, `WEB_CALLS_MAX_PER_DAY`). Only requests that get a call link count, so attempts refused because of the server's own setup (such as a refused key) use up nothing. Pages on other sites may call it (CORS, including the browser's preflight); `WEB_CALL_ALLOWED_ORIGINS` limits which sites, and the default `*` allows any |
@@ -99,9 +99,9 @@ Calls go out only while the service team is working (the org's default business 
 
 The response lists the calls placed and, for every order skipped, the reason. Setup:
 
-- **Render:** set `CRON_API_KEY` (any long random string) and the instant call settings `SARVAM_AGENT_ID`, `SARVAM_APP_VERSION`, `SARVAM_CONNECTION_ID` and `SARVAM_AGENT_PHONE`, plus `PUBLIC_BASE_URL` and `SARVAM_WEBHOOK_TOKEN` for the call log.
-- **cron-job.org:** URL `https://<server>/cron/run`, every 15 minutes, and under Advanced, a request header `Authorization` with the value `Bearer <CRON_API_KEY>`.
-- **Try it first:** open `/cron/run?dryRun=true` with the same header. It applies every rule, outside service hours too, and calls nobody.
+- **Render:** set the instant call settings `SARVAM_AGENT_ID`, `SARVAM_APP_VERSION`, `SARVAM_CONNECTION_ID` and `SARVAM_AGENT_PHONE`, plus `PUBLIC_BASE_URL` and `SARVAM_WEBHOOK_TOKEN` for the call log.
+- **cron-job.org:** URL `https://<server>/cron/run`, every 15 minutes. The route needs no key for now; anyone who knows the address can start a run, but a run only ever calls customers who are due a call, each order once.
+- **Try it first:** open `/cron/run?dryRun=true`. It applies every rule, outside service hours too, and calls nobody.
 
 ## Deploy on Vercel
 

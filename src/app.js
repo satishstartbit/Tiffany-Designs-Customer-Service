@@ -29,12 +29,6 @@ function createApp({ crm, sarvam, scheduler, config, checkSalesforce, limiter, w
   const webhookToken = requireSecret(() => config.webhookToken, (req) => req.query.token, 'SARVAM_WEBHOOK_TOKEN');
   // Vercel Cron sends "Authorization: Bearer <CRON_SECRET>"; an external scheduler can send the same header.
   const cronSecret = requireSecret(() => config.cronSecret, (req) => (req.get('authorization') || '').replace(/^Bearer\s+/i, ''), 'CRON_SECRET');
-  // cron-job.org sends "Authorization: Bearer <CRON_API_KEY>", or the key alone in x-api-key.
-  const cronApiKey = requireSecret(
-    () => config.cronApiKey,
-    (req) => (req.get('authorization') || '').replace(/^Bearer\s+/i, '') || req.get('x-api-key'),
-    'CRON_API_KEY',
-  );
 
   app.get('/', (req, res) => {
     res.json({ message: 'Tiffany Designs Customer Service API' });
@@ -70,7 +64,7 @@ function createApp({ crm, sarvam, scheduler, config, checkSalesforce, limiter, w
   app.use('/api/agent', agentSecret, agentToolsRouter({ crm, now }));
   app.use('/api/webhooks', webhookToken, webhooksRouter({ crm, now, logger }));
   if (consoleData) app.use('/api/admin', internalKey, adminRouter({ consoleData }));
-  if (deliveryCalls) app.use('/cron', cronApiKey, cronRouter({ deliveryCalls }));
+  if (deliveryCalls) app.use('/cron', cronRouter({ deliveryCalls, now }));
   app.use('/api/sarvam', webCallsRouter({
     sarvam,
     config,
