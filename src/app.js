@@ -8,10 +8,11 @@ const agentToolsRouter = require('./routes/agentTools');
 const webhooksRouter = require('./routes/webhooks');
 const webCallsRouter = require('./routes/webCalls');
 const adminRouter = require('./routes/admin');
+const cronRouter = require('./routes/cron');
 
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 
-function createApp({ crm, sarvam, scheduler, config, checkSalesforce, limiter, webCallLimiter, consoleData, now = () => Date.now(), logger = console }) {
+function createApp({ crm, sarvam, scheduler, config, checkSalesforce, limiter, webCallLimiter, consoleData, deliveryCalls, now = () => Date.now(), logger = console }) {
   const app = express();
   // Render and Vercel sit behind proxies; the visitor address comes from X-Forwarded-For.
   app.set('trust proxy', true);
@@ -28,6 +29,12 @@ function createApp({ crm, sarvam, scheduler, config, checkSalesforce, limiter, w
   const webhookToken = requireSecret(() => config.webhookToken, (req) => req.query.token, 'SARVAM_WEBHOOK_TOKEN');
   // Vercel Cron sends "Authorization: Bearer <CRON_SECRET>"; an external scheduler can send the same header.
   const cronSecret = requireSecret(() => config.cronSecret, (req) => (req.get('authorization') || '').replace(/^Bearer\s+/i, ''), 'CRON_SECRET');
+  // cron-job.org sends "Authorization: Bearer <CRON_API_KEY>", or the key alone in x-api-key.
+  const cronApiKey = requireSecret(
+    () => config.cronApiKey,
+    (req) => (req.get('authorization') || '').replace(/^Bearer\s+/i, '') || req.get('x-api-key'),
+    'CRON_API_KEY',
+  );
 
   app.get('/', (req, res) => {
     res.json({ message: 'Tiffany Designs Customer Service API' });
@@ -63,6 +70,7 @@ function createApp({ crm, sarvam, scheduler, config, checkSalesforce, limiter, w
   app.use('/api/agent', agentSecret, agentToolsRouter({ crm, now }));
   app.use('/api/webhooks', webhookToken, webhooksRouter({ crm, now, logger }));
   if (consoleData) app.use('/api/admin', internalKey, adminRouter({ consoleData }));
+  if (deliveryCalls) app.use('/cron', cronApiKey, cronRouter({ deliveryCalls }));
   app.use('/api/sarvam', webCallsRouter({
     sarvam,
     config,

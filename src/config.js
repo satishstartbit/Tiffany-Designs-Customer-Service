@@ -16,6 +16,8 @@ module.exports = {
   publicBaseUrl: (env.PUBLIC_BASE_URL || vercelUrl).replace(/\/+$/, ''),
   internalApiKey: env.INTERNAL_API_KEY || '',
   cronSecret: env.CRON_SECRET || '',
+  // Sent by cron-job.org to /cron/run.
+  cronApiKey: env.CRON_API_KEY || '',
   // Narrow key for the website "call me" panel: it can only request a callback.
   siteCallApiKey: env.SITE_CALL_API_KEY || '',
   agentToolSecret: env.AGENT_TOOL_SECRET || '',
@@ -56,6 +58,14 @@ module.exports = {
     customerAccountRecordType: env.SF_CUSTOMER_ACCOUNT_RECORD_TYPE || '',
     // Only products whose code starts with this are offered by phone (the org also holds sample products).
     productCodePrefix: env.PRODUCT_CODE_PREFIX ?? 'TD-',
+  },
+
+  // Delivery check calls placed by /cron/run.
+  deliveryCalls: {
+    delayMinutes: int(env.DELIVERY_CALL_DELAY_MINUTES, 60),
+    // Only orders delivered this many days ago or less are called, so older deliveries never are.
+    lookbackDays: int(env.DELIVERY_CALL_LOOKBACK_DAYS, 3),
+    maxPerRun: int(env.DELIVERY_CALLS_PER_RUN, 5),
   },
 
   followUpDelayMinutes: int(env.FOLLOWUP_DELAY_MINUTES, 60),

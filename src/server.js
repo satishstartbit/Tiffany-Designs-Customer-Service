@@ -2,6 +2,8 @@ const config = require('./config');
 const { salesforce, sfRequest } = require('./salesforce');
 const { createCrm } = require('./crm/crm');
 const { createConsoleData } = require('./crm/console');
+const { createDeliveredOrders } = require('./crm/deliveredOrders');
+const { createDeliveryCalls } = require('./deliveryCalls');
 const { createSarvamClient } = require('./sarvam');
 const { createRedis } = require('./redis');
 const { createScheduler, createFileJobStore, createRedisJobStore, createUnavailableJobStore } = require('./scheduler');
@@ -58,6 +60,7 @@ function buildServer() {
   });
 
   const consoleData = createConsoleData({ salesforce, crm, scheduler, productCodePrefix: config.salesforce.productCodePrefix });
+  const deliveryCalls = createDeliveryCalls({ orders: createDeliveredOrders({ salesforce }), crm, sarvam, scheduler, config });
 
   const app = createApp({
     crm,
@@ -67,6 +70,7 @@ function buildServer() {
     limiter,
     webCallLimiter,
     consoleData,
+    deliveryCalls,
     checkSalesforce: async () => {
       const limits = await sfRequest('/limits');
       return { dailyApiRequests: limits.DailyApiRequests };

@@ -1,9 +1,7 @@
 import 'server-only';
 import { requireSession } from './session.js';
 
-const DEFAULT_SERVER = 'https://tiffany-designs-customer-service.onrender.com';
-
-export const nodeServer = () => (process.env.NODE_API_URL || DEFAULT_SERVER).replace(/\/+$/, '');
+export const nodeServer = () => (process.env.NODE_API_URL ).replace(/\/+$/, '');
 
 // Calls the Node server's /api/admin with its internal key, which stays on this server, after checking the staff
 // session. The signed-in person is named in X-Console-User, so order edits are noted under their name.

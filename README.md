@@ -40,6 +40,7 @@ All business logic runs in Node (`src/crm/`). The server reads and writes record
 | Status | `Case`, the latest `Service_Visit__c` and `Replacement_Shipment__c` |
 | Parts | `Product_Component__c` |
 | Call log | `Task` (call subtype, `CallType`, `CallDisposition`, `CallObject` = Sarvam interaction id), linked to the case or order created during the call, found in Salesforce by creation time rather than trusted from the agent's notes |
+| Delivery check calls | Orders with `Delivery_Status__c = Delivered` and a recent `Delivery_Date__c`, their authorising contact (else the account's first contact with a number), their open cases, and a completed `Task` named "AI delivery check call" on each order that was called |
 
 ## API
 
@@ -56,6 +57,7 @@ All business logic runs in Node (`src/crm/`). The server reads and writes record
 | `GET /api/admin/orders/:id/edit` | `x-api-key` (internal) | An order's editable values with the org's choices (statuses, delivery statuses, channels, fulfilment, Indian states) and field lengths |
 | `PATCH /api/admin/orders/:id` | `x-api-key` (internal) | Edits an order: `status`, `deliveryStatus`, `deliveryDate`, `erpOrderId`, `invoiceNumber`, `source`, `fulfilment`, `orderDate`, `description`, `shippingStreet`, `shippingCity`, `shippingState` (state code), `shippingPostalCode`; an empty string clears a field. Each value is checked against the org's own rules (picklists, lengths, dates, six-digit PIN, required fields) before saving, only real changes are sent, and a completed task on the order records who changed what (`X-Console-User`). Answers 400 with `field` for a bad value, 422 when Salesforce refuses (for example a duplicate order id), 404 for an unknown order |
 | `GET /api/cron/jobs` | `Authorization: Bearer <CRON_SECRET>` | Places the scheduled calls that are due (Vercel Cron, every 5 minutes) |
+| `GET` or `POST /cron/run` | `Authorization: Bearer <CRON_API_KEY>` (or `x-api-key`) | Delivery check calls (cron-job.org, every 15 minutes); see [Delivery check calls](#delivery-check-calls). `?dryRun=true` lists who would be called and calls nobody |
 | `POST /api/agent/*` | `x-agent-secret` | The 15 agent tools; see [sarvam/README.md](sarvam/README.md) |
 | `POST /api/webhooks/sarvam?token=…` | token | Sarvam call-end webhook |
 | `GET /api/sarvam/orgs/{org}/workspaces/{ws}/apps/{app}/url` | none (public, rate-limited) | Session endpoint for the Sarvam web call widget: returns Sarvam's signed call URL, adding the API key on the server. Only the Tiffany agent; 5 calls per visitor per 10 minutes and 20 per day, 30 per hour and 200 per day overall (`WEB_CALLS_MAX_PER_HOUR`, `WEB_CALLS_MAX_PER_DAY`). Only requests that get a call link count, so attempts refused because of the server's own setup (such as a refused key) use up nothing. Pages on other sites may call it (CORS, including the browser's preflight); `WEB_CALL_ALLOWED_ORIGINS` limits which sites, and the default `*` allows any |
@@ -74,13 +76,32 @@ All settings are in `.env`; see `.env.example`. Locally, scheduled calls are kep
 
 ## Deploy on Render (current)
 
-The server runs at `https://tiffany-designs-customer-service.onrender.com`, built from `main` on GitHub with `npm start`. One process serves the API and runs the scheduler every 30 seconds. The Sarvam agent's tools (version 3) and the website panel's Salesforce credential both point at it.
+The server runs at process.env.PUBLIC_BASE_URL, built from `main` on GitHub with `npm start`. One process serves the API and runs the scheduler every 30 seconds. The Sarvam agent's tools (version 3) and the website panel's Salesforce credential both point at it.
 
 Render settings:
 
 - **Environment variables:** everything in `.env.example`, with the same secrets as `.env`, including `SARVAM_API_KEY` (the `sk_samvaad_` workspace key). Set `PUBLIC_BASE_URL` to the Render URL, because instant calls give Sarvam that address for the call-end webhook. Set `SARVAM_APP_VERSION=3`, the committed agent version whose tools call Render (version 2's tools call a test tunnel that no longer exists). Raise it whenever a new agent version is committed.
 - **Scheduled calls survive restarts only with Redis.** Without `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN`, jobs are kept in `data/jobs.json`, and Render's disk is wiped on every deploy and restart. A free Upstash database is enough.
 - **Free instances sleep** after 15 minutes without traffic. The next request can then take up to a minute, which is longer than the agent's tool timeouts (8 to 20 seconds), and no scheduled call is placed while it sleeps. Use a paid instance, or have an external scheduler (for example cron-job.org) call `GET /api/cron/jobs` every 5 minutes with `Authorization: Bearer <CRON_SECRET>` (set `CRON_SECRET` on Render). This keeps the server awake and places due calls.
+
+## Delivery check calls
+
+cron-job.org calls `/cron/run` on the Render server every 15 minutes. Each run looks at the orders delivered in the last few days and calls each customer once, through Sarvam Instant Outbound from `SARVAM_AGENT_PHONE`. The agent (call reason `delivery_check`) confirms it is speaking to the customer by name, asks whether every part of the products on the order arrived in good condition, and only then offers to register an installation request. A missing, damaged or wrong part is registered as a service request instead.
+
+An order is called only when all of these hold:
+
+1. `Delivery_Status__c` is Delivered, and `Delivery_Date__c` is no more than `DELIVERY_CALL_LOOKBACK_DAYS` (3) days ago, so older deliveries are never called.
+2. At least `DELIVERY_CALL_DELAY_MINUTES` (60) have passed since delivery. Salesforce keeps the delivery date without a time, so the order's last save (never earlier than the moment it was marked Delivered) stands in for it.
+3. The customer has an Indian mobile number: the contact who authorised the order, else the account's first contact with a number.
+4. The order was not called before, has no open installation, damage or replacement request, and has no follow-up call from `POST /api/orders/delivered`.
+
+Calls go out only while the service team is working (the org's default business hours and holidays), and at most `DELIVERY_CALLS_PER_RUN` (5) per run; the rest wait for the next run. Before dialling, a completed task "AI delivery check call" is saved on the order, so a restart or an overlapping run never calls twice. When Sarvam refuses a call the task is removed and the next run tries again. The call itself is logged by the call-end webhook like any other call.
+
+The response lists the calls placed and, for every order skipped, the reason. Setup:
+
+- **Render:** set `CRON_API_KEY` (any long random string) and the instant call settings `SARVAM_AGENT_ID`, `SARVAM_APP_VERSION`, `SARVAM_CONNECTION_ID` and `SARVAM_AGENT_PHONE`, plus `PUBLIC_BASE_URL` and `SARVAM_WEBHOOK_TOKEN` for the call log.
+- **cron-job.org:** URL `https://<server>/cron/run`, every 15 minutes, and under Advanced, a request header `Authorization` with the value `Bearer <CRON_API_KEY>`.
+- **Try it first:** open `/cron/run?dryRun=true` with the same header. It applies every rule, outside service hours too, and calls nobody.
 
 ## Deploy on Vercel
 

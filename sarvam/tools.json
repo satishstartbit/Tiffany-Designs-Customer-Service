@@ -2,7 +2,7 @@
   "agent_id": "Tiffany-Des-0db8e21d-e099",
   "committed_version": 3,
   "draft_version": 4,
-  "current_base_url": "https://tiffany-designs-customer-service.onrender.com",
+  "current_base_url": "https://tiffany-designs-customer-service-1.onrender.com/",
   "base_url_note": "The server is deployed on Render. Every tool calls current_base_url + path; change all of them together if the server moves.",
   "auth_header": "x-agent-secret (AGENT_TOOL_SECRET in .env and on Render)",
   "tools": [

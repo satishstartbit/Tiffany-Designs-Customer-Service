@@ -40,6 +40,7 @@ Agent `Tiffany-Des-0db8e21d-e099`, committed as **version 3**: the same instruct
 | --- | --- | --- |
 | `inbound` | Customer calls the Tiffany number | Namaste, welcome to Tiffany Designs customer care. This is the Tiffany Designs AI service assistant. Would you like to talk in Hindi or English? (translated into all 11 languages; the Hindi line, which is the one spoken since Hindi is the starting language, ends with the question in English too) |
 | `delivery_followup` | Server, 1 hour after `Delivery_Status__c` becomes Delivered | Hello, this is the Tiffany Designs AI service assistant. Am I speaking with {name}? |
+| `delivery_check` | Server, `/cron/run` every 15 minutes, an hour or more after delivery (see the main README) | Same as delivery follow-up. Phase 14 asks whether every part of `product_name` arrived, and offers installation only when it did |
 | `callback_request` | Server, when a customer leaves a number | …calling back as requested. Am I speaking with {name}? |
 | `service_update` | Server, on a case event (module 13) | Same as delivery follow-up; the update text is passed in `notice_details` |
 
@@ -134,7 +135,7 @@ The first runs asked for a PIN code even when the caller had already given the n
 
 ## Re-pointing the tools after deployment
 
-All 10 tools call the Render deployment, `https://tiffany-designs-customer-service.onrender.com` (`current_base_url` in tools.json). Before committing version 3 (2026-10-14), a chat test ran with the local server and test tunnel switched off. `find_products`, `find_order`, `check_request_status` and `resolve_date` all answered from Render with live Salesforce data.
+All 10 tools call the Render deployment, `process.env.PUBLIC_BASE_URL` (`current_base_url` in tools.json). Before committing version 3 (2026-10-14), a chat test ran with the local server and test tunnel switched off. `find_products`, `find_order`, `check_request_status` and `resolve_date` all answered from Render with live Salesforce data.
 
 If the server moves again, change the base URL of all 15 tools together. Either ask Claude ("re-point the Tiffany tools to https://…") or edit each tool's URL in the Sarvam dashboard. Then commit a new version, set `SARVAM_APP_VERSION` to it wherever the server runs, and move any campaign or deployment to it. The website panel's Salesforce credential follows `PUBLIC_BASE_URL` through `npm run deploy:salesforce`.
 
