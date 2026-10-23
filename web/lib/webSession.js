@@ -1,4 +1,5 @@
 import { AGENT } from './agent.js';
+import { callerPhone } from './caller.js';
 
 const INTERACTION_TYPES = ['call', 'chat'];
 
@@ -21,8 +22,13 @@ function reply(status, body, headers = {}) {
 
 // The widget asks here for Sarvam's signed call URL, so the Sarvam API key stays on the server.
 // The route is public, so it reaches only this project's agent and is rate-limited; only a call link counts.
+// With the mobile number the customer typed (`phone`), a call link also names the customer's first name
+// (`lookupCaller`), so the page can pass it to the agent; nothing else about the customer is given.
 // Keep in step with the Node server's route (src/routes/webCalls.js).
-export async function startWebSession({ params, searchParams, ip }, { limiter, env = process.env, fetchImpl = (...args) => fetch(...args), logger = console }) {
+export async function startWebSession(
+  { params, searchParams, ip, phone },
+  { limiter, env = process.env, fetchImpl = (...args) => fetch(...args), logger = console, lookupCaller = null },
+) {
   if (params.orgId !== AGENT.orgId || params.workspaceId !== AGENT.workspaceId || params.appId !== AGENT.appId) {
     return reply(404, { error: 'not_found' });
   }
@@ -65,5 +71,14 @@ export async function startWebSession({ params, searchParams, ip }, { limiter, e
   }
   if (res.ok) await limiter.record(ip);
   const retryAfter = res.headers.get('retry-after');
+  const number = callerPhone(phone);
+  if (res.ok && number && lookupCaller) {
+    try {
+      const firstName = await lookupCaller(number);
+      return reply(res.status, { ...JSON.parse(body), caller: { first_name: firstName } });
+    } catch (err) {
+      logger.error(`Looking up the web caller failed: ${err.message}`);
+    }
+  }
   return reply(res.status, body, retryAfter ? { 'Retry-After': retryAfter } : {});
 }

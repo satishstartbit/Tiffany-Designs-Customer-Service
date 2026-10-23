@@ -1341,12 +1341,28 @@ a.stat:hover {
 
 /* ---------- Voice widget status (console) ---------- */
 
-.voice-note {
+/* Above the voice widget (bottom right): the call notes. The widget's open panel (with its mobile number field) reaches
+   about 200px up, so the dock moves above it while the panel is open. */
+.voice-dock {
   position: fixed;
-  right: 24px;
+  right: 20px;
   bottom: 96px;
   z-index: 40;
-  max-width: 340px;
+  display: grid;
+  gap: 8px;
+  width: min(340px, calc(100vw - 40px));
+}
+
+.voice-dock.above-panel {
+  bottom: 248px;
+}
+
+.voice-dock.above-call {
+  bottom: 166px;
+}
+
+.voice-note {
+  position: relative;
   padding: 12px 36px 12px 14px;
   border: 1px solid var(--line);
   border-left: 4px solid var(--teal);

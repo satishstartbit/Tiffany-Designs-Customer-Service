@@ -1062,6 +1062,22 @@ test.describe('website call widget', () => {
     assert.deepEqual(s.sarvam.webSessions, [{ interaction_type: 'call', version: 3 }], 'the server picks the agent version, not the browser');
   });
 
+  test('with the number the customer typed, the call link also names the customer’s first name', async (t) => {
+    const s = await startTestServer();
+    t.after(s.close);
+    const link = { url: 'wss://apps.sarvam.test/session?token=t1', reference_id: 'ref-1', expires_at: '2026-10-14T07:00:00Z' };
+    const known = await s.call('GET', `${sessionPath}?interaction_type=call`, { headers: { 'X-Caller-Phone': '98765 43210' } });
+    assert.deepEqual(known.body, { ...link, caller: { first_name: 'Aarav' } });
+    const unknown = await s.call('GET', `${sessionPath}?interaction_type=call`, { headers: { 'X-Caller-Phone': '9123456780' } });
+    assert.deepEqual(unknown.body.caller, { first_name: null });
+    const none = await s.call('GET', `${sessionPath}?interaction_type=call`);
+    assert.deepEqual(none.body, link, 'without a number the answer is Sarvam’s as it is');
+
+    s.sarvam.webResponse = { status: 429, body: '{"detail":"slow down"}', retryAfter: '30' };
+    const limited = await s.call('GET', `${sessionPath}?interaction_type=call`, { headers: { 'X-Caller-Phone': '98765 43210' } });
+    assert.deepEqual([limited.status, limited.body], [429, { detail: 'slow down' }], 'no call link, no name');
+  });
+
   test('only this project’s agent can be reached through the endpoint', async (t) => {
     const s = await startTestServer();
     t.after(s.close);
@@ -1148,6 +1164,7 @@ test.describe('website call widget', () => {
     assert.equal(preflight.status, 204);
     assert.equal(preflight.headers.get('access-control-allow-origin'), '*');
     assert.match(preflight.headers.get('access-control-allow-headers'), /X-API-Key/);
+    assert.match(preflight.headers.get('access-control-allow-headers'), /X-Caller-Phone/);
     assert.equal(s.sarvam.webSessions.length, 0, 'the preflight starts nothing');
 
     const fromOtherSite = await s.call('GET', sessionPath, { headers: { origin: 'https://localhost', 'x-api-key': '' } });

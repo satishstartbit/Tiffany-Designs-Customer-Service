@@ -53,6 +53,7 @@ Agent `Tiffany-Des-0db8e21d-e099`, committed as **version 3**: the same instruct
 | Variable | Set by | Purpose |
 | --- | --- | --- |
 | `customer_name`, `customer_phone`, `order_number`, `product_name`, `delivery_city` | Server (outbound) | Who is being called and about what |
+| `customer_phone`, `customer_name` | Website (inbound) | The mobile number the customer typed in the call widget on `/support` (required to start), and the first name of the customer it belongs to, looked up by the server when it hands out the call link. Both are sent in the widget's call-start message (`agent_variables`); the agent greets the customer by name and looks them up with the number first (Phase 4 step 1) |
 | `call_reason`, `notice_details` | Server | Which flow to run; the update text for service update calls |
 | `delivery_date` | Server (delivery check) | Delivery date as spoken, for example Wednesday, 21 October |
 | `opening_line` | Server (delivery check) | The greeting. Sarvam speaks the agent's translated greeting for the call's starting language and ignores `app_overrides.initial_bot_message`, so the English greeting (all three `intro_message_config.multilingual_audio*` maps) is `{{opening_line}}`. Outbound calls start in English and set it; inbound calls start in Hindi and keep the Hindi greeting. Its default is the customer care greeting, which callback and service update calls still get |

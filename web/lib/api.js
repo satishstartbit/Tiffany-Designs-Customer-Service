@@ -66,6 +66,13 @@ export async function loadSupportHours() {
   return hours;
 }
 
+// The first name of the customer a mobile number belongs to, for the public call widget: the session route asks only
+// when it hands out a call link, so the call limits apply. Null when unknown or unavailable.
+export async function lookupCaller(phone) {
+  const { answer } = await callAdmin('caller', { params: { phone }, signedIn: false });
+  return answer?.found ? answer.first_name || null : null;
+}
+
 // Saves a change. Returns { data } or { error, field } (field: the form field the error is about, if any).
 export async function sendAdmin(path, { method = 'PATCH', body }) {
   const { answer, problem, refused, notFound } = await callAdmin(path, { method, body });

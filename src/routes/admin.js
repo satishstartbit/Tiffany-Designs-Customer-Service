@@ -47,6 +47,7 @@ module.exports = function adminRouter({ consoleData }) {
   router.get('/activities', send((req) => consoleData.listActivities(pick(req, ['kind', 'page', 'pageSize']))));
   router.get('/requests', send(() => consoleData.listRequests()));
   router.get('/service', send(() => consoleData.serviceSetup()));
+  router.get('/caller', send((req) => consoleData.callerName(pick(req, ['phone']).phone)));
 
   return router;
 };

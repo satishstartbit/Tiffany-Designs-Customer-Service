@@ -1,10 +1,13 @@
 const express = require('express');
+const { normalizePhone } = require('../rules');
 
 const INTERACTION_TYPES = ['call', 'chat'];
 
 // The website's Sarvam call widget (the Next.js site in web/) asks here for a signed call URL, so the
 // Sarvam API key stays on the server. The route is public, so it is limited to this project's agent and rate-limited.
-module.exports = function webCallsRouter({ sarvam, config, limiter, logger = console }) {
+// With the mobile number the customer typed (X-Caller-Phone), the answer also names the customer's first name, so the
+// page can pass it to the agent; only on a call link, so within the same limits.
+module.exports = function webCallsRouter({ sarvam, config, limiter, crm, logger = console }) {
   const router = express.Router();
   const allowedOrigins = String(config.webCalls?.allowedOrigins || '*').split(',').map((o) => o.trim().replace(/\/+$/, '')).filter(Boolean);
   const anyOrigin = allowedOrigins.includes('*');
@@ -20,7 +23,7 @@ module.exports = function webCallsRouter({ sarvam, config, limiter, logger = con
     res.set({
       'Access-Control-Allow-Origin': anyOrigin ? '*' : origin,
       'Access-Control-Allow-Methods': 'GET, OPTIONS',
-      'Access-Control-Allow-Headers': 'X-API-Key, Content-Type',
+      'Access-Control-Allow-Headers': 'X-API-Key, X-Caller-Phone, Content-Type',
       'Access-Control-Expose-Headers': 'Retry-After',
       'Access-Control-Max-Age': '600',
     });
@@ -59,9 +62,20 @@ module.exports = function webCallsRouter({ sarvam, config, limiter, logger = con
         return res.status(503).json({ error: 'not_configured', message: 'Calls are not available right now. Please try again later.' });
       }
       // Only a call link counts toward the limits, so attempts that fail on the server's side cost the visitor nothing.
-      if (upstream.status >= 200 && upstream.status < 300) await limiter.record(visitor);
+      const linked = upstream.status >= 200 && upstream.status < 300;
+      if (linked) await limiter.record(visitor);
       if (upstream.retryAfter) res.set('Retry-After', upstream.retryAfter);
       res.set('Cache-Control', 'no-store');
+      const phone = normalizePhone(req.get('x-caller-phone'));
+      if (linked && crm && phone && /^\+91[6-9]\d{9}$/.test(phone)) {
+        try {
+          const contact = await crm.findContactByPhone(phone);
+          const firstName = contact ? contact.firstName || String(contact.name || '').trim().split(/\s+/)[0] || null : null;
+          return res.status(upstream.status).json({ ...JSON.parse(upstream.body), caller: { first_name: firstName } });
+        } catch (err) {
+          logger.error(`Looking up the web caller failed: ${err.message}`);
+        }
+      }
       return res.status(upstream.status).type('application/json').send(upstream.body);
     } catch (err) {
       logger.error(`Web call session failed: ${err.message}`);

@@ -1,3 +1,4 @@
+import { lookupCaller } from '@/lib/api.js';
 import { createLimiter } from '@/lib/limits.js';
 import { visitorIp } from '@/lib/visitor.js';
 import { startWebSession } from '@/lib/webSession.js';
@@ -7,8 +8,8 @@ const limiter = createLimiter();
 export async function GET(request, { params }) {
   try {
     const result = await startWebSession(
-      { params: await params, searchParams: new URL(request.url).searchParams, ip: visitorIp(request) },
-      { limiter },
+      { params: await params, searchParams: new URL(request.url).searchParams, ip: visitorIp(request), phone: request.headers.get('x-caller-phone') },
+      { limiter, lookupCaller },
     );
     return new Response(result.body, { status: result.status, headers: result.headers });
   } catch (err) {

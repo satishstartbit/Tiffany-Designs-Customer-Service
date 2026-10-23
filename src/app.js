@@ -80,6 +80,7 @@ function createApp({
   app.use('/api/sarvam', webCallsRouter({
     sarvam,
     config,
+    crm,
     logger,
     limiter: webCallLimiter || createWebCallLimiter({ perHour: config.webCalls.maxPerHour, perDay: config.webCalls.maxPerDay, now }),
   }));

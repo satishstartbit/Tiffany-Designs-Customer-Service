@@ -5,7 +5,9 @@ import { Mic } from 'lucide-react';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// Starts a call from anywhere on the page: opens the voice widget (bottom right) and presses its Start call button.
+// Starts a call from anywhere on the page through the voice widget (bottom right). A closed widget is opened first,
+// with the cursor in the mobile number field of its panel, so the customer gives the number and then presses Start
+// call; an open one starts the call at once (the widget refuses without a valid number).
 export default function StartCallButton({ className = 'btn', children = 'Start a voice call' }) {
   const [waiting, setWaiting] = useState('');
 
@@ -19,15 +21,20 @@ export default function StartCallButton({ className = 'btn', children = 'Start a
     }
     setWaiting('');
     if (find(/end call|hang up|disconnect/i)) return;
-    let begin = find(/start call/i);
-    if (!begin) {
-      buttons()[0].click();
-      for (let i = 0; i < 20 && !begin; i += 1) {
-        await sleep(100);
-        begin = find(/start call/i);
+    const begin = find(/start call/i);
+    if (begin) {
+      begin.click();
+      return;
+    }
+    buttons()[0].click();
+    for (let i = 0; i < 20; i += 1) {
+      await sleep(100);
+      const field = root.getElementById('caller-mobile');
+      if (field) {
+        field.focus();
+        return;
       }
     }
-    begin?.click();
   }
 
   return (

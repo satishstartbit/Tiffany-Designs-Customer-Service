@@ -1,5 +1,6 @@
 const { escapeSoql, escapeSoqlLike, indianStatesOf } = require('./crm');
 const { todayInIst } = require('../dates');
+const { normalizePhone } = require('../rules');
 
 // Views of Salesforce for the staff console (web/): lists with filters and one-record details, and order edits.
 // Every value placed in SOQL is escaped, and filters and edits are checked against the org's picklist values.
@@ -660,7 +661,18 @@ function createConsoleData({ salesforce, crm, scheduler, productCodePrefix = 'TD
     };
   }
 
+  // The first name of the customer a mobile number belongs to, so the website's call widget can tell the voice agent
+  // whom it is speaking to. Nothing else about the customer is returned.
+  async function callerName(phone) {
+    const number = normalizePhone(phone);
+    if (!number || !/^\+91[6-9]\d{9}$/.test(number)) return { found: false, first_name: null };
+    const contact = await crm.findContactByPhone(number);
+    if (!contact) return { found: false, first_name: null };
+    return { found: true, first_name: contact.firstName || String(contact.name || '').trim().split(/\s+/)[0] || null };
+  }
+
   return {
+    callerName,
     summary,
     listProducts,
     getProduct,

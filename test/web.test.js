@@ -9,7 +9,7 @@ const WEB = path.join(__dirname, '..', 'web');
 // web/ is an ES module package (its package.json says "type": "module").
 const load = (file) => import(pathToFileURL(path.join(WEB, 'lib', file)).href);
 
-const AGENT_PARAMS = { orgId: '01a0c3a4-b74a-7441-813a-d7d799923769', workspaceId: '01a0c3ef-4753-7a81-a20c-07f739dcf1d6', appId: 'Tiffany-Des-0db8e21d-e099' };
+const AGENT_PARAMS = { orgId: '01a0c3a4-b74a-7441-813a-d7d799923769', workspaceId: '01a0c3ef-4753-7a81-a20c-07f739dcf1d6', appId: 'Tiffany-Des-4ab4474a-620f' };
 const LINK = '{"url":"wss://apps.sarvam.test/session?token=t1","reference_id":"ref-1"}';
 
 function fakeSarvam(status = 200, body = LINK, headers = {}) {
@@ -43,8 +43,31 @@ test('the site asks Sarvam for a signed call URL with the server key and the ser
   assert.equal(res.body, LINK);
   assert.equal(res.headers['Cache-Control'], 'no-store');
   assert.equal(sarvam.requests[0].url, 'https://apps.sarvam.ai/api/app-runtime/orgs/01a0c3a4-b74a-7441-813a-d7d799923769'
-    + '/workspaces/01a0c3ef-4753-7a81-a20c-07f739dcf1d6/apps/Tiffany-Des-0db8e21d-e099/url?interaction_type=call&version=3');
+    + '/workspaces/01a0c3ef-4753-7a81-a20c-07f739dcf1d6/apps/Tiffany-Des-4ab4474a-620f/url?interaction_type=call&version=3');
   assert.equal(sarvam.requests[0].options.headers['X-API-Key'], 'sk_samvaad_test', 'a pasted key loses its quotes and spaces');
+});
+
+test('with the number the customer typed, the call link also names the customer\'s first name, and only then', async () => {
+  const { startWebSession } = await load('webSession.js');
+  const { createLimiter } = await load('limits.js');
+  const asked = [];
+  const lookupCaller = async (phone) => { asked.push(phone); return phone === '+917357558134' ? 'Satish' : null; };
+  const session = (input, options = {}) => startWebSession(
+    { params: AGENT_PARAMS, searchParams: new URLSearchParams('interaction_type=call'), ip: '198.51.100.7', ...input },
+    { limiter: createLimiter({ env: {} }), env: { SARVAM_API_KEY: 'k' }, fetchImpl: fakeSarvam().fetchImpl, logger: { error() {} }, lookupCaller, ...options },
+  );
+
+  const known = await session({ phone: '73575 58134' });
+  assert.deepEqual(JSON.parse(known.body), { ...JSON.parse(LINK), caller: { first_name: 'Satish' } });
+  assert.deepEqual(asked, ['+917357558134'], 'looked up in +91 form');
+  assert.deepEqual(JSON.parse((await session({ phone: '9123456780' })).body).caller, { first_name: null }, 'an unknown number gets no name');
+
+  assert.equal((await session({ phone: null })).body, LINK, 'no number, no lookup');
+  assert.equal((await session({ phone: '12345' })).body, LINK, 'nor for something that is not a mobile number');
+  assert.equal((await session({ phone: '7357558134' }, { fetchImpl: fakeSarvam(429, '{"detail":"slow down"}').fetchImpl })).status, 429);
+  assert.equal(asked.length, 2, 'nobody is looked up without a call link');
+  const broken = await session({ phone: '7357558134' }, { lookupCaller: async () => { throw new Error('Node is asleep'); } });
+  assert.equal(broken.body, LINK, 'a failed lookup still starts the call');
 });
 
 test('only the Tiffany agent can be reached, and nothing works without a key', async () => {
@@ -140,6 +163,44 @@ test('the page uses the site\'s own endpoint by default and holds no key', () =>
     'the route sits where the widget looks: {endpoint}orgs/{org}/workspaces/{ws}/apps/{app}/url');
 });
 
+test('the mobile number typed above the widget goes into the call as customer_phone, and nothing else changes', async () => {
+  const { callerPhone, withCallerPhone, CALL_START } = await load('caller.js');
+  for (const [typed, phone] of [['98765 43210', '+919876543210'], ['+91 98765-43210', '+919876543210'], ['098765 43210', '+919876543210'],
+    ['12345', null], ['5876543210', null], ['', null]]) {
+    assert.equal(callerPhone(typed), phone, typed);
+  }
+  const start = JSON.stringify({ type: CALL_START, origin: 'client', timestamp: 1 });
+  assert.deepEqual(JSON.parse(withCallerPhone(start, '+919876543210')), {
+    type: CALL_START, origin: 'client', timestamp: 1, agent_variables: { customer_phone: '+919876543210' },
+  });
+  const withVariables = JSON.stringify({ type: CALL_START, agent_variables: { call_reason: 'inbound' } });
+  assert.deepEqual(JSON.parse(withCallerPhone(withVariables, '+919876543210')).agent_variables, { call_reason: 'inbound', customer_phone: '+919876543210' });
+  assert.deepEqual(JSON.parse(withCallerPhone(start, '+919876543210', 'Satish')).agent_variables, { customer_phone: '+919876543210', customer_name: 'Satish' },
+    'a known customer\'s first name goes in as customer_name');
+  assert.equal(withCallerPhone(start, null), start, 'no number, no change');
+  const audio = JSON.stringify({ type: 'client.media.audio_chunk', audio_base64: 'AAAA' });
+  assert.equal(withCallerPhone(audio, '+919876543210'), audio, 'only the call-start message');
+  const bytes = new Uint8Array([1]);
+  assert.equal(withCallerPhone(bytes, '+919876543210'), bytes);
+
+  const widget = fs.readFileSync(path.join(WEB, 'components', 'VoiceAgent.js'), 'utf8');
+  assert.match(widget, /WebSocket\.prototype\.send = function send\(data\) \{\n\s+const sent = withCallerPhone\(data, callerRef\.current, callerNameRef\.current\);/);
+  assert.match(widget, /headers\.set\('X-Caller-Phone', callerRef\.current\);/, 'the call link request carries the number for the lookup');
+  assert.match(widget, /callerNameRef\.current = await res\.clone\(\)\.json\(\)\.then\(\(answer\) => answer\?\.caller\?\.first_name \|\| null\)/);
+  assert.match(widget, /WebSocket\.prototype\.send = nativeSend;/, 'the browser\'s own send comes back when the widget goes away');
+  assert.match(widget, /id: 'caller-mobile'/, 'the field is in the widget\'s panel');
+  assert.match(widget, /if \(field\.block\.nextElementSibling !== button\) button\.before\(field\.block\);/, 'right above its call button');
+});
+
+test('a call cannot start without a valid mobile number', () => {
+  const widget = fs.readFileSync(path.join(WEB, 'components', 'VoiceAgent.js'), 'utf8');
+  assert.match(widget, /if \(!button \|\| !\/start call\/i\.test\(button\.textContent \|\| ''\) \|\| callerRef\.current\) return;\n\s+event\.preventDefault\(\);\n\s+event\.stopImmediatePropagation\(\);/,
+    'the call button\'s click is stopped before the widget sees it');
+  assert.match(widget, /root\.addEventListener\('click', guard, true\);/, 'on the way in, before the widget\'s own handler');
+  assert.match(widget, /if \(!callerRef\.current\) \{\n\s+show\(PHONE_NEEDED, true\);\n\s+return new Response\(JSON\.stringify\(\{ error: 'phone_required'/,
+    'and no call link is asked for without a number');
+});
+
 test('the console session cookie is signed and expires', async () => {
   const { signToken, verifyToken, sameSecret } = await load('token.js');
   const secret = 'x'.repeat(40);
@@ -179,9 +240,13 @@ test('the console key and session code never reach browser code', () => {
   assert.match(fs.readFileSync(path.join(WEB, 'app', '(console)', 'layout.js'), 'utf8'), /await requireSession\(\)/, 'every console page needs a sign-in');
   const api = fs.readFileSync(path.join(WEB, 'lib', 'api.js'), 'utf8');
   assert.match(api, /signedIn = true \} = \{\}\) \{\n\s+const session = signedIn \? await requireSession\(\) : null;/, 'data reads check the sign-in by default');
-  assert.deepEqual(api.match(/signedIn: false/g), ['signedIn: false'], 'only one read goes without a sign-in');
-  assert.match(api, /callAdmin\('service', \{ signedIn: false \}\)/, 'and it is the service hours');
+  assert.deepEqual(api.match(/signedIn: false/g), ['signedIn: false', 'signedIn: false'], 'only two reads go without a sign-in');
+  assert.match(api, /callAdmin\('service', \{ signedIn: false \}\)/, 'the service hours');
   assert.match(api, /answer\.hours/, 'of which only the hours are passed on');
+  assert.match(api, /callAdmin\('caller', \{ params: \{ phone \}, signedIn: false \}\);\n\s+return answer\?\.found \? answer\.first_name \|\| null : null;/,
+    'and a caller\'s first name, nothing else');
+  const route = fs.readFileSync(path.join(WEB, 'app', 'api', 'sarvam', 'orgs', '[orgId]', 'workspaces', '[workspaceId]', 'apps', '[appId]', 'url', 'route.js'), 'utf8');
+  assert.match(route, /\{ limiter, lookupCaller \}/, 'which only the call session route asks for');
 });
 
 test('the voice agent is on the public customer page, not in the staff console', () => {

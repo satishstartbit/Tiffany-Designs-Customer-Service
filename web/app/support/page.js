@@ -124,7 +124,7 @@ export default async function SupportPage() {
         <section className="site-section">
           <h2 className="site-title">How it works</h2>
           <ol className="steps">
-            <li><strong>Start the call</strong><span>Press Start a voice call, or the button at the bottom right of this page.</span></li>
+            <li><strong>Start the call</strong><span>Press Start a voice call, or the button at the bottom right. Enter your mobile number so the assistant finds your orders, then press Start call.</span></li>
             <li><strong>Allow the microphone</strong><span>Your browser asks once. Use a quiet place and your phone or computer&apos;s microphone.</span></li>
             <li><strong>Speak naturally</strong><span>Tell the assistant what you need. You get a request or order number before the call ends.</span></li>
           </ol>

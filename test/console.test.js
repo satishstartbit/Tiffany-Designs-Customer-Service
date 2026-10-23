@@ -133,6 +133,22 @@ test('requests list the scheduled calls, open to-dos and escalated cases', async
   assert.equal(result.callbacks[0].caseNumber, '00001043');
 });
 
+test('a caller is named by first name only, and only for a mobile number that belongs to a customer', async (t) => {
+  const contacts = { '+917357558134': { id: '003S', name: 'Satish Choudhary', firstName: 'Satish', mobile: '+917357558134', city: 'Jaipur' } };
+  const asked = [];
+  const crm = { async findContactByPhone(phone) { asked.push(phone); return contacts[phone] || null; } };
+  const data = createConsoleData({ salesforce: fakeSalesforce(), crm });
+  assert.deepEqual(await data.callerName('73575 58134'), { found: true, first_name: 'Satish' });
+  assert.deepEqual(await data.callerName('9123456780'), { found: false, first_name: null });
+  assert.deepEqual(await data.callerName('12345'), { found: false, first_name: null });
+  assert.deepEqual(asked, ['+917357558134', '+919123456780'], 'no lookup for something that is not a mobile number');
+
+  const s = await startTestServer({ consoleData: data });
+  t.after(s.close);
+  assert.equal((await s.call('GET', '/api/admin/caller?phone=7357558134')).status, 401, 'behind the internal key');
+  assert.deepEqual((await s.call('GET', '/api/admin/caller?phone=7357558134', { headers: s.internal })).body, { found: true, first_name: 'Satish' });
+});
+
 test('the console API needs the internal key and answers 404 for an unknown record', async (t) => {
   const consoleData = {
     summary: async () => ({ counts: { orders: 20 } }),
