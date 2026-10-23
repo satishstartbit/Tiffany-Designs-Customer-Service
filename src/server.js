@@ -7,8 +7,12 @@ const { createDeliveryCalls } = require('./deliveryCalls');
 const { createSarvamClient } = require('./sarvam');
 const { createRedis } = require('./redis');
 const { createScheduler, createFileJobStore, createRedisJobStore, createUnavailableJobStore } = require('./scheduler');
-const { createCallbackLimiter, createWebCallLimiter } = require('./rateLimit');
+const { createCallbackLimiter, createWebCallLimiter, createInvoiceLinkLimiter, createInvoiceUploadLimiter } = require('./rateLimit');
 const { createJobHandlers } = require('./callFlows');
+const { createInvoiceLinkSender } = require('./invoiceLinks');
+const { createWhatsApp } = require('./whatsapp');
+const { createInvoiceReader } = require('./invoiceReader');
+const { createInvoiceUploads } = require('./crm/invoiceUploads');
 const { createApp } = require('./app');
 
 function createJobStore(redis) {
@@ -62,6 +66,21 @@ function buildServer() {
   const consoleData = createConsoleData({ salesforce, crm, scheduler, productCodePrefix: config.salesforce.productCodePrefix });
   const deliveryCalls = createDeliveryCalls({ orders: createDeliveredOrders({ salesforce }), crm, sarvam, scheduler, config });
 
+  const { invoiceUploads: uploads } = config;
+  const whatsapp = createWhatsApp(config.whatsapp);
+  const reader = createInvoiceReader(config.openai);
+  const records = createInvoiceUploads({ salesforce, crm, linkDays: uploads.linkDays, productCodePrefix: config.salesforce.productCodePrefix });
+  const invoices = {
+    sender: createInvoiceLinkSender({
+      pageUrl: `${uploads.websiteUrl}/invoice`, whatsapp, reader, records, limiter: createInvoiceLinkLimiter({ redis, prefix: config.redis.prefix }),
+    }),
+    reader,
+    records,
+    uploadLimiter: createInvoiceUploadLimiter({ perHour: uploads.maxPerHour, perDay: uploads.maxPerDay, redis, prefix: config.redis.prefix }),
+  };
+  if (!reader.configured) console.warn('Invoice uploads are off until OPENAI_API_KEY is set');
+  if (!whatsapp.configured) console.warn('Invoice upload links are not sent on WhatsApp until WHATSAPP_API_KEY is set');
+
   const app = createApp({
     crm,
     sarvam,
@@ -71,6 +90,7 @@ function buildServer() {
     webCallLimiter,
     consoleData,
     deliveryCalls,
+    invoices,
     checkSalesforce: async () => {
       const limits = await sfRequest('/limits');
       return { dailyApiRequests: limits.DailyApiRequests };

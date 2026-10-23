@@ -124,7 +124,8 @@ function caseResponse(res, result, successMessage) {
 
 // Endpoints the Sarvam agent calls mid-conversation as API tools.
 // Responses are flat, snake_case and include a short `message` the agent can relay.
-module.exports = function agentToolsRouter({ crm, now = () => Date.now() }) {
+// `invoiceLinks` (src/invoiceLinks.js) sends invoice upload links; without it the link tool says none can be sent.
+module.exports = function agentToolsRouter({ crm, invoiceLinks, now = () => Date.now() }) {
   const router = express.Router();
 
   // The model does no calendar arithmetic; every spoken date is resolved here, in IST.
@@ -372,6 +373,32 @@ module.exports = function agentToolsRouter({ crm, now = () => Date.now() }) {
       mobile_on_file: Boolean(ending),
       mobile_ending: ending,
       message: `${address}${mobile}`,
+    });
+  });
+
+  // When no order can be found for a caller, the agent offers a link to upload a photo or screenshot of the invoice,
+  // sent on WhatsApp. The upload page reads the invoice, finds the order and links the caller's requests to it.
+  router.post('/invoice-upload-link', async (req, res) => {
+    const body = req.body || {};
+    const phone = normalizePhone(body.phone);
+    if (!phone || !/^\+91[6-9]\d{9}$/.test(phone)) {
+      return res.json({ sent: false, message: 'A valid 10 digit Indian mobile number that is on WhatsApp is needed. Ask for it.' });
+    }
+    const result = invoiceLinks
+      ? await invoiceLinks.send({ phone, customerName: body.customer_name, reference: body.order_reference })
+      : { sent: false, reason: 'unavailable' };
+    if (result.sent) {
+      return res.json({
+        sent: true,
+        message: `The upload link is sent on WhatsApp to the number ending ${spokenDigits(result.ending)}. Tell the customer to open it and upload `
+          + 'a clear photo or screenshot of the invoice; the service system then looks for the order and links it to the request.',
+      });
+    }
+    return res.json({
+      sent: false,
+      message: result.reason === 'limited'
+        ? 'Links were already sent to this number today. Ask the customer to use the link already on WhatsApp, and carry on without the order.'
+        : 'The WhatsApp link cannot be sent right now. Carry on without the order, and note the order id, invoice number and product as the customer gives them.',
     });
   });
 

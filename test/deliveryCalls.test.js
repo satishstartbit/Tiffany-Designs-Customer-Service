@@ -25,14 +25,15 @@ function order(id, overrides = {}) {
   };
 }
 
-function fakeOrders(list, { called = [], open = [] } = {}) {
-  const markers = new Map();
-  let count = 0;
+// Each marker notes how many calls had been placed when it was saved, to show it comes after the call.
+function fakeOrders(list, sarvam, { called = [], open = [] } = {}) {
+  const markers = [];
   return {
     markers,
-    since: null,
-    async findDelivered(since) {
-      this.since = since;
+    date: null,
+    failMark: 0,
+    async findDeliveredToday(date) {
+      this.date = date;
       return list;
     },
     async productNames(ids) {
@@ -42,27 +43,27 @@ function fakeOrders(list, { called = [], open = [] } = {}) {
       return new Set(open);
     },
     async alreadyCalled() {
-      return new Set([...called, ...[...markers.values()].map((m) => m.orderId)]);
+      return new Set([...called, ...markers.map((m) => m.orderId)]);
     },
     async markCalled(marker) {
-      count += 1;
-      markers.set(`00T${count}`, marker);
-      return `00T${count}`;
-    },
-    async unmark(id) {
-      markers.delete(id);
+      if (this.failMark > 0) {
+        this.failMark -= 1;
+        throw new Error('Salesforce request failed (503)');
+      }
+      markers.push({ ...marker, callsBefore: sarvam.started.length });
+      return `00T${markers.length}`;
     },
   };
 }
 
-function setup(list, { called, open, serviceOpen = true, maxPerRun = 5, canStartCalls = true, jobs = [] } = {}) {
-  const orders = fakeOrders(list, { called, open });
+function setup(list, { called, open, serviceOpen = true, serviceHoursOnly = false, maxPerRun = 5, canStartCalls = true, jobs = [] } = {}) {
   const sarvam = createFakeSarvam({ canStartCalls });
+  const orders = fakeOrders(list, sarvam, { called, open });
   const store = createMemoryJobStore();
   for (const job of jobs) store.create(job);
   const scheduler = createScheduler({ store, handlers: {}, now: () => NOW, logger: quiet });
   const crm = { getServiceHours: async () => ({ open: serviceOpen, opensAt: serviceOpen ? null : new Date('2026-10-23T03:30:00Z') }) };
-  const config = testConfig({ deliveryCalls: { delayMinutes: 60, lookbackDays: 3, maxPerRun } });
+  const config = testConfig({ deliveryCalls: { delayMinutes: 60, maxPerRun, serviceHoursOnly } });
   const deliveryCalls = createDeliveryCalls({ orders, crm, sarvam, scheduler, config, now: () => NOW, logger: quiet });
   return { orders, sarvam, deliveryCalls };
 }
@@ -85,26 +86,30 @@ test('only an Indian mobile number is called; the mobile comes before the other 
   assert.equal(mobileToCall(null), null);
 });
 
-test('a delivered order is called once, an hour after delivery, with the customer, order and products', async () => {
+test('an order delivered today is called once, an hour after delivery, and marked as called after the call', async () => {
   const { orders, sarvam, deliveryCalls } = setup([order('1001')]);
   const result = await deliveryCalls.run();
 
-  assert.equal(orders.since, '2026-10-19', 'orders delivered more than three days ago are not fetched');
+  assert.equal(orders.date, '2026-10-22', 'only orders delivered today are fetched');
   assert.deepEqual(result.placed, [{ order: 'TD-ORD-1001', attemptId: 'attempt-1' }]);
   assert.deepEqual(result.failed, []);
   const [call] = sarvam.started;
   assert.equal(call.phone, '+919876543210');
+  const opening = 'Hello, this is the Tiffany Designs service assistant, calling about your recent Tiffany Designs delivery. '
+    + 'Am I speaking with Aarav Sharma?';
   assert.deepEqual(call.variables, {
     customer_name: 'Aarav Sharma',
     customer_phone: '+919876543210',
     order_number: 'TD-ORD-1001',
     product_name: 'Demo Study Table, Demo Study Chair',
+    delivery_date: 'Thursday, 22 October',
     delivery_city: 'Delhi',
     call_reason: 'delivery_check',
+    opening_line: opening,
   });
-  assert.match(call.overrides.initial_bot_message, /Am I speaking with Aarav Sharma\?$/);
+  assert.deepEqual(call.overrides, { initial_bot_message: opening, initial_language_name: 'English' }, 'the agent greets with opening_line in English');
   assert.equal(call.webhook.metadata.identifier, 'order:1001', 'the call log lands on the order');
-  assert.deepEqual([...orders.markers.values()], [{ orderId: '1001', contactId: '003A' }]);
+  assert.deepEqual(orders.markers, [{ orderId: '1001', contactId: '003A', attemptId: 'attempt-1', callsBefore: 1 }]);
 
   const again = await deliveryCalls.run();
   assert.deepEqual(again.placed, []);
@@ -143,13 +148,18 @@ test('orders that break a rule are skipped with the reason', async () => {
   assert.equal(sarvam.started.length, 1);
 });
 
-test('nobody is called outside service hours', async () => {
-  const { orders, sarvam, deliveryCalls } = setup([order('1001')], { serviceOpen: false });
-  const result = await deliveryCalls.run();
-  assert.equal(result.skipped, 'outside_service_hours');
-  assert.equal(result.opensAt.toISOString(), '2026-10-23T03:30:00.000Z');
-  assert.equal(orders.since, null, 'Salesforce is not even searched');
-  assert.equal(sarvam.started.length, 0);
+test('calls go out outside service hours too, unless DELIVERY_CALLS_SERVICE_HOURS_ONLY is set', async () => {
+  const anyTime = setup([order('1001')], { serviceOpen: false });
+  const result = await anyTime.deliveryCalls.run();
+  assert.equal(result.serviceOpen, false);
+  assert.deepEqual(result.placed.map((p) => p.order), ['TD-ORD-1001']);
+
+  const hoursOnly = setup([order('1001')], { serviceOpen: false, serviceHoursOnly: true });
+  const held = await hoursOnly.deliveryCalls.run();
+  assert.equal(held.skipped, 'outside_service_hours');
+  assert.equal(held.opensAt.toISOString(), '2026-10-23T03:30:00.000Z');
+  assert.equal(hoursOnly.orders.date, null, 'Salesforce is not even searched');
+  assert.equal(hoursOnly.sarvam.started.length, 0);
 });
 
 test('a run places at most the configured number of calls and leaves the rest for the next run', async () => {
@@ -162,21 +172,32 @@ test('a run places at most the configured number of calls and leaves the rest fo
   assert.equal(sarvam.started.length, 3);
 });
 
-test('a call Sarvam refuses is tried again on the next run; one with no answer is not', async () => {
+test('a call Sarvam refuses is not marked and is tried again; one with no answer is marked and is not', async () => {
   const refused = setup([order('1001')]);
   refused.sarvam.failNext = 1;
   const first = await refused.deliveryCalls.run();
   assert.deepEqual(first.failed, [{ order: 'TD-ORD-1001', error: 'Sarvam unavailable' }]);
-  assert.equal(refused.orders.markers.size, 0, 'the marker is removed');
+  assert.deepEqual(refused.orders.markers, []);
   const retry = await refused.deliveryCalls.run();
   assert.deepEqual(retry.placed.map((p) => p.order), ['TD-ORD-1001']);
 
   const lost = setup([order('1002')]);
   lost.sarvam.startCall = async () => { throw new TypeError('fetch failed'); };
   await lost.deliveryCalls.run();
-  assert.equal(lost.orders.markers.size, 1, 'the call may have gone out, so the marker stays');
+  assert.deepEqual(lost.orders.markers, [{ orderId: '1002', contactId: '003A', attemptId: null, callsBefore: 0 }], 'the call may have gone out');
   const next = await lost.deliveryCalls.run();
   assert.deepEqual(next.skipped, { already_called: ['TD-ORD-1002'] });
+});
+
+test('when the marker cannot be saved after a call, the call still counts and is not placed again', async () => {
+  const { orders, sarvam, deliveryCalls } = setup([order('1001')]);
+  orders.failMark = 1;
+  const result = await deliveryCalls.run();
+  assert.deepEqual(result.placed, [{ order: 'TD-ORD-1001', attemptId: 'attempt-1', markerError: 'Salesforce request failed (503)' }]);
+  assert.deepEqual(orders.markers, []);
+  const again = await deliveryCalls.run();
+  assert.deepEqual(again.skipped, { already_called: ['TD-ORD-1001'] });
+  assert.equal(sarvam.started.length, 1);
 });
 
 test('a dry run lists who would be called and calls nobody, even outside service hours', async () => {
@@ -186,7 +207,7 @@ test('a dry run lists who would be called and calls nobody, even outside service
   assert.deepEqual(result.skipped, { no_phone: ['TD-ORD-2'] });
   assert.equal(result.serviceOpen, false);
   assert.equal(sarvam.started.length, 0);
-  assert.equal(orders.markers.size, 0);
+  assert.deepEqual(orders.markers, []);
 });
 
 test('without instant call settings a real run is refused with a 503; a dry run still works', async () => {
@@ -226,14 +247,13 @@ test('/cron/run is open to anyone, at most once every two minutes', async (t) =>
 test('Salesforce: delivered orders come with the authorising contact, else the account contact with a number', async () => {
   const queries = [];
   const created = [];
-  const removed = [];
   const salesforce = {
     async query(soql) {
       queries.push(soql);
       if (soql.includes('FROM Order ')) {
         return [
           { Id: '801A', OrderNumber: '00000101', ERP_Order_Id__c: 'TD-ORD-1001', Delivery_Status__c: 'Delivered', Delivery_Date__c: '2026-10-22', LastModifiedDate: '2026-10-22T04:00:00.000+0000', AccountId: '001A', ShippingCity: 'Delhi', CustomerAuthorizedById: '003A', CustomerAuthorizedBy: { FirstName: 'Aarav', LastName: 'Sharma', MobilePhone: '9876543210', Phone: null } },
-          { Id: '801B', OrderNumber: '00000102', ERP_Order_Id__c: null, Delivery_Status__c: 'Delivered', Delivery_Date__c: '2026-10-21', LastModifiedDate: '2026-10-21T09:00:00.000+0000', AccountId: '001B', ShippingCity: 'Jaipur', CustomerAuthorizedById: '003X', CustomerAuthorizedBy: { FirstName: 'No', LastName: 'Number', MobilePhone: null, Phone: null } },
+          { Id: '801B', OrderNumber: '00000102', ERP_Order_Id__c: null, Delivery_Status__c: 'Delivered', Delivery_Date__c: '2026-10-22', LastModifiedDate: '2026-10-22T03:00:00.000+0000', AccountId: '001B', ShippingCity: 'Jaipur', CustomerAuthorizedById: '003X', CustomerAuthorizedBy: { FirstName: 'No', LastName: 'Number', MobilePhone: null, Phone: null } },
         ];
       }
       if (soql.includes('FROM Contact ')) {
@@ -254,16 +274,17 @@ test('Salesforce: delivered orders come with the authorising contact, else the a
     },
     async create(sobject, fields) {
       created.push({ sobject, fields });
-      return { id: '00T1' };
-    },
-    async remove(sobject, id) {
-      removed.push({ sobject, id });
+      return { id: `00T${created.length}` };
     },
   };
   const data = createDeliveredOrders({ salesforce, now: () => NOW });
 
-  const found = await data.findDelivered('2026-10-19');
-  assert.match(queries[0], /Delivery_Status__c = 'Delivered' AND Delivery_Date__c >= 2026-10-19/);
+  const found = await data.findDeliveredToday('2026-10-22');
+  assert.match(
+    queries[0],
+    /Delivery_Status__c = 'Delivered' AND \(Delivery_Date__c = 2026-10-22 OR \(Delivery_Date__c = 2026-10-21 AND LastModifiedDate >= 2026-10-21T18:30:00Z\)\)/,
+    'delivered today, or dated yesterday and marked Delivered today (from midnight in India)',
+  );
   assert.match(queries[1], /AccountId IN \('001B'\)/, 'only accounts without an authorising contact number are searched');
   assert.deepEqual(found.map((o) => o.customer), [
     { id: '003A', name: 'Aarav Sharma', mobile: '9876543210', phone: null },
@@ -275,14 +296,16 @@ test('Salesforce: delivered orders come with the authorising contact, else the a
   assert.deepEqual([...await data.alreadyCalled(['801A', '801B'])], ['801B']);
   assert.match(queries.at(-1), new RegExp(`Subject = '${CALL_MARKER_SUBJECT}'`));
 
-  assert.equal(await data.markCalled({ orderId: '801A', contactId: '003A' }), '00T1');
+  assert.equal(await data.markCalled({ orderId: '801A', contactId: '003A', attemptId: 'att-9' }), '00T1');
   assert.equal(created[0].sobject, 'Task');
   assert.deepEqual(
     { ...created[0].fields, Description: undefined },
     { Subject: CALL_MARKER_SUBJECT, WhatId: '801A', WhoId: '003A', Status: 'Completed', Priority: 'Normal', ActivityDate: '2026-10-22', Description: undefined },
   );
-  await data.unmark('00T1');
-  assert.deepEqual(removed, [{ sobject: 'Task', id: '00T1' }]);
+  assert.match(created[0].fields.Description, /Sarvam call attempt: att-9\./);
+  await data.markCalled({ orderId: '801B', contactId: null, attemptId: null });
+  assert.equal(created[1].fields.WhoId, undefined);
+  assert.match(created[1].fields.Description, /may not have gone out/);
 
   const before = queries.length;
   assert.deepEqual([...await data.alreadyCalled([])], []);

@@ -701,14 +701,14 @@ function createCrm({
       (input.preferredDate || input.preferredTime) && `Preferred slot: ${[input.preferredDate, input.preferredTime].filter(Boolean).join(' ')}`,
       placeNote,
       detailsNote,
-      'Captured by the AI voice agent.',
+      input.capturedBy || 'Captured by the AI voice agent.',
     ].filter(Boolean).join('\n');
 
     const fields = compact({
       RecordTypeId: await caseRecordTypeId(mapping.serviceType),
       Subject: `${mapping.serviceType}${order?.erpOrderId ? ` - ${order.erpOrderId}` : ''}`,
       Description: description,
-      Origin: 'Phone',
+      Origin: input.origin || 'Phone',
       Status: input.issueType === 'escalation' ? 'Escalated' : undefined,
       ContactId: customer.id,
       AccountId: customer.id ? undefined : customer.accountId,

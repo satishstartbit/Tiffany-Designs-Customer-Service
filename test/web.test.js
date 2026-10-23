@@ -197,6 +197,66 @@ test('the voice agent is on the public customer page, not in the staff console',
   assert.doesNotMatch(widget, /show\(explain/, 'customers never see server details');
 });
 
+function fakeNode(status, answer) {
+  const requests = [];
+  const fetchImpl = async (url, options) => {
+    requests.push({ url, options });
+    return { status, ok: status < 400, json: async () => answer };
+  };
+  return { requests, fetchImpl };
+}
+
+test('the invoice page forwards only the file to the Node server, and passes on only plain answers', async () => {
+  const { forwardInvoiceUpload } = await load('invoiceUpload.js');
+  const env = { NODE_API_URL: 'https://node.example.test/' };
+  const quiet = { error() {} };
+  const node = fakeNode(200, { status: 'matched', message: 'Thank you.', invoice_number: 'INV-1', detail: 'internal' });
+  const res = await forwardInvoiceUpload(
+    { method: 'POST', contentType: 'image/jpeg; charset=binary', body: async () => new Uint8Array([1, 2, 3]), ip: '198.51.100.7' },
+    { env, fetchImpl: node.fetchImpl, logger: quiet },
+  );
+  assert.equal(res.status, 200);
+  assert.deepEqual(JSON.parse(res.body), { status: 'matched', invoice_number: 'INV-1', message: 'Thank you.' }, 'nothing else from the server reaches the browser');
+  assert.equal(res.headers['Cache-Control'], 'no-store');
+  const [sent] = node.requests;
+  assert.equal(sent.url, 'https://node.example.test/api/invoice-uploads');
+  assert.deepEqual(sent.options.headers, { 'X-Forwarded-For': '198.51.100.7', 'Content-Type': 'image/jpeg' });
+  assert.deepEqual([...sent.options.body], [1, 2, 3]);
+
+  const unread = async () => { throw new Error('the body must not be read'); };
+  const call = (input, options = {}) => forwardInvoiceUpload({ method: 'POST', contentType: 'image/png', body: unread, ...input },
+    { env, fetchImpl: node.fetchImpl, logger: quiet, ...options });
+  assert.equal((await call({ contentType: 'text/html' })).status, 415);
+  assert.equal((await call({ contentLength: String(5 * 1024 * 1024) })).status, 413);
+  assert.equal((await call({ body: async () => new Uint8Array(4 * 1024 * 1024 + 1) })).status, 413);
+  assert.equal((await call({}, { env: {} })).status, 503, 'without NODE_API_URL');
+  assert.equal(node.requests.length, 1);
+
+  const oldServer = await call({ method: 'GET' }, { fetchImpl: fakeNode(404, { error: 'Not found' }).fetchImpl });
+  assert.equal(oldServer.status, 503, 'a server without the upload route is "not available"');
+  const crashed = await call({ method: 'GET' }, { fetchImpl: fakeNode(502, { error: 'Upstream request failed', detail: 'Salesforce said no' }).fetchImpl });
+  assert.deepEqual(JSON.parse(crashed.body), { error: 'upstream_failed', message: 'Something went wrong. Please try again in a minute.' });
+  const asleep = await call({ method: 'GET' }, { fetchImpl: async () => { throw new Error('timeout'); } });
+  assert.equal(asleep.status, 502);
+});
+
+test('the invoice upload page has one public address, asks only for the file, reads no staff data and holds no key', () => {
+  const read = (...parts) => fs.readFileSync(path.join(WEB, ...parts), 'utf8');
+  const page = read('app', 'invoice', 'page.js');
+  assert.match(page, /<InvoiceUpload \/>/);
+  assert.doesNotMatch(page, /requireSession|loadAdmin|loadSupportHours|sendAdmin|lib\/api/, 'the page reads nothing from the console API');
+  const route = read('app', 'api', 'invoice', 'route.js');
+  const lib = read('lib', 'invoiceUpload.js');
+  const widget = read('components', 'InvoiceUpload.js');
+  for (const source of [route, lib, widget]) {
+    assert.doesNotMatch(source, /NODE_API_KEY|lib\/api|lib\/session|SARVAM_API_KEY|OPENAI/, 'no key is involved');
+  }
+  assert.match(widget, /^'use client';/);
+  assert.equal((widget.match(/<input /g) || []).length, 1, 'the only field is the file');
+  assert.match(widget, /<input ref=\{input\} className="sr-only" id="invoice-file" type="file"/);
+  assert.match(lib, /`\$\{server\}\/api\/invoice-uploads`/);
+});
+
 test('the sign-in details are shown only while developing, never on a deployed site', () => {
   const page = fs.readFileSync(path.join(WEB, 'app', 'login', 'page.js'), 'utf8');
   assert.match(page, /process\.env\.NODE_ENV !== 'production' && config\.ready \? \{ email: config\.email, password: config\.password \} : null/);

@@ -9,10 +9,14 @@ const webhooksRouter = require('./routes/webhooks');
 const webCallsRouter = require('./routes/webCalls');
 const adminRouter = require('./routes/admin');
 const cronRouter = require('./routes/cron');
+const invoiceUploadsRouter = require('./routes/invoiceUploads');
 
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 
-function createApp({ crm, sarvam, scheduler, config, checkSalesforce, limiter, webCallLimiter, consoleData, deliveryCalls, now = () => Date.now(), logger = console }) {
+// `invoices` ({ sender, reader, records, uploadLimiter }) turns on invoice upload links and the upload API.
+function createApp({
+  crm, sarvam, scheduler, config, checkSalesforce, limiter, webCallLimiter, consoleData, deliveryCalls, invoices, now = () => Date.now(), logger = console,
+}) {
   const app = express();
   // Render and Vercel sit behind proxies; the visitor address comes from X-Forwarded-For.
   app.set('trust proxy', true);
@@ -61,7 +65,15 @@ function createApp({ crm, sarvam, scheduler, config, checkSalesforce, limiter, w
   app.get('/api/jobs', internalKey, async (req, res) => res.json({ jobs: await scheduler.list() }));
   // Places the calls that are due; on Vercel this replaces the in-process timer.
   app.get('/api/cron/jobs', cronSecret, async (req, res) => res.json(await scheduler.tick()));
-  app.use('/api/agent', agentSecret, agentToolsRouter({ crm, now }));
+  app.use('/api/agent', agentSecret, agentToolsRouter({ crm, now, invoiceLinks: invoices?.sender }));
+  if (invoices) {
+    app.use('/api/invoice-uploads', invoiceUploadsRouter({
+      reader: invoices.reader,
+      records: invoices.records,
+      limiter: invoices.uploadLimiter,
+      logger,
+    }));
+  }
   app.use('/api/webhooks', webhookToken, webhooksRouter({ crm, now, logger }));
   if (consoleData) app.use('/api/admin', internalKey, adminRouter({ consoleData }));
   if (deliveryCalls) app.use('/cron', cronRouter({ deliveryCalls, now }));
@@ -78,6 +90,7 @@ function createApp({ crm, sarvam, scheduler, config, checkSalesforce, limiter, w
   // eslint-disable-next-line no-unused-vars
   app.use((err, req, res, next) => {
     if (err.type === 'entity.parse.failed') return res.status(400).json({ error: 'Invalid JSON body' });
+    if (err.type === 'entity.too.large') return res.status(413).json({ error: 'too_large', message: 'The upload is too large.' });
     if (err.status === 503) return res.status(503).json({ error: 'not_configured', message: err.message });
     logger.error(err);
     return res.status(502).json({ error: 'Upstream request failed', detail: err.message });

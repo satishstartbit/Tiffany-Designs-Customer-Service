@@ -320,7 +320,9 @@ function createFakeSarvam({ canStartCalls = true, canStartWebCalls = true } = {}
 }
 
 // `crm` replaces the in-memory fake, for example with the real one over a fake Salesforce.
-async function startTestServer({ nowMs = Date.parse('2026-10-14T06:30:00Z'), config = testConfig(), instantCalls = true, webCalls = true, consoleData, crm: realCrm } = {}) {
+async function startTestServer({
+  nowMs = Date.parse('2026-10-14T06:30:00Z'), config = testConfig(), instantCalls = true, webCalls = true, consoleData, crm: realCrm, invoices,
+} = {}) {
   const clock = { now: nowMs };
   const now = () => clock.now;
   const crm = realCrm || createFakeCrm({ now });
@@ -340,6 +342,7 @@ async function startTestServer({ nowMs = Date.parse('2026-10-14T06:30:00Z'), con
     now,
     logger,
     consoleData,
+    invoices: typeof invoices === 'function' ? invoices({ now, crm }) : invoices,
     checkSalesforce: async () => ({ dailyApiRequests: { Max: 15000, Remaining: 14999 } }),
   });
 
@@ -349,10 +352,11 @@ async function startTestServer({ nowMs = Date.parse('2026-10-14T06:30:00Z'), con
   const base = `http://127.0.0.1:${server.address().port}`;
 
   async function call(method, path, { body, headers = {} } = {}) {
+    const raw = typeof body === 'string' || Buffer.isBuffer(body);
     const res = await fetch(`${base}${path}`, {
       method,
       headers: { 'Content-Type': 'application/json', ...headers },
-      body: body === undefined ? undefined : typeof body === 'string' ? body : JSON.stringify(body),
+      body: body === undefined ? undefined : raw ? body : JSON.stringify(body),
     });
     const text = await res.text();
     let json = null;

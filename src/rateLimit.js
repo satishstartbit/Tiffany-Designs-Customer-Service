@@ -110,4 +110,34 @@ function createWebCallLimiter({ perHour, perDay, now, redis, prefix }) {
   return redis ? createRedisRateLimiter({ redis, rules, prefix, now }) : createRateLimiter({ rules, now });
 }
 
-module.exports = { createRateLimiter, createRedisRateLimiter, createCallbackLimiter, createWebCallLimiter };
+// Invoice upload links the voice agent sends on WhatsApp: per number, so a caller cannot flood someone's WhatsApp.
+function invoiceLinkRules() {
+  return [
+    { name: 'invoice_link_number_day', key: (c) => c.phone, limit: 3, windowMs: DAY },
+    { name: 'invoice_link_all_day', key: () => 'all', limit: 300, windowMs: DAY },
+  ];
+}
+
+function createInvoiceLinkLimiter({ now, redis, prefix } = {}) {
+  const rules = invoiceLinkRules();
+  return redis ? createRedisRateLimiter({ redis, rules, prefix, now }) : createRateLimiter({ rules, now });
+}
+
+// Uploads to the public invoice page, each a paid AI call: per visitor, and overall.
+function invoiceUploadRules({ perHour, perDay }) {
+  return [
+    { name: 'invoice_upload_ip_hour', key: (c) => c.ip, limit: 10, windowMs: HOUR },
+    { name: 'invoice_upload_ip_day', key: (c) => c.ip, limit: 20, windowMs: DAY },
+    { name: 'invoice_upload_all_hour', key: () => 'all', limit: perHour, windowMs: HOUR },
+    { name: 'invoice_upload_all_day', key: () => 'all', limit: perDay, windowMs: DAY },
+  ];
+}
+
+function createInvoiceUploadLimiter({ perHour, perDay, now, redis, prefix }) {
+  const rules = invoiceUploadRules({ perHour, perDay });
+  return redis ? createRedisRateLimiter({ redis, rules, prefix, now }) : createRateLimiter({ rules, now });
+}
+
+module.exports = {
+  createRateLimiter, createRedisRateLimiter, createCallbackLimiter, createWebCallLimiter, createInvoiceLinkLimiter, createInvoiceUploadLimiter,
+};

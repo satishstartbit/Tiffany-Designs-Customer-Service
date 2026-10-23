@@ -4,6 +4,8 @@ Agent `Tiffany-Des-0db8e21d-e099`, committed as **version 3**: the same instruct
 
 **Draft version 4** adds four tools for modules 2, 3, 9 and 14: `check_service_hours`, `save_customer_details`, `check_service_area` and `get_service_history`. It also adds Phase 13 (customer details) to the instructions. It also stops asking for details Salesforce already has: `get_details_on_file` gives the last four digits of the mobile number and the city and PIN code on file for the order (or the caller's registered mobile), the agent confirms them, and `register_service_request`, `book_installation` and `request_human_callback` take `use_details_on_file` (their `phone` is no longer required), so the server fills in the full mobile number and address (Phase 5 step 6). Their endpoints are in this repository but not yet on Render. Commit version 4 only after the code is deployed, then set `SARVAM_APP_VERSION=4` on Render.
 
+**Stage agent.** The `stage` branch works with `Tiffany-Des-4ab4474a-620f` ("Tiffany Designs Customer Service Stage", `SARVAM_AGENT_ID` in `.env`), whose tools call `https://tiffany-designs-customer-service-1.onrender.com`. Version 5 is committed and draft 6 holds the invoice upload link (below). Its prompt has the delivery check (Phase 14) but not yet every section of [agent-prompt.md](agent-prompt.md); [tools.json](tools.json) lists its tools.
+
 ## Module coverage
 
 | # | Module | Tools and instructions |
@@ -30,6 +32,8 @@ Agent `Tiffany-Des-0db8e21d-e099`, committed as **version 3**: the same instruct
 
 **Installation address.** For an installation the agent asks whether to install at the address where the order was delivered or somewhere else (Phase 6 step 2, `get_installation_address`). When the customer chooses the delivery address it is not asked for again, and `book_installation` is sent `at_delivery_address`; otherwise the agent takes the new address, city and PIN code. Most older demo orders (TD-ORD-1001 to 1007) have no delivery address on the order, so the agent offers the customer's own address on file and says the order has none. The case notes which address the customer chose.
 
+**Invoice upload link.** For a new installation the agent first asks for the order id, order number or invoice number, then tries the mobile number (Phase 6 step 1). When no order is found, it offers a WhatsApp link to upload a photo, screenshot or PDF of the invoice (Phase 15), confirms the WhatsApp number and the name, and calls `send_invoice_upload_link`. Either way it then registers the installation request without the order. The customer opens the website's `/invoice` page (the same link for everyone) and uploads the invoice, nothing else; the server reads it with an OpenAI model, finds the order by invoice number, order id or the phone on it, updates the order's details, customer and products from the invoice, and, through the link sent to that phone or to the order's customer, links the caller's open requests that have no order. See "Invoice upload links" in the main README.
+
 **Name.** The agent introduces itself as the Tiffany Designs AI service assistant, with no personal name, and says it is an AI assistant when asked. Nothing a customer or staff member hears or sees names the voice platform: not the agent, the website (the call widget's own panel title is replaced in the page), the console, the Salesforce panel, or the text written to Salesforce records. Only technical names stay: environment variables (`SARVAM_*`), code modules, the `/api/sarvam` address and the widget library.
 
 ## Call types
@@ -40,7 +44,7 @@ Agent `Tiffany-Des-0db8e21d-e099`, committed as **version 3**: the same instruct
 | --- | --- | --- |
 | `inbound` | Customer calls the Tiffany number | Namaste, welcome to Tiffany Designs customer care. This is the Tiffany Designs AI service assistant. Would you like to talk in Hindi or English? (translated into all 11 languages; the Hindi line, which is the one spoken since Hindi is the starting language, ends with the question in English too) |
 | `delivery_followup` | Server, 1 hour after `Delivery_Status__c` becomes Delivered | Hello, this is the Tiffany Designs AI service assistant. Am I speaking with {name}? |
-| `delivery_check` | Server, `/cron/run` every 15 minutes, an hour or more after delivery (see the main README) | Same as delivery follow-up. Phase 14 asks whether every part of `product_name` arrived, and offers installation only when it did |
+| `delivery_check` | Server, `/cron/run` every 15 minutes, an hour or more after delivery (see the main README) | Hello, this is the Tiffany Designs service assistant, calling about your recent Tiffany Designs delivery. Am I speaking with {name}? Sent as `opening_line` (see below). Phase 14 then says the order, product and `delivery_date`, asks whether every part arrived, and offers an installation request only when it did |
 | `callback_request` | Server, when a customer leaves a number | …calling back as requested. Am I speaking with {name}? |
 | `service_update` | Server, on a case event (module 13) | Same as delivery follow-up; the update text is passed in `notice_details` |
 
@@ -50,6 +54,8 @@ Agent `Tiffany-Des-0db8e21d-e099`, committed as **version 3**: the same instruct
 | --- | --- | --- |
 | `customer_name`, `customer_phone`, `order_number`, `product_name`, `delivery_city` | Server (outbound) | Who is being called and about what |
 | `call_reason`, `notice_details` | Server | Which flow to run; the update text for service update calls |
+| `delivery_date` | Server (delivery check) | Delivery date as spoken, for example Wednesday, 21 October |
+| `opening_line` | Server (delivery check) | The greeting. Sarvam speaks the agent's translated greeting for the call's starting language and ignores `app_overrides.initial_bot_message`, so the English greeting (all three `intro_message_config.multilingual_audio*` maps) is `{{opening_line}}`. Outbound calls start in English and set it; inbound calls start in Hindi and keep the Hindi greeting. Its default is the customer care greeting, which callback and service update calls still get |
 | `delivery_status`, `issue_type`, `issue_description`, `installation_date`, `installation_time`, `case_number`, `placed_order_number`, `call_outcome`, `call_summary` | Sarvam, after the call | Read by the call-end webhook to log the Task, and to create a fallback case when no case was registered during the call |
 | `preferred_language` | Sarvam, after the call | The language the customer chose, by its English name (Hindi, English, Tamil…). The webhook saves it on the caller's contact and notes it on the Task |
 
@@ -77,6 +83,7 @@ All tools POST to the server with the `x-agent-secret` header and speak the `mes
 | `save_customer_details` (draft 4) | `/api/agent/customer` | A new caller gets an account and contact with email, another number and address. For an existing customer nothing is overwritten: a "Customer details to update" task goes to the team, because a caller cannot prove they own the number |
 | `check_service_area` (draft 4) | `/api/agent/service-area` | Delhi NCR (internal team) or a service partner, from `Service_Region__mdt` by city or PIN prefix, and checks the PIN |
 | `get_service_history` (draft 4) | `/api/agent/history` | The latest 5 requests, closed ones included, and the latest 3 logged calls for the caller's account |
+| `send_invoice_upload_link` (stage draft 6) | `/api/agent/invoice-upload-link` | `phone` (the confirmed WhatsApp number), `customer_name`, `order_reference`. Notes the link in Salesforce (an upload is tied back to it for 7 days) and sends the WhatsApp event `invoice_upload_requested` with the upload page's fixed address. At most 3 links per number a day. When WhatsApp or the page address is not set up, the agent hears that no link can be sent and carries on without the order |
 
 ### Phone orders
 

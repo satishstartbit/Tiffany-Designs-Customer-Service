@@ -1,7 +1,7 @@
-const { escapeSoql, requestKind } = require('./crm');
+const { escapeSoql, soqlDateTime, requestKind } = require('./crm');
 const { todayInIst } = require('../dates');
 
-// Left on an order when its delivery check call is placed. It lives in Salesforce rather than the job store, which
+// Left on an order once its delivery check call is placed. It lives in Salesforce rather than the job store, which
 // Render loses on every restart, so an order is never called twice.
 const CALL_MARKER_SUBJECT = 'AI delivery check call';
 const MAX_ORDERS = 200;
@@ -19,14 +19,17 @@ function toCustomer(row) {
 }
 
 function createDeliveredOrders({ salesforce, now = () => Date.now() }) {
-  // Orders marked Delivered with a delivery date on or after `sinceDate` (YYYY-MM-DD), each with the customer to call:
-  // the contact who authorised the order, else the account's first contact with a number, as getOrderContact picks.
-  async function findDelivered(sinceDate) {
+  // Orders delivered on `today` (YYYY-MM-DD, India): the delivery date is today, or it is yesterday and the order was
+  // saved as Delivered today, as when a delivery is marked the next day. Each comes with the customer to call: the
+  // contact who authorised the order, else the account's first contact with a number, as getOrderContact picks.
+  async function findDeliveredToday(today) {
+    const yesterday = new Date(Date.parse(`${today}T00:00:00Z`) - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    const dayStart = soqlDateTime(`${today}T00:00:00+05:30`);
     const rows = await salesforce.query(
       'SELECT Id, OrderNumber, ERP_Order_Id__c, Delivery_Status__c, Delivery_Date__c, LastModifiedDate, AccountId, ShippingCity, '
       + 'CustomerAuthorizedById, CustomerAuthorizedBy.FirstName, CustomerAuthorizedBy.LastName, CustomerAuthorizedBy.MobilePhone, '
-      + `CustomerAuthorizedBy.Phone FROM Order WHERE Delivery_Status__c = 'Delivered' AND Delivery_Date__c >= ${sinceDate} `
-      + `ORDER BY Delivery_Date__c, LastModifiedDate LIMIT ${MAX_ORDERS}`,
+      + `CustomerAuthorizedBy.Phone FROM Order WHERE Delivery_Status__c = 'Delivered' AND (Delivery_Date__c = ${today} `
+      + `OR (Delivery_Date__c = ${yesterday} AND LastModifiedDate >= ${dayStart})) ORDER BY LastModifiedDate LIMIT ${MAX_ORDERS}`,
     );
     const authorised = (r) => toCustomer(r.CustomerAuthorizedBy && { ...r.CustomerAuthorizedBy, Id: r.CustomerAuthorizedById });
     const accounts = [...new Set(rows.filter((r) => !authorised(r) && r.AccountId).map((r) => r.AccountId))];
@@ -76,7 +79,8 @@ function createDeliveredOrders({ salesforce, now = () => Date.now() }) {
     return new Set(rows.map((r) => r.WhatId));
   }
 
-  async function markCalled({ orderId, contactId }) {
+  // `attemptId` is Sarvam's id for the call; without one, Sarvam did not answer and the call may not have gone out.
+  async function markCalled({ orderId, contactId, attemptId }) {
     const created = await salesforce.create('Task', {
       Subject: CALL_MARKER_SUBJECT,
       WhatId: orderId,
@@ -84,15 +88,16 @@ function createDeliveredOrders({ salesforce, now = () => Date.now() }) {
       Status: 'Completed',
       Priority: 'Normal',
       ActivityDate: todayInIst(now()).toISOString().slice(0, 10),
-      Description: 'The AI voice agent called the customer to check that every part was delivered and to offer installation. '
-        + 'The call itself is logged as a separate call activity when it ends.',
+      Description: [
+        'The AI voice agent called the customer to check that every part was delivered and to offer installation.',
+        attemptId ? `Sarvam call attempt: ${attemptId}.` : 'Sarvam did not confirm the call, so it may not have gone out.',
+        'The call itself is logged as a separate call activity when it ends.',
+      ].join(' '),
     });
     return created.id;
   }
 
-  const unmark = (taskId) => salesforce.remove('Task', taskId);
-
-  return { findDelivered, productNames, withOpenRequests, alreadyCalled, markCalled, unmark };
+  return { findDeliveredToday, productNames, withOpenRequests, alreadyCalled, markCalled };
 }
 
 module.exports = { createDeliveredOrders, CALL_MARKER_SUBJECT };

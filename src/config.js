@@ -61,9 +61,32 @@ module.exports = {
   // Delivery check calls placed by /cron/run.
   deliveryCalls: {
     delayMinutes: int(env.DELIVERY_CALL_DELAY_MINUTES, 60),
-    // Only orders delivered this many days ago or less are called, so older deliveries never are.
-    lookbackDays: int(env.DELIVERY_CALL_LOOKBACK_DAYS, 3),
     maxPerRun: int(env.DELIVERY_CALLS_PER_RUN, 5),
+    // "true" calls only while the service team is working; otherwise calls go out at any hour.
+    serviceHoursOnly: env.DELIVERY_CALLS_SERVICE_HOURS_ONLY === 'true',
+  },
+
+  // Invoice upload links the voice agent sends on WhatsApp when it cannot find a caller's order.
+  invoiceUploads: {
+    // The website (web/) whose /invoice page takes the uploads; the WhatsApp link points there.
+    websiteUrl: (env.WEBSITE_URL || 'http://localhost:3000').replace(/\/+$/, ''),
+    // How long after the link is sent an upload is still matched to the caller's request.
+    linkDays: int(env.INVOICE_LINK_DAYS, 7),
+    // Invoice readings (AI calls) across all customers.
+    maxPerHour: int(env.INVOICE_UPLOADS_MAX_PER_HOUR, 30),
+    maxPerDay: int(env.INVOICE_UPLOADS_MAX_PER_DAY, 150),
+  },
+
+  whatsapp: {
+    eventsUrl: env.WHATSAPP_EVENTS_URL || 'https://whatsapp.startbit.co/api/integrations/voice-agent/events',
+    apiKey: env.WHATSAPP_API_KEY || '',
+  },
+
+  // Reads uploaded invoices (a vision model with structured output).
+  openai: {
+    apiKey: env.OPENAI_API_KEY || '',
+    model: env.OPENAI_OCR_MODEL || 'gpt-4.1-mini',
+    baseUrl: (env.OPENAI_BASE_URL || 'https://api.openai.com/v1').replace(/\/+$/, ''),
   },
 
   followUpDelayMinutes: int(env.FOLLOWUP_DELAY_MINUTES, 60),

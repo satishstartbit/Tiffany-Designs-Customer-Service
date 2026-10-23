@@ -1,12 +1,8 @@
 import { createLimiter } from '@/lib/limits.js';
+import { visitorIp } from '@/lib/visitor.js';
 import { startWebSession } from '@/lib/webSession.js';
 
 const limiter = createLimiter();
-
-// Vercel sets these from the connection, so a visitor cannot pick another address to dodge the limits.
-function visitorIp(request) {
-  return request.headers.get('x-real-ip') || request.headers.get('x-forwarded-for')?.split(',')[0].trim() || 'unknown';
-}
 
 export async function GET(request, { params }) {
   try {

@@ -1,12 +1,19 @@
 const { normalizePhone } = require('./rules');
-const { VARS, outboundOverrides } = require('./callFlows');
+const { VARS } = require('./callFlows');
 const { todayInIst } = require('./dates');
+const { formatDate } = require('./speech');
 
 // Agent call reason for these calls: confirm every part arrived, then offer installation.
 const CALL_REASON = 'delivery_check';
 const INDIAN_MOBILE = /^\+91[6-9]\d{9}$/;
 const MINUTE_MS = 60 * 1000;
-const DAY_MS = 24 * 60 * MINUTE_MS;
+
+// Sarvam ignores app_overrides.initial_bot_message while the agent has a translated greeting, so the agent's English
+// greeting is the variable opening_line and the call starts in English.
+function openingLine(customerName) {
+  const intro = 'Hello, this is the Tiffany Designs service assistant, calling about your recent Tiffany Designs delivery.';
+  return `${intro} ${customerName ? `Am I speaking with ${customerName}?` : 'May I know who I am speaking with?'}`;
+}
 
 // Salesforce keeps the delivery date without a time. The last save of an order is never earlier than the moment it
 // was marked Delivered, so waiting from the later of that save and the start of the delivery day never calls early.
@@ -40,6 +47,8 @@ const orderRef = (order) => order.erpOrderId || order.orderNumber;
 
 function createDeliveryCalls({ orders, crm, sarvam, scheduler, config, now = () => Date.now(), logger = console }) {
   let running = false;
+  // Orders this process has called, so a failed save of the Salesforce marker never leads to a second call.
+  const calledHere = new Set();
 
   function webhookFor(order) {
     if (!config.publicBaseUrl || !config.webhookToken) return null;
@@ -54,43 +63,57 @@ function createDeliveryCalls({ orders, crm, sarvam, scheduler, config, now = () 
     return new Set(jobs.filter((j) => j.type === 'delivery_followup' && ['pending', 'done'].includes(j.status)).map((j) => j.payload?.orderId));
   }
 
+  // Records the order as called. Returns the error message when the Salesforce marker could not be saved.
+  async function markCalled(order, attemptId) {
+    calledHere.add(order.id);
+    try {
+      await orders.markCalled({ orderId: order.id, contactId: order.customer?.id, attemptId });
+      return null;
+    } catch (err) {
+      logger.error(`Saving the call marker for order ${order.id} failed: ${err.message}`);
+      return err.message;
+    }
+  }
+
   async function place(order, productName) {
     const phone = mobileToCall(order.customer);
     const name = order.customer?.name || null;
-    const markerId = await orders.markCalled({ orderId: order.id, contactId: order.customer?.id });
     try {
-      return await sarvam.startCall({
+      const { attemptId } = await sarvam.startCall({
         phone,
         variables: {
           [VARS.customerName]: name,
           [VARS.customerPhone]: phone,
           [VARS.orderNumber]: orderRef(order),
           [VARS.productName]: productName,
+          delivery_date: formatDate(order.deliveryDate),
           [VARS.deliveryCity]: order.city,
           [VARS.callReason]: CALL_REASON,
+          opening_line: openingLine(name),
         },
-        overrides: outboundOverrides(CALL_REASON, name),
+        overrides: { initial_bot_message: openingLine(name), initial_language_name: 'English' },
         webhook: webhookFor(order),
       });
+      const markerError = await markCalled(order, attemptId);
+      return { attemptId, ...(markerError ? { markerError } : {}) };
     } catch (err) {
-      // Sarvam answered and refused, so nobody was called and the next run may try again. Without an answer the call
-      // may have gone out, so the marker stays.
-      if (/^(Sarvam|Instant calls)/.test(err.message)) {
-        await orders.unmark(markerId).catch((e) => logger.error(`Removing the call marker for order ${order.id} failed: ${e.message}`));
-      }
+      // Sarvam answered and refused, so nobody was called and the next run tries again. Without an answer the call
+      // may have gone out, so the order is marked as called all the same.
+      if (!/^(Sarvam|Instant calls)/.test(err.message)) await markCalled(order, null);
       throw err;
     }
   }
 
   async function check(dryRun) {
+    const { delayMinutes, maxPerRun, serviceHoursOnly } = config.deliveryCalls;
     const hours = await crm.getServiceHours();
-    if (!hours.open && !dryRun) return { skipped: 'outside_service_hours', opensAt: hours.opensAt };
+    if (serviceHoursOnly && !hours.open && !dryRun) return { skipped: 'outside_service_hours', opensAt: hours.opensAt };
 
-    const { delayMinutes, lookbackDays, maxPerRun } = config.deliveryCalls;
-    const since = todayInIst(now() - lookbackDays * DAY_MS).toISOString().slice(0, 10);
-    const delivered = await orders.findDelivered(since);
+    const today = todayInIst(now()).toISOString().slice(0, 10);
+    const delivered = await orders.findDeliveredToday(today);
     const ids = delivered.map((o) => o.id);
-    const [called, openRequests, followUps] = await Promise.all([orders.alreadyCalled(ids), orders.withOpenRequests(ids), followUpOrders()]);
+    const [marked, openRequests, followUps] = await Promise.all([orders.alreadyCalled(ids), orders.withOpenRequests(ids), followUpOrders()]);
+    const called = new Set([...marked, ...calledHere]);
 
     const skipped = {};
     const due = [];
@@ -100,7 +123,7 @@ function createDeliveryCalls({ orders, crm, sarvam, scheduler, config, now = () 
       else due.push(order);
     }
     const batch = due.slice(0, maxPerRun);
-    const summary = { dryRun, serviceOpen: hours.open, deliveredSince: since, checked: delivered.length, skipped, deferred: due.length - batch.length };
+    const summary = { dryRun, serviceOpen: hours.open, deliveredOn: today, checked: delivered.length, skipped, deferred: due.length - batch.length };
     if (dryRun) return { ...summary, wouldCall: batch.map(orderRef) };
 
     const products = await orders.productNames(batch.map((o) => o.id));
@@ -108,8 +131,7 @@ function createDeliveryCalls({ orders, crm, sarvam, scheduler, config, now = () 
     const failed = [];
     for (const order of batch) {
       try {
-        const { attemptId } = await place(order, products[order.id]);
-        placed.push({ order: orderRef(order), attemptId });
+        placed.push({ order: orderRef(order), ...(await place(order, products[order.id])) });
       } catch (err) {
         logger.error(`Delivery check call for order ${order.id} failed: ${err.message}`);
         failed.push({ order: orderRef(order), error: err.message });
@@ -118,7 +140,7 @@ function createDeliveryCalls({ orders, crm, sarvam, scheduler, config, now = () 
     return { ...summary, placed, failed };
   }
 
-  // One pass: find delivered orders, apply the rules and call the ones that are due. dryRun calls nobody.
+  // One pass: find the orders delivered today, apply the rules and call the ones that are due. dryRun calls nobody.
   async function run({ dryRun = false } = {}) {
     if (!dryRun && !sarvam.canStartCalls) {
       const err = new Error('Delivery check calls need SARVAM_AGENT_ID, SARVAM_APP_VERSION, SARVAM_CONNECTION_ID and SARVAM_AGENT_PHONE');
