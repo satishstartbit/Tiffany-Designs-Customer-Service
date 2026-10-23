@@ -113,11 +113,10 @@ When a caller wants an installation and no order is found by the order id, order
 ```
 POST https://whatsapp.startbit.co/api/integrations/voice-agent/events
 Authorization: Bearer <WHATSAPP_API_KEY>
-{ "event": "invoice_upload_requested", "phone_number": "+919876543210", "customer_name": "Asha Sharma",
-  "invoice_date": "23 October 2026", "invoice_upload_link": "https://<site>/invoice" }
+{ "event": "invoice_upload_requested", "phone_number": "+919876543210", "customer_name": "Asha Sharma" }
 ```
 
-`invoice_upload_link` is the website's `/invoice` page, the same for every customer (http://localhost:3000/invoice unless `WEBSITE_URL` says otherwise). `invoice_date` is the day the link was sent, in India, and `customer_name` is "Customer" when the caller gave no name. Before the message goes out, the server saves an open Salesforce task "Invoice upload link sent on WhatsApp to +91…" with the caller's name and what they said on the call (it is removed again when WhatsApp refuses the message). One number gets at most 3 links a day. The agent then registers the installation request without the order.
+The integration accepts only these three fields and refuses the whole event for any other ("Unrecognized keys"), so the upload page's address, the website's `/invoice` page, the same for every customer, belongs in the integration's message template. `customer_name` is "Customer" when the caller gave no name. Before the message goes out, the server saves an open Salesforce task "Invoice upload link sent on WhatsApp to +91…" with the caller's name and what they said on the call (it is removed again when WhatsApp refuses the message). One number gets at most 3 links a day. The agent then registers the installation request without the order.
 
 The customer opens the page on the website (`web/`, page `/invoice`), chooses a photo, screenshot or PDF of the invoice, and the page sends only the file, through its own route, to `POST /api/invoice-uploads`. Nothing else is asked. Photos are scaled down to a JPEG of at most 2000 pixels in the browser first. The server reads the invoice with an OpenAI vision model (`OPENAI_OCR_MODEL`, default `gpt-4.1-mini`) as structured fields: invoice number, order id, dates, seller and channel, the customer's name, phone, email, delivery and billing address, the products and the total. Then it looks for the order:
 
@@ -138,8 +137,9 @@ The page has no key at all, so anyone can upload an invoice to it, and an upload
 
 Setup:
 
-- **Node server:** `OPENAI_API_KEY` (an OpenAI account with credits) for reading invoices, and `WHATSAPP_API_KEY` (the workspace voice agent API key of the WhatsApp integration) for sending the link. Optional: `WEBSITE_URL` (the website the link points to; `http://localhost:3000` by default, so set it to the deployed site, for example `https://<site>.vercel.app`, once the site is public), `OPENAI_OCR_MODEL`, `INVOICE_LINK_DAYS` (7), `WHATSAPP_EVENTS_URL`, `INVOICE_UPLOADS_MAX_PER_HOUR`, `INVOICE_UPLOADS_MAX_PER_DAY`. Without the keys, the page says uploads are not available and the agent hears that no link can be sent.
+- **Node server:** `OPENAI_API_KEY` (an OpenAI account with credits) for reading invoices, and `WHATSAPP_API_KEY` (the workspace voice agent API key of the WhatsApp integration) for sending the link. Optional: `OPENAI_OCR_MODEL`, `INVOICE_LINK_DAYS` (7), `WHATSAPP_EVENTS_URL`, `INVOICE_UPLOADS_MAX_PER_HOUR`, `INVOICE_UPLOADS_MAX_PER_DAY`. Without the keys, the page says uploads are not available and the agent hears that no link can be sent.
 - **Vercel (website):** only `NODE_API_URL`, which the site already has. No key is involved.
+- **WhatsApp integration:** the `invoice_upload_requested` message template carries the link to the website's `/invoice` page (http://localhost:3000/invoice while testing locally).
 - **Sarvam:** the `send_invoice_upload_link` tool and the prompt changes are in draft 6 of the stage agent. Commit it after the server is deployed, then set `SARVAM_APP_VERSION`.
 
 ## Deploy on Vercel

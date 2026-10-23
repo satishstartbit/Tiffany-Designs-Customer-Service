@@ -68,8 +68,6 @@ module.exports = {
 
   // Invoice upload links the voice agent sends on WhatsApp when it cannot find a caller's order.
   invoiceUploads: {
-    // The website (web/) whose /invoice page takes the uploads; the WhatsApp link points there.
-    websiteUrl: (env.WEBSITE_URL || 'http://localhost:3000').replace(/\/+$/, ''),
     // How long after the link is sent an upload is still matched to the caller's request.
     linkDays: int(env.INVOICE_LINK_DAYS, 7),
     // Invoice readings (AI calls) across all customers.

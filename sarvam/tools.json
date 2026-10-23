@@ -27,7 +27,7 @@
       "id": "bc81d67e-a28e-47f0-be9d-78d4d4d52ee6",
       "path": "/api/agent/invoice-upload-link",
       "modules": [4, 6],
-      "status": "Created in draft 6 on 2026-10-23, with Phase 15 and the reordered Phase 6 in the prompt. Body params: phone (required), customer_name, order_reference. Sends the website's /invoice page (WEBSITE_URL, http://localhost:3000 by default), where the customer uploads only the invoice. Answers 404 until the server code is deployed to Render."
+      "status": "Created in draft 6 on 2026-10-23, with Phase 15 and the reordered Phase 6 in the prompt. Body params: phone (required), customer_name, order_reference. Sends the WhatsApp event with phone_number and customer_name only; the integration's template carries the link to the website's /invoice page. Answers 404 until the server code is deployed to Render."
     },
     {
       "name": "get_installation_address",

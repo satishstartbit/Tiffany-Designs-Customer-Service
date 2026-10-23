@@ -14,7 +14,6 @@ const { lastTenDigits } = require('../src/rules');
 const { startTestServer } = require('./helpers');
 
 const NOW = Date.parse('2026-10-14T06:30:00Z');
-const PAGE = 'https://care.example.test/invoice';
 const quiet = { error() {}, warn() {}, log() {} };
 
 const INVOICE = {
@@ -60,14 +59,14 @@ function fakeLinkNotes() {
   };
 }
 
-function linkServices({ status = 200, apiKey = 'wa-key', pageUrl = PAGE, canRead = true } = {}) {
+function linkServices({ status = 200, apiKey = 'wa-key', canRead = true } = {}) {
   const api = fakeWhatsAppApi(status);
   const records = fakeLinkNotes();
   const factory = ({ now }) => {
     const whatsapp = createWhatsApp({ eventsUrl: 'https://wa.example.test/events', apiKey, fetchImpl: api.fetchImpl });
     const reader = { configured: canRead, read: async () => INVOICE };
     return {
-      sender: createInvoiceLinkSender({ pageUrl, whatsapp, reader, records, limiter: createInvoiceLinkLimiter({ now }), now, logger: quiet }),
+      sender: createInvoiceLinkSender({ whatsapp, reader, records, limiter: createInvoiceLinkLimiter({ now }), logger: quiet }),
       reader,
       records,
       uploadLimiter: createInvoiceUploadLimiter({ perHour: 30, perDay: 150, now }),
@@ -76,7 +75,7 @@ function linkServices({ status = 200, apiKey = 'wa-key', pageUrl = PAGE, canRead
   return { api, records, factory };
 }
 
-test('send_invoice_upload_link notes the number and sends the one upload page on WhatsApp', async (t) => {
+test('send_invoice_upload_link notes the number and sends the WhatsApp event with only the fields the integration accepts', async (t) => {
   const { api, records, factory } = linkServices();
   const srv = await startTestServer({ invoices: factory });
   t.after(srv.close);
@@ -93,14 +92,8 @@ test('send_invoice_upload_link notes the number and sends the one upload page on
   assert.deepEqual(api.sent, [{
     url: 'https://wa.example.test/events',
     auth: 'Bearer wa-key',
-    body: {
-      event: 'invoice_upload_requested',
-      phone_number: '+919876543210',
-      customer_name: 'Asha Sharma',
-      invoice_date: '14 October 2026',
-      invoice_upload_link: PAGE,
-    },
-  }], 'every customer gets the same page address');
+    body: { event: 'invoice_upload_requested', phone_number: '+919876543210', customer_name: 'Asha Sharma' },
+  }], 'the integration refuses any other field; the page address is in its message template');
 });
 
 test('the link needs a valid Indian mobile, goes to one number at most 3 times a day, and fails softly', async (t) => {
@@ -133,7 +126,7 @@ test('when WhatsApp refuses, the note is removed; when nothing is set up, nothin
   assert.match(res.body.message, /cannot be sent right now\. Carry on without the order/);
   assert.deepEqual(refused.records.removed, ['00T1'], 'a number that got no message has no link on record');
 
-  for (const options of [{ apiKey: '' }, { pageUrl: '' }, { canRead: false }]) {
+  for (const options of [{ apiKey: '' }, { canRead: false }]) {
     const { api, records, factory } = linkServices(options);
     const off = await startTestServer({ invoices: factory });
     const answer = await off.call('POST', '/api/agent/invoice-upload-link', { headers: off.agent, body: { phone: '9876543210' } });

@@ -83,7 +83,7 @@ All tools POST to the server with the `x-agent-secret` header and speak the `mes
 | `save_customer_details` (draft 4) | `/api/agent/customer` | A new caller gets an account and contact with email, another number and address. For an existing customer nothing is overwritten: a "Customer details to update" task goes to the team, because a caller cannot prove they own the number |
 | `check_service_area` (draft 4) | `/api/agent/service-area` | Delhi NCR (internal team) or a service partner, from `Service_Region__mdt` by city or PIN prefix, and checks the PIN |
 | `get_service_history` (draft 4) | `/api/agent/history` | The latest 5 requests, closed ones included, and the latest 3 logged calls for the caller's account |
-| `send_invoice_upload_link` (stage draft 6) | `/api/agent/invoice-upload-link` | `phone` (the confirmed WhatsApp number), `customer_name`, `order_reference`. Notes the link in Salesforce (an upload is tied back to it for 7 days) and sends the WhatsApp event `invoice_upload_requested` with the upload page's fixed address. At most 3 links per number a day. When WhatsApp or the page address is not set up, the agent hears that no link can be sent and carries on without the order |
+| `send_invoice_upload_link` (stage draft 6) | `/api/agent/invoice-upload-link` | `phone` (the confirmed WhatsApp number), `customer_name`, `order_reference`. Notes the link in Salesforce (an upload is tied back to it for 7 days) and sends the WhatsApp event `invoice_upload_requested` with the number and name only (the integration refuses other fields; its template carries the page's address). At most 3 links per number a day. When WhatsApp or OpenAI is not set up, the agent hears that no link can be sent and carries on without the order |
 
 ### Phone orders
 

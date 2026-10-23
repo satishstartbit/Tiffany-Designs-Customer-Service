@@ -17,13 +17,12 @@ function createWhatsApp({ eventsUrl, apiKey, fetchImpl = (...args) => fetch(...a
 
   return {
     configured: Boolean(eventsUrl && apiKey),
-    // `invoiceDate` is the day the link was asked for, as the message says it ("23 October 2026").
-    sendInvoiceUploadLink: ({ phone, customerName, invoiceDate, link }) => sendEvent({
+    // The integration accepts only these fields and refuses any other ("Unrecognized keys"); the upload page's
+    // address is part of its message template.
+    sendInvoiceUploadLink: ({ phone, customerName }) => sendEvent({
       event: 'invoice_upload_requested',
       phone_number: phone,
       customer_name: String(customerName || '').trim() || 'Customer',
-      invoice_date: invoiceDate,
-      invoice_upload_link: link,
     }),
   };
 }

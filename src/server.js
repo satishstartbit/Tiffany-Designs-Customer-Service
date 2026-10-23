@@ -71,9 +71,7 @@ function buildServer() {
   const reader = createInvoiceReader(config.openai);
   const records = createInvoiceUploads({ salesforce, crm, linkDays: uploads.linkDays, productCodePrefix: config.salesforce.productCodePrefix });
   const invoices = {
-    sender: createInvoiceLinkSender({
-      pageUrl: `${uploads.websiteUrl}/invoice`, whatsapp, reader, records, limiter: createInvoiceLinkLimiter({ redis, prefix: config.redis.prefix }),
-    }),
+    sender: createInvoiceLinkSender({ whatsapp, reader, records, limiter: createInvoiceLinkLimiter({ redis, prefix: config.redis.prefix }) }),
     reader,
     records,
     uploadLimiter: createInvoiceUploadLimiter({ perHour: uploads.maxPerHour, perDay: uploads.maxPerDay, redis, prefix: config.redis.prefix }),
