@@ -380,6 +380,8 @@ module.exports = function agentToolsRouter({ crm, invoiceLinks, now = () => Date
   // sent on WhatsApp. The upload page reads the invoice, finds the order and links the caller's requests to it.
   router.post('/invoice-upload-link', async (req, res) => {
     const body = req.body || {};
+
+    console.log('invoice-upload-link', body);
     const phone = normalizePhone(body.phone);
     if (!phone || !/^\+91[6-9]\d{9}$/.test(phone)) {
       return res.json({ sent: false, message: 'A valid 10 digit Indian mobile number that is on WhatsApp is needed. Ask for it.' });

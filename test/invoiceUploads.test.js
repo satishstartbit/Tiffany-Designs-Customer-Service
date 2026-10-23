@@ -96,6 +96,20 @@ test('send_invoice_upload_link notes the number and sends the WhatsApp event wit
   }], 'the integration refuses any other field; the page address is in its message template');
 });
 
+test('an event without an enabled WhatsApp template is reported as that, not as a generic refusal', async () => {
+  const fetchImpl = async () => ({
+    ok: false,
+    status: 409,
+    text: async () => JSON.stringify({ error: 'Configure and enable an approved template for this event in Management → Voice agent API.', code: 'VOICE_EVENT_NOT_CONFIGURED' }),
+  });
+  const whatsapp = createWhatsApp({ eventsUrl: 'https://wa.example.test/events', apiKey: 'k', fetchImpl });
+  await assert.rejects(whatsapp.sendInvoiceUploadLink({ phone: '+919876543210', customerName: 'Asha' }), (err) => {
+    assert.equal(err.code, 'VOICE_EVENT_NOT_CONFIGURED');
+    assert.match(err.message, /no approved template enabled for the event invoice_upload_requested: enable one in the WhatsApp integration \(Management → Voice agent API\)/);
+    return true;
+  });
+});
+
 test('the link needs a valid Indian mobile, goes to one number at most 3 times a day, and fails softly', async (t) => {
   const { api, factory } = linkServices();
   const srv = await startTestServer({ invoices: factory });

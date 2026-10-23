@@ -10,7 +10,13 @@ function createWhatsApp({ eventsUrl, apiKey, fetchImpl = (...args) => fetch(...a
     });
     if (!res.ok) {
       const detail = await res.text().catch(() => '');
-      throw new Error(`WhatsApp event ${body.event} refused (${res.status})${detail ? `: ${detail.slice(0, 300)}` : ''}`);
+      let answer = null;
+      try { answer = JSON.parse(detail); } catch { /* not JSON */ }
+      const err = new Error(answer?.code === 'VOICE_EVENT_NOT_CONFIGURED'
+        ? `WhatsApp has no approved template enabled for the event ${body.event}: enable one in the WhatsApp integration (Management → Voice agent API)`
+        : `WhatsApp event ${body.event} refused (${res.status})${detail ? `: ${detail.slice(0, 300)}` : ''}`);
+      err.code = answer?.code || null;
+      throw err;
     }
     return res.json().catch(() => ({}));
   }
