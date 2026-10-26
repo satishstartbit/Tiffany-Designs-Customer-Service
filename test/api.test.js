@@ -1067,9 +1067,9 @@ test.describe('website call widget', () => {
     t.after(s.close);
     const link = { url: 'wss://apps.sarvam.test/session?token=t1', reference_id: 'ref-1', expires_at: '2026-10-14T07:00:00Z' };
     const known = await s.call('GET', `${sessionPath}?interaction_type=call`, { headers: { 'X-Caller-Phone': '98765 43210' } });
-    assert.deepEqual(known.body, { ...link, caller: { first_name: 'Aarav' } });
+    assert.deepEqual(known.body, { ...link, caller: { phone: '+919876543210', first_name: 'Aarav' } });
     const unknown = await s.call('GET', `${sessionPath}?interaction_type=call`, { headers: { 'X-Caller-Phone': '9123456780' } });
-    assert.deepEqual(unknown.body.caller, { first_name: null });
+    assert.deepEqual(unknown.body.caller, { phone: '+919123456780', first_name: null });
     const none = await s.call('GET', `${sessionPath}?interaction_type=call`);
     assert.deepEqual(none.body, link, 'without a number the answer is Sarvam’s as it is');
 

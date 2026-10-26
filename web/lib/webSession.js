@@ -72,13 +72,18 @@ export async function startWebSession(
   if (res.ok) await limiter.record(ip);
   const retryAfter = res.headers.get('retry-after');
   const number = callerPhone(phone);
-  if (res.ok && number && lookupCaller) {
+  if (res.ok && number) {
+    let link;
     try {
-      const firstName = await lookupCaller(number);
-      return reply(res.status, { ...JSON.parse(body), caller: { first_name: firstName } });
-    } catch (err) {
-      logger.error(`Looking up the web caller failed: ${err.message}`);
+      link = JSON.parse(body);
+    } catch {
+      return reply(res.status, body);
     }
+    // The page sends the number on to the agent as customer_phone, and the name as customer_name.
+    const firstName = lookupCaller
+      ? await lookupCaller(number).catch((err) => { logger.error(`Looking up the web caller failed: ${err.message}`); return null; })
+      : null;
+    return reply(res.status, { ...link, caller: { phone: number, first_name: firstName } });
   }
   return reply(res.status, body, retryAfter ? { 'Retry-After': retryAfter } : {});
 }

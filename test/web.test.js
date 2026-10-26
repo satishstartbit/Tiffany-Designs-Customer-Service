@@ -58,16 +58,16 @@ test('with the number the customer typed, the call link also names the customer\
   );
 
   const known = await session({ phone: '73575 58134' });
-  assert.deepEqual(JSON.parse(known.body), { ...JSON.parse(LINK), caller: { first_name: 'Satish' } });
+  assert.deepEqual(JSON.parse(known.body), { ...JSON.parse(LINK), caller: { phone: '+917357558134', first_name: 'Satish' } });
   assert.deepEqual(asked, ['+917357558134'], 'looked up in +91 form');
-  assert.deepEqual(JSON.parse((await session({ phone: '9123456780' })).body).caller, { first_name: null }, 'an unknown number gets no name');
+  assert.deepEqual(JSON.parse((await session({ phone: '9123456780' })).body).caller, { phone: '+919123456780', first_name: null }, 'an unknown number gets no name');
 
   assert.equal((await session({ phone: null })).body, LINK, 'no number, no lookup');
   assert.equal((await session({ phone: '12345' })).body, LINK, 'nor for something that is not a mobile number');
   assert.equal((await session({ phone: '7357558134' }, { fetchImpl: fakeSarvam(429, '{"detail":"slow down"}').fetchImpl })).status, 429);
   assert.equal(asked.length, 2, 'nobody is looked up without a call link');
   const broken = await session({ phone: '7357558134' }, { lookupCaller: async () => { throw new Error('Node is asleep'); } });
-  assert.equal(broken.body, LINK, 'a failed lookup still starts the call');
+  assert.deepEqual(JSON.parse(broken.body), { ...JSON.parse(LINK), caller: { phone: '+917357558134', first_name: null } }, 'a failed lookup still starts the call, with the number');
 });
 
 test('only the Tiffany agent can be reached, and nothing works without a key', async () => {
@@ -186,7 +186,8 @@ test('the mobile number typed above the widget goes into the call as customer_ph
   const widget = fs.readFileSync(path.join(WEB, 'components', 'VoiceAgent.js'), 'utf8');
   assert.match(widget, /WebSocket\.prototype\.send = function send\(data\) \{\n\s+const sent = withCallerPhone\(data, callerRef\.current, callerNameRef\.current\);/);
   assert.match(widget, /headers\.set\('X-Caller-Phone', callerRef\.current\);/, 'the call link request carries the number for the lookup');
-  assert.match(widget, /callerNameRef\.current = await res\.clone\(\)\.json\(\)\.then\(\(answer\) => answer\?\.caller\?\.first_name \|\| null\)/);
+  assert.match(widget, /const caller = await res\.clone\(\)\.json\(\)\.then\(\(answer\) => answer\?\.caller \|\| null\)/);
+  assert.match(widget, /callerNameRef\.current = caller\?\.first_name \|\| null;/);
   assert.match(widget, /WebSocket\.prototype\.send = nativeSend;/, 'the browser\'s own send comes back when the widget goes away');
   assert.match(widget, /id: 'caller-mobile'/, 'the field is in the widget\'s panel');
   assert.match(widget, /if \(field\.block\.nextElementSibling !== button\) button\.before\(field\.block\);/, 'right above its call button');

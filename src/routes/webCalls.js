@@ -67,14 +67,22 @@ module.exports = function webCallsRouter({ sarvam, config, limiter, crm, logger 
       if (upstream.retryAfter) res.set('Retry-After', upstream.retryAfter);
       res.set('Cache-Control', 'no-store');
       const phone = normalizePhone(req.get('x-caller-phone'));
-      if (linked && crm && phone && /^\+91[6-9]\d{9}$/.test(phone)) {
+      if (linked && phone && /^\+91[6-9]\d{9}$/.test(phone)) {
+        let link;
         try {
-          const contact = await crm.findContactByPhone(phone);
-          const firstName = contact ? contact.firstName || String(contact.name || '').trim().split(/\s+/)[0] || null : null;
-          return res.status(upstream.status).json({ ...JSON.parse(upstream.body), caller: { first_name: firstName } });
+          link = JSON.parse(upstream.body);
+        } catch {
+          return res.status(upstream.status).type('application/json').send(upstream.body);
+        }
+        // The page sends the number on to the agent as customer_phone, and the name as customer_name.
+        let firstName = null;
+        try {
+          const contact = crm ? await crm.findContactByPhone(phone) : null;
+          firstName = contact ? contact.firstName || String(contact.name || '').trim().split(/\s+/)[0] || null : null;
         } catch (err) {
           logger.error(`Looking up the web caller failed: ${err.message}`);
         }
+        return res.status(upstream.status).json({ ...link, caller: { phone, first_name: firstName } });
       }
       return res.status(upstream.status).type('application/json').send(upstream.body);
     } catch (err) {

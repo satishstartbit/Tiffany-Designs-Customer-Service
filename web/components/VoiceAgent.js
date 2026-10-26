@@ -173,7 +173,9 @@ export default function VoiceAgent() {
       try {
         const res = await nativeFetch.call(window, input, { ...init, headers });
         if (res.ok) {
-          callerNameRef.current = await res.clone().json().then((answer) => answer?.caller?.first_name || null).catch(() => null);
+          const caller = await res.clone().json().then((answer) => answer?.caller || null).catch(() => null);
+          if (caller?.phone) callerRef.current = caller.phone;
+          callerNameRef.current = caller?.first_name || null;
           show(callerNameRef.current
             ? `Hello ${callerNameRef.current}, you are connected. Allow the microphone if your browser asks, then start speaking.`
             : 'Connected. Allow the microphone if your browser asks, then start speaking.');
