@@ -1,6 +1,6 @@
 const express = require('express');
 const { normalizePhone, lastTenDigits } = require('../rules');
-const { VARS, CALL_REASONS, NOTICE_EVENTS, outboundOverrides, noticeFor, noticeJobId } = require('../callFlows');
+const { VARS, CALL_REASONS, NOTICE_EVENTS, outboundOverrides, outboundVariables, noticeFor, noticeJobId } = require('../callFlows');
 
 const INDIAN_MOBILE = /^\+91[6-9]\d{9}$/;
 
@@ -47,12 +47,11 @@ module.exports = function callsRouter({ crm, sarvam, scheduler, config, now, lim
     }
 
     const customerName = name || contact?.name || null;
-    const variables = {
+    const variables = outboundVariables(CALL_REASONS.callbackRequest, customerName, {
       [VARS.customerName]: customerName,
       [VARS.customerPhone]: phone,
       [VARS.orderNumber]: orderNumber,
-      [VARS.callReason]: CALL_REASONS.callbackRequest,
-    };
+    });
     const overrides = outboundOverrides(CALL_REASONS.callbackRequest, customerName);
     const identifier = `callback:${phone}`;
 

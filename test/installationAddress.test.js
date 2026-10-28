@@ -177,6 +177,6 @@ test('book_installation with at_delivery_address registers the request at the de
     headers: s.agent,
   });
   assert.equal(res.body.created, true);
-  assert.match(res.body.message, /^Installation request 1200 is registered at the delivery address with a preferred slot of Saturday, 17 October, morning\./);
+  assert.match(res.body.message, /^Installation request 1200 is registered at the delivery address with a preferred slot of Saturday, 17 October, in the morning, between 10 am and 12 pm\./);
   assert.equal(savedCase(salesforce).Service_City__c, 'Jaipur');
 });

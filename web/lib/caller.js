@@ -10,14 +10,19 @@ export function callerPhone(value) {
 // The widget's first message on a new call. It carries the agent's call variables, so the number is added there.
 export const CALL_START = 'client.action.interaction_start';
 
-// The message as the widget would send it, with customer_phone (and customer_name, when the number belongs to a
-// customer) added when this is the call-start message.
+// The agent's short welcome on a website call (its opening_line), by first name when the number is a customer's.
+export function openingLine(name = null) {
+  return `Namaste${name ? ` ${name} ji` : ''}, welcome to Tiffany Designs. I'm the AI service assistant. Hindi or English?`;
+}
+
+// The message as the widget would send it, with customer_phone, the welcome as opening_line, and customer_name when
+// the number belongs to a customer, added when this is the call-start message.
 export function withCallerPhone(data, phone, name = null) {
   if (!phone || typeof data !== 'string' || !data.includes(CALL_START)) return data;
   try {
     const message = JSON.parse(data);
     if (message.type !== CALL_START) return data;
-    const known = { customer_phone: phone, ...(name ? { customer_name: name } : {}) };
+    const known = { customer_phone: phone, opening_line: openingLine(name), ...(name ? { customer_name: name } : {}) };
     return JSON.stringify({ ...message, agent_variables: { ...message.agent_variables, ...known } });
   } catch {
     return data;

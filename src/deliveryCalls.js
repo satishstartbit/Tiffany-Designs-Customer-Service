@@ -11,7 +11,7 @@ const MINUTE_MS = 60 * 1000;
 // Sarvam ignores app_overrides.initial_bot_message while the agent has a translated greeting, so the agent's English
 // greeting is the variable opening_line and the call starts in English.
 function openingLine(customerName) {
-  const intro = 'Hello, this is the Tiffany Designs service assistant, calling about your recent Tiffany Designs delivery.';
+  const intro = 'Hello, this is the Tiffany Designs AI service assistant, calling about your recent delivery.';
   return `${intro} ${customerName ? `Am I speaking with ${customerName}?` : 'May I know who I am speaking with?'}`;
 }
 

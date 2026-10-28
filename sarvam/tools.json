@@ -1,33 +1,52 @@
 {
   "agent_id": "Tiffany-Des-4ab4474a-620f",
   "agent_note": "The stage agent named by SARVAM_AGENT_ID in .env (Tiffany Designs Customer Service Stage). The earlier agent Tiffany-Des-0db8e21d-e099 still exists, with its own older tools calling https://tiffany-designs-customer-service.onrender.com/.",
-  "committed_version": 5,
-  "draft_version": 6,
+  "committed_version": 7,
+  "draft_version": 8,
   "current_base_url": "https://tiffany-designs-customer-service-1.onrender.com/",
   "base_url_note": "The server is deployed on Render. Every tool calls current_base_url + path; change all of them together if the server moves.",
   "auth_header": "x-agent-secret (AGENT_TOOL_SECRET in .env and on Render)",
   "tools": [
-    { "name": "find_customer", "id": "22fba56a-c344-4374-83d8-ffdd178fda07", "path": "/api/agent/customer-lookup", "modules": [3] },
-    { "name": "find_order", "id": "735a3859-ddc7-47d9-8f20-c6d03be003f3", "path": "/api/agent/order-lookup", "modules": [4, 15] },
-    { "name": "find_parts", "id": "9ff7bc30-7ecc-41a8-b7ac-ee7013c3e0dd", "path": "/api/agent/part-lookup", "modules": [7] },
-    { "name": "resolve_date", "id": "7e1b5ec9-7042-4c2a-8026-808be20c9bfa", "path": "/api/agent/resolve-date", "modules": [6] },
-    { "name": "register_service_request", "id": "d4644356-dd1b-4e0c-8d96-5e3b4f6e6b19", "path": "/api/agent/cases", "modules": [5, 7, 8, 9, 12] },
-    { "name": "book_installation", "id": "594ff73c-8bd6-4c59-aded-ba6ee6101a79", "path": "/api/agent/installation", "modules": [6, 8, 9] },
-    { "name": "request_human_callback", "id": "5963b4f5-ee89-47a1-ab47-974485669f48", "path": "/api/agent/escalate", "modules": [10] },
-    { "name": "check_request_status", "id": "50dc24c8-b7ef-428e-8576-7ebdc350ac8f", "path": "/api/agent/case-status", "modules": [11, 13] },
-    { "name": "find_products", "id": "8d13424c-8d93-406b-9ed2-01388164bbc0", "path": "/api/agent/products", "modules": ["phone orders"] },
-    { "name": "place_order", "id": "e2f10040-47a0-488d-a72c-91594f0c2e14", "path": "/api/agent/orders", "modules": ["phone orders"] },
-    { "name": "check_service_hours", "id": "2b222a05-3463-4421-a72f-88537e043fc7", "path": "/api/agent/service-hours", "modules": [2, 10] },
-    { "name": "save_customer_details", "id": "3ca3d77f-5a14-4b4a-a43d-20939297f282", "path": "/api/agent/customer", "modules": [3] },
-    { "name": "check_service_area", "id": "85506438-8e76-44ba-8c17-d6b6cd51c7e1", "path": "/api/agent/service-area", "modules": [9] },
-    { "name": "get_service_history", "id": "5ea27f68-ee80-45e0-bcf8-9c94b21c17cd", "path": "/api/agent/history", "modules": [14] },
-    { "name": "get_details_on_file", "id": "573115f7-102a-495a-9af9-804d7763eb7f", "path": "/api/agent/details-on-file", "modules": [5, 6, 7, 8, 10] },
+    { "name": "find_customer", "id": "655854cc-fe09-4a56-abba-b057ce810332", "path": "/api/agent/customer-lookup", "modules": [3] },
+    { "name": "find_order", "id": "1c9c8ccb-79b6-4da0-9cf1-2cd5085fe176", "path": "/api/agent/order-lookup", "modules": [4, 15] },
+    { "name": "find_parts", "id": "3e44e321-5fcf-48c2-be5c-a6376a2c034b", "path": "/api/agent/part-lookup", "modules": [7] },
+    {
+      "name": "resolve_date",
+      "id": "a50c6b9f-c741-4a7e-ab51-3f239ac14d65",
+      "path": "/api/agent/resolve-date",
+      "modules": [6],
+      "status": "To push: an optional string parameter time_text (the installation time as the customer said it). Without it the server still refuses Sundays and today after visiting hours; the answer now also has a time field."
+    },
+    { "name": "register_service_request", "id": "94fc9db7-9f31-477e-a02e-b52ce16d730a", "path": "/api/agent/cases", "modules": [5, 7, 8, 9, 12] },
+    {
+      "name": "book_installation",
+      "id": "9794dbb4-aae2-40a2-972e-9f955938dd3e",
+      "path": "/api/agent/installation",
+      "modules": [6, 8, 9],
+      "status": "The server now requires preferred_time and refuses a slot outside Monday to Saturday, 10 am to 6 pm, or already passed; mark preferred_time required on the tool when it is next edited."
+    },
+    { "name": "request_human_callback", "id": "a716fb3b-ff0b-41b6-951b-eca69f642d1b", "path": "/api/agent/escalate", "modules": [10] },
+    { "name": "check_request_status", "id": "f02e88dd-54b7-4bda-8de4-f0d9ee53d87e", "path": "/api/agent/case-status", "modules": [11, 13] },
+    { "name": "find_products", "id": "8680b54a-e2cf-4e5d-b03b-3c70d75c5226", "path": "/api/agent/products", "modules": ["phone orders"] },
+    { "name": "place_order", "id": "71ca9262-9451-4991-ab42-bb3f22a4ba06", "path": "/api/agent/orders", "modules": ["phone orders"] },
+    { "name": "check_service_hours", "id": "dbd429aa-282b-4537-ae1c-641fecb9ab2e", "path": "/api/agent/service-hours", "modules": [2, 10] },
+    { "name": "save_customer_details", "id": "46cf574c-adeb-4aa8-9a9d-59158968e0a2", "path": "/api/agent/customer", "modules": [3] },
+    { "name": "check_service_area", "id": "5907d60f-64d4-4a3c-adb9-1df7ac569e78", "path": "/api/agent/service-area", "modules": [9] },
+    { "name": "get_service_history", "id": "817db7bf-fd44-4c43-b43f-18ab0941f740", "path": "/api/agent/history", "modules": [14] },
+    { "name": "get_details_on_file", "id": "819fd794-820a-46e8-b8ec-9ab329b7b049", "path": "/api/agent/details-on-file", "modules": [5, 6, 7, 8, 10] },
     {
       "name": "send_invoice_upload_link",
-      "id": "bc81d67e-a28e-47f0-be9d-78d4d4d52ee6",
+      "id": "197ed1e2-d012-447e-97c8-cb67b36612cc",
       "path": "/api/agent/invoice-upload-link",
       "modules": [4, 6],
       "status": "Created in draft 6 on 2026-10-23, with Phase 15 and the reordered Phase 6 in the prompt. Body params: phone (required), customer_name, order_reference. Sends the WhatsApp event with phone_number and customer_name only; the integration's template carries the link to the website's /invoice page. Answers 404 until the server code is deployed to Render."
+    },
+    {
+      "name": "get_product_guide",
+      "id": "5ff84689-7a4b-44ab-87fb-4fb1d4e825c4",
+      "path": "/api/agent/product-guide",
+      "modules": [7],
+      "status": "Created and committed in version 7 on 2026-10-27, with the part-by-part Phase 7 and a Facts line. Body params: order_id, order_number, invoice_number, product_name, phone (all optional; an order reference or a product name is needed). Reads the published Product_Guide__c of the products on the order. Answers 404 until the server code is deployed to Render; the agent then falls back to find_parts."
     },
     {
       "name": "get_installation_address",
@@ -37,5 +56,5 @@
       "status": "Endpoint written; the Sarvam tool is not created on this agent. Body params: order_id, order_number, invoice_number (all optional strings, one is needed). Also to push: book_installation gets at_delivery_address (boolean), and book_installation and register_service_request get new_request (boolean)."
     }
   ],
-  "ids_note": "Each version holds its own copy of the tools; id is the editable draft (version 6). agent-prompt.md has sections the live prompt does not have yet (Phase 0 language, the installation address flow of Phase 6, the repeat request check of Phase 5 step 7); changes are pushed to the live prompt section by section."
+  "ids_note": "Each version holds its own copy of the tools; id is the editable draft (version 8). agent-prompt.md has sections the live prompt does not have yet (Phase 0 language, the installation address flow of Phase 6, the repeat request check of Phase 5 step 7); changes are pushed to the live prompt section by section."
 }

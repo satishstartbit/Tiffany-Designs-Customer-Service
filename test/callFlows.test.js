@@ -51,6 +51,7 @@ test('the service update job dials the notification campaign with the update tex
     order_number: 'TD-ORD-1001',
     call_reason: 'service_update',
     notice_details: 'Update text.',
+    opening_line: 'Hello, this is the Tiffany Designs AI service assistant. Am I speaking with Aarav Sharma?',
   });
   assert.match(users[0].overrides.initial_bot_message, /Am I speaking with Aarav Sharma\?$/);
 });

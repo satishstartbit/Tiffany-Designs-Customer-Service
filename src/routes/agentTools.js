@@ -2,10 +2,30 @@ const express = require('express');
 const { normalizePhone, normalizeIssueType, namesMatch, lastTenDigits, sameReference } = require('../rules');
 const { formatDate, formatDateTime, formatClock, describeWeek, spokenCaseNumber, shortName } = require('../speech');
 const { resolveDate, todayInIst, MAX_DAYS_AHEAD } = require('../dates');
+const { checkInstallationDay, checkInstallationSlot, INSTALLATION_HOURS } = require('../installationSlots');
 const { formatRupees } = require('../crm/orderItems');
+const { guideMessage } = require('../crm/productGuides');
 
 const MAX_PRODUCTS_SPOKEN = 5;
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+// What a tool answers when Salesforce or another service fails mid-call: the fields the agent saves to variables,
+// empty, and what to do next. Tools that register something say nothing was registered, so the retry is safe.
+const UNANSWERED = {
+  '/resolve-date': { valid: false, date: null, spoken_date: null, time: null },
+  '/cases': { created: false, case_number: null },
+  '/installation': { created: false, case_number: null },
+  '/escalate': { created: false, case_number: null },
+  '/orders': { created: false, order_number: null },
+  '/invoice-upload-link': { sent: false },
+  '/customer': { saved: false, new_customer: null },
+  '/service-area': { valid: false, route: null },
+  '/service-hours': { open: null, next_open: null },
+};
+const REGISTERING = ['/cases', '/installation', '/escalate', '/orders', '/customer'];
+const AFTER_SECOND_FAILURE = {
+  '/orders': 'call tool:request_human_callback with the confirmed products, their quantities and the delivery city.',
+};
 
 // Call dispositions written by the call-end webhook, as a phrase the agent can say.
 const CALL_OUTCOMES = {
@@ -123,20 +143,40 @@ function caseResponse(res, result, successMessage) {
 }
 
 // Endpoints the Sarvam agent calls mid-conversation as API tools.
-// Responses are flat, snake_case and include a short `message` the agent can relay.
+// Responses are flat, snake_case and include a short `message` the agent can relay, with what to ask next when
+// something is missing. Every answer is HTTP 200, failures included (see UNANSWERED).
 // `invoiceLinks` (src/invoiceLinks.js) sends invoice upload links; without it the link tool says none can be sent.
-module.exports = function agentToolsRouter({ crm, invoiceLinks, now = () => Date.now() }) {
+module.exports = function agentToolsRouter({ crm, invoiceLinks, productGuides, now = () => Date.now(), logger = console }) {
   const router = express.Router();
 
-  // The model does no calendar arithmetic; every spoken date is resolved here, in IST.
+  // The model does no calendar arithmetic; every spoken date is resolved here, in IST. The dates are installation
+  // dates, so the visiting days and hours apply (src/installationSlots.js); with `time_text` the time is checked too.
   router.post('/resolve-date', (req, res) => {
-    const resolved = resolveDate(req.body?.date_text, now());
-    if (!resolved.ok) return res.json({ valid: false, date: null, spoken_date: null, message: dateProblem(resolved) });
+    const body = req.body || {};
+    const refuse = (message) => res.json({ valid: false, date: null, spoken_date: null, time: null, message });
+    const resolved = resolveDate(body.date_text, now());
+    if (!resolved.ok) return refuse(dateProblem(resolved));
+    const day = checkInstallationDay(resolved.date, now());
+    if (!day.ok) return refuse(day.message);
+    const that = `That is ${resolved.isToday ? 'today, ' : ''}${resolved.spoken}`;
+    const timeText = body.time_text ?? body.preferred_time;
+    if (!String(timeText ?? '').trim()) {
+      return res.json({
+        valid: true,
+        date: resolved.date,
+        spoken_date: resolved.spoken,
+        time: null,
+        message: `${that}. ${day.note || `Installation visits are ${INSTALLATION_HOURS}.`} Use ${resolved.date} as the preferred date.`,
+      });
+    }
+    const slot = checkInstallationSlot(resolved.date, timeText, now());
+    if (!slot.ok) return refuse(slot.message);
     return res.json({
       valid: true,
       date: resolved.date,
       spoken_date: resolved.spoken,
-      message: `That is ${resolved.isToday ? 'today, ' : ''}${resolved.spoken}. Use ${resolved.date} as the preferred date.`,
+      time: slot.text,
+      message: `${that}, ${slot.spoken}. Use ${resolved.date} as the preferred date and ${slot.text} as the preferred time.`,
     });
   });
 
@@ -172,7 +212,12 @@ module.exports = function agentToolsRouter({ crm, invoiceLinks, now = () => Date
     let contact;
     if (phone) {
       contact = await crm.findContactByPhone(phone);
-      if (!contact) return res.json({ found: false, message: 'No customer record matches this number.' });
+      if (!contact) {
+        return res.json({
+          found: false,
+          message: 'No customer record matches this number. Carry on without saying so, and ask for the order id, order number or invoice number when the concern needs an order.',
+        });
+      }
     } else if (customerName && postalCode) {
       const match = await crm.findCustomerByNameAndPin(customerName, postalCode);
       if (match.status === 'invalid') {
@@ -189,8 +234,9 @@ module.exports = function agentToolsRouter({ crm, invoiceLinks, now = () => Date
 
     const orders = contact.accountId ? await crm.findRecentOrdersForAccount(contact.accountId) : [];
     const named = orders.filter((o) => o.erpOrderId);
-    // A caller found by name cannot use the request status tool by mobile, so their open requests come with the answer.
-    const requests = !phone && contact.accountId ? await crm.getCaseStatus({ accountId: contact.accountId }) : [];
+    // The customer's open requests come with the answer, so the agent knows them before asking about the concern.
+    const requests = contact.accountId ? await crm.getCaseStatus({ accountId: contact.accountId }) : [];
+    const firstName = contact.firstName || String(contact.name || '').trim().split(/\s+/)[0] || null;
     const orderLine = named.length
       ? `Recent orders: ${named.map((o) => `${o.erpOrderId}, ${o.deliveryStatus ? o.deliveryStatus.toLowerCase() : 'status unknown'}`).join('; ')}.`
       : 'No order id is on record.';
@@ -201,15 +247,14 @@ module.exports = function agentToolsRouter({ crm, invoiceLinks, now = () => Date
       found: true,
       verified_by: phone ? 'mobile' : 'name_and_pin',
       customer_name: contact.name,
-      first_name: contact.firstName,
+      first_name: firstName,
       city: contact.city,
       recent_orders: named.map((o) => `${o.erpOrderId} (${o.deliveryStatus || 'status unknown'})`).join(', '),
       latest_order_id: named[0]?.erpOrderId || null,
-      message: phone && named.length
-        ? `Customer ${contact.name} found. ${orderLine}`
-        : phone
-          ? `Customer ${contact.name} found, with no order id on record.`
-          : `Customer ${contact.name} found by name and PIN code. ${orderLine}${requestLine}`,
+      open_requests: requests.length,
+      message: phone
+        ? `Customer ${contact.name} found; first name ${firstName}. ${orderLine}${requestLine}`
+        : `Customer ${contact.name} found by name and PIN code. ${orderLine}${requestLine}`,
     });
   });
 
@@ -452,7 +497,7 @@ module.exports = function agentToolsRouter({ crm, invoiceLinks, now = () => Date
   router.post('/part-lookup', async (req, res) => {
     const { order_id: orderId, product_name: productName } = req.body || {};
     if (!orderId && !productName) {
-      return res.json({ found: false, message: 'An order id or a product name is required.' });
+      return res.json({ found: false, message: 'An order id or a product name is needed. Ask which product the part belongs to.' });
     }
     const parts = await crm.findParts({ erpOrderId: orderId, productName });
     if (!parts.length) {
@@ -465,37 +510,73 @@ module.exports = function agentToolsRouter({ crm, invoiceLinks, now = () => Date
     });
   });
 
+  // The published product guide for the products on an order, or for a product the customer names: every part with
+  // its sticker number and part number, the hardware, and the rules for that product, so the agent can go through a
+  // damaged, defective or missing part one part at a time.
+  router.post('/product-guide', async (req, res) => {
+    const body = req.body || {};
+    const noGuide = 'No product guide is on record for this product. Match the part with tool:find_parts instead.';
+    if (!productGuides) return res.json({ found: false, message: noGuide });
+    const { order, problem } = await orderFromReferences(body);
+    if (problem) return res.json({ found: false, message: problem });
+    let productIds;
+    if (order) {
+      productIds = (order.items || []).map((i) => i.productId).filter(Boolean);
+    } else if (String(body.product_name || '').trim()) {
+      productIds = await productGuides.findProductIds(body.product_name);
+    } else {
+      return res.json({ found: false, message: 'An order id, order number or invoice number, or the product name, is needed.' });
+    }
+    const guides = await productGuides.publishedFor(productIds);
+    if (!guides.length) return res.json({ found: false, message: noGuide });
+    return res.json({
+      found: true,
+      products: guides.map((g) => ({
+        product: g.productName,
+        parts_have_number_stickers: Boolean(g.partsHaveNumberStickers),
+        parts: g.parts.map((p) => ({ name: p.name, part_number: p.partNumber })),
+      })),
+      message: guides.map(guideMessage).join(' '),
+    });
+  });
+
   router.post('/cases', async (req, res) => {
     const issueType = normalizeIssueType(req.body?.issue_type);
-    if (!issueType) return refused(res, 'The issue type is not recognised.');
+    if (!issueType) return refused(res, 'The issue type is not recognised. Call this tool again with the issue type that fits the problem.');
     if (!req.body.description) {
-      return refused(res, 'A short description of the issue is required.');
+      return refused(res, 'A short description of the issue is required. Call this tool again with one sentence describing the problem.');
     }
     const result = await crm.createServiceCase(caseInput(req.body, issueType));
     return caseResponse(res, result, (n) => `Service request ${n} is registered.`);
   });
 
+  // The slot is checked again here, whatever resolve_date said: a weekday from Monday to Saturday, a time from
+  // 10 am to 6 pm, and not already passed. Nothing is registered until it fits.
   router.post('/installation', async (req, res) => {
-    if (!req.body?.preferred_date) {
-      return refused(res, 'A preferred installation date is required.');
+    const body = req.body || {};
+    if (!body.preferred_date) {
+      return refused(res, `A preferred installation date is required. Ask which day suits the customer; visits are ${INSTALLATION_HOURS}.`);
     }
-    const resolved = resolveDate(req.body.preferred_date, now());
+    const resolved = resolveDate(body.preferred_date, now());
     if (!resolved.ok) return refused(res, dateProblem(resolved));
+    const slot = checkInstallationSlot(resolved.date, body.preferred_time, now());
+    if (!slot.ok) return refused(res, slot.message);
 
-    const reschedule = req.body.reschedule === true || req.body.reschedule === 'true';
+    const reschedule = body.reschedule === true || body.reschedule === 'true';
     const result = await crm.createServiceCase(caseInput(
       {
         description: reschedule
-          ? `Customer asked to reschedule installation${req.body.existing_case_number ? ` for request ${req.body.existing_case_number}` : ''}.`
+          ? `Customer asked to reschedule installation${body.existing_case_number ? ` for request ${body.existing_case_number}` : ''}.`
           : 'Customer requested installation.',
-        ...req.body,
+        ...body,
         preferred_date: resolved.date,
+        preferred_time: slot.text,
       },
       reschedule ? 'installation_reschedule' : 'installation',
     ));
-    const slot = [resolved.spoken, req.body.preferred_time].filter(Boolean).join(', ');
     const place = { delivery: ' at the delivery address', customer: ' at the address on file' }[result.addressSource] || '';
-    return caseResponse(res, result, (n) => `Installation request ${n} is registered${place} with a preferred slot of ${slot}. The service team confirms the appointment.`);
+    return caseResponse(res, result, (n) => `Installation request ${n} is registered${place} with a preferred slot of ${resolved.spoken}, ${slot.spoken}. `
+      + 'The service team confirms the appointment.');
   });
 
   router.post('/escalate', async (req, res) => {
@@ -512,10 +593,19 @@ module.exports = function agentToolsRouter({ crm, invoiceLinks, now = () => Date
     let own;
     if (phone) {
       const contact = await crm.findContactByPhone(phone);
-      if (!contact?.accountId) return res.json({ found: false, message: 'No customer record matches this number.' });
+      if (!contact?.accountId) {
+        return res.json({ found: false, message: 'No customer record matches this number. Ask for the request number with the full name, or with the order id the request is about.' });
+      }
       const cases = await crm.getCaseStatus(caseNumber ? { caseNumber } : { accountId: contact.accountId });
       own = cases.filter((c) => c.accountId === contact.accountId);
-      if (!own.length) return res.json({ found: false, message: 'No open service request was found for this customer.' });
+      if (!own.length) {
+        return res.json({
+          found: false,
+          message: caseNumber
+            ? 'No request with that number is on record for this customer. Ask the customer to say the request number again.'
+            : 'No open service request was found for this customer. For closed or earlier requests, use tool:get_service_history.',
+        });
+      }
     } else {
       // Without the mobile: the request number, plus the full name on the request or the order id it is about.
       if (!caseNumber || (!customerName && !orderId)) {
@@ -607,9 +697,9 @@ module.exports = function agentToolsRouter({ crm, invoiceLinks, now = () => Date
   // Module 14: the customer's recent requests, closed ones included, and their recent calls.
   router.post('/history', async (req, res) => {
     const phone = normalizePhone(req.body?.phone);
-    if (!phone) return res.json({ found: false, message: 'A valid phone number is required.' });
+    if (!phone) return res.json({ found: false, message: 'The registered 10 digit mobile number is needed. Ask for it.' });
     const contact = await crm.findContactByPhone(phone);
-    if (!contact) return res.json({ found: false, message: 'No customer record matches this number.' });
+    if (!contact) return res.json({ found: false, message: 'No customer record matches this number. Ask the customer to check the registered mobile number.' });
 
     const history = await crm.getServiceHistory({ accountId: contact.accountId, contactId: contact.id });
     if (!history.cases.length && !history.calls.length) {
@@ -625,6 +715,22 @@ module.exports = function agentToolsRouter({ crm, invoiceLinks, now = () => Date
         requests.length ? `Recent requests: ${requests.join('; ')}.` : 'No earlier requests.',
         calls.length ? `Recent calls: ${calls.join('; ')}.` : null,
       ].filter(Boolean).join(' '),
+    });
+  });
+
+  // A tool whose lookup or save fails (Salesforce down or refusing) still answers with HTTP 200, so the agent
+  // hears what happened and what to do instead of the voice platform's generic failure line.
+  // eslint-disable-next-line no-unused-vars
+  router.use((err, req, res, next) => {
+    logger.error(`Agent tool ${req.path} failed: ${err.message}`);
+    const registering = REGISTERING.includes(req.path);
+    const fallback = AFTER_SECOND_FAILURE[req.path]
+      || (registering ? 'tell the customer the details are noted for the service team, who will follow up.' : 'carry on without this information.');
+    return res.json({
+      ...(UNANSWERED[req.path] || { found: false }),
+      error: 'unavailable',
+      message: `The service system did not answer${registering ? ', so nothing is saved yet' : ''}. `
+        + `Apologise briefly and call this tool once more. When it fails again, ${fallback}`,
     });
   });
 

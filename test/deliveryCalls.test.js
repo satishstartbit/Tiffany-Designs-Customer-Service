@@ -95,8 +95,7 @@ test('an order delivered today is called once, an hour after delivery, and marke
   assert.deepEqual(result.failed, []);
   const [call] = sarvam.started;
   assert.equal(call.phone, '+919876543210');
-  const opening = 'Hello, this is the Tiffany Designs service assistant, calling about your recent Tiffany Designs delivery. '
-    + 'Am I speaking with Aarav Sharma?';
+  const opening = 'Hello, this is the Tiffany Designs AI service assistant, calling about your recent delivery. Am I speaking with Aarav Sharma?';
   assert.deepEqual(call.variables, {
     customer_name: 'Aarav Sharma',
     customer_phone: '+919876543210',

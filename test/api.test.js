@@ -86,6 +86,7 @@ test.describe('delivery follow-up scheduling', () => {
         product_name: 'Demo 3-Door Wardrobe',
         delivery_city: 'Delhi',
         call_reason: 'delivery_followup',
+        opening_line: 'Hello, this is the Tiffany Designs AI service assistant. Am I speaking with Aarav Sharma?',
       },
       overrides: {
         initial_bot_message: 'Hello, this is the Tiffany Designs AI service assistant. Am I speaking with Aarav Sharma?',
@@ -196,8 +197,11 @@ test.describe('customer callback requests (website "call me" panel)', () => {
 
     const [call] = s.sarvam.started;
     assert.equal(call.phone, '+919876543210');
-    assert.deepEqual(call.variables, { customer_name: 'Aarav', customer_phone: '+919876543210', order_number: 'TD-ORD-1001', call_reason: 'callback_request' });
-    assert.equal(call.overrides.initial_bot_message, 'Hello, this is the Tiffany Designs AI service assistant, calling back as requested. Am I speaking with Aarav?');
+    const opening = 'Hello, this is the Tiffany Designs AI service assistant, calling back as requested. Am I speaking with Aarav?';
+    assert.deepEqual(call.variables, {
+      customer_name: 'Aarav', customer_phone: '+919876543210', order_number: 'TD-ORD-1001', call_reason: 'callback_request', opening_line: opening,
+    }, 'the agent greets with opening_line, not the customer care greeting');
+    assert.equal(call.overrides.initial_bot_message, opening);
     assert.deepEqual(call.webhook, {
       url: 'https://voice.example.test/api/webhooks/sarvam?token=hook-token',
       metadata: { identifier: 'callback:+919876543210', source: 'website', record_id: '003gK000015ycGjQAI' },
@@ -388,6 +392,49 @@ test.describe('agent tools used during a call', () => {
     assert.equal(res.body.customer_name, 'Aarav Sharma');
     assert.equal(res.body.recent_orders, 'TD-ORD-1001 (Delivered)');
     assert.equal(res.body.latest_order_id, 'TD-ORD-1001');
+  });
+
+  test('customer lookup by the caller number gives the first name and the open requests', async (t) => {
+    const s = await startTestServer();
+    t.after(s.close);
+    const res = await s.call('POST', '/api/agent/customer-lookup', { body: { phone: '9876543210' }, headers: s.agent });
+    assert.equal(res.body.first_name, 'Aarav');
+    assert.equal(res.body.open_requests, 1);
+    assert.equal(res.body.message,
+      'Customer Aarav Sharma found; first name Aarav. Recent orders: TD-ORD-1001, delivered. Open requests: 1063 for Installation, Appointment Scheduled.');
+    const unknown = await s.call('POST', '/api/agent/customer-lookup', { body: { phone: '9000000000' }, headers: s.agent });
+    assert.match(unknown.body.message, /^No customer record matches this number\. Carry on without saying so/);
+  });
+
+  test('a tool whose lookup or save fails still answers 200, with what to do next', async (t) => {
+    const s = await startTestServer();
+    t.after(s.close);
+    const down = async () => { throw new Error('Salesforce is down'); };
+    s.crm.findContactByPhone = down;
+    s.crm.createServiceCase = down;
+
+    const lookup = await s.call('POST', '/api/agent/customer-lookup', { body: { phone: '9876543210' }, headers: s.agent });
+    assert.equal(lookup.status, 200, 'a non-2xx makes the voice platform speak its generic failure line');
+    assert.deepEqual(lookup.body, {
+      found: false,
+      error: 'unavailable',
+      message: 'The service system did not answer. Apologise briefly and call this tool once more. When it fails again, carry on without this information.',
+    });
+
+    const booking = await s.call('POST', '/api/agent/installation', {
+      headers: s.agent,
+      body: { phone: '9876543210', preferred_date: '2026-10-17', preferred_time: '11 am' },
+    });
+    assert.equal(booking.status, 200);
+    assert.equal(booking.body.created, false);
+    assert.equal(booking.body.case_number, null, 'save_to_variables still finds the field');
+    assert.equal(booking.body.message, 'The service system did not answer, so nothing is saved yet. Apologise briefly and call this tool once more. '
+      + 'When it fails again, tell the customer the details are noted for the service team, who will follow up.');
+
+    s.crm.createOrder = down;
+    const order = await s.call('POST', '/api/agent/orders', { headers: s.agent, body: { phone: '9000000001', items: 'TD-STD-01' } });
+    assert.equal(order.body.order_number, null);
+    assert.match(order.body.message, /When it fails again, call tool:request_human_callback with the confirmed products/);
   });
 
   test('customer lookup reports an unknown number without failing', async (t) => {
@@ -665,17 +712,21 @@ test.describe('agent tools used during a call', () => {
       body: { order_id: 'TD-ORD-1001', phone: '9876543210', preferred_date: '2026-10-17', preferred_time: '11:00' },
     });
     assert.equal(res.status, 200);
-    assert.equal(res.body.message, 'Installation request 1100 is registered with a preferred slot of Saturday, 17 October, 11:00. The service team confirms the appointment.');
+    assert.equal(res.body.message, 'Installation request 1100 is registered with a preferred slot of Saturday, 17 October, at 11 am. The service team confirms the appointment.');
     const [created] = s.crm.created;
     assert.equal(created.input.issueType, 'installation');
     assert.equal(created.input.preferredDate, '2026-10-17');
+    assert.equal(created.input.preferredTime, '11 am');
     assert.equal(created.input.description, 'Customer requested installation.');
   });
 
   test('a reschedule request uses the rescheduling sub-type', async (t) => {
     const s = await startTestServer();
     t.after(s.close);
-    await s.call('POST', '/api/agent/installation', { headers: s.agent, body: { phone: '9876543210', preferred_date: '2026-10-20', reschedule: 'true', existing_case_number: '1062' } });
+    await s.call('POST', '/api/agent/installation', {
+      headers: s.agent,
+      body: { phone: '9876543210', preferred_date: '2026-10-20', preferred_time: '3 pm', reschedule: 'true', existing_case_number: '1062' },
+    });
     assert.equal(s.crm.created[0].input.issueType, 'installation_reschedule');
     assert.equal(s.crm.created[0].input.description, 'Customer asked to reschedule installation for request 1062.');
   });
@@ -684,7 +735,13 @@ test.describe('agent tools used during a call', () => {
     const s = await startTestServer();
     t.after(s.close);
     const ok = await s.call('POST', '/api/agent/resolve-date', { headers: s.agent, body: { date_text: 'tomorrow' } });
-    assert.deepEqual(ok.body, { valid: true, date: '2026-10-15', spoken_date: 'Thursday, 15 October', message: 'That is Thursday, 15 October. Use 2026-10-15 as the preferred date.' });
+    assert.deepEqual(ok.body, {
+      valid: true,
+      date: '2026-10-15',
+      spoken_date: 'Thursday, 15 October',
+      time: null,
+      message: 'That is Thursday, 15 October. Installation visits are Monday to Saturday, 10 am to 6 pm. Use 2026-10-15 as the preferred date.',
+    });
 
     const past = await s.call('POST', '/api/agent/resolve-date', { headers: s.agent, body: { date_text: '1 October 2026' } });
     assert.equal(past.status, 200);
@@ -701,7 +758,8 @@ test.describe('agent tools used during a call', () => {
     const res = await s.call('POST', '/api/agent/installation', { headers: s.agent, body: { phone: '9876543210', preferred_date: 'tomorrow', preferred_time: 'morning' } });
     assert.equal(res.body.created, true);
     assert.equal(s.crm.created[0].input.preferredDate, '2026-10-15');
-    assert.match(res.body.message, /preferred slot of Thursday, 15 October, morning\./);
+    assert.equal(s.crm.created[0].input.preferredTime, 'morning, 10 am to 12 pm');
+    assert.match(res.body.message, /preferred slot of Thursday, 15 October, in the morning, between 10 am and 12 pm\./);
   });
 
   test('installation booking refuses a past date without creating a case', async (t) => {
@@ -831,7 +889,7 @@ test.describe('agent tools used during a call', () => {
       + 'Recent calls: Tuesday, 13 October, outbound call, the delivery was confirmed; Saturday, 10 October, inbound call, not answered.');
 
     const nobody = await s.call('POST', '/api/agent/history', { headers: s.agent, body: { phone: '9000000009' } });
-    assert.deepEqual(nobody.body, { found: false, message: 'No customer record matches this number.' });
+    assert.deepEqual(nobody.body, { found: false, message: 'No customer record matches this number. Ask the customer to check the registered mobile number.' });
     const noHistory = await s.call('POST', '/api/agent/history', { headers: s.agent, body: { phone: '9820011111' } });
     assert.deepEqual(noHistory.body, { found: false, message: 'No earlier requests or calls are on record for this number.' });
   });

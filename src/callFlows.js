@@ -9,6 +9,7 @@ const VARS = {
   deliveryCity: 'delivery_city',
   callReason: 'call_reason',
   noticeDetails: 'notice_details',
+  openingLine: 'opening_line',
 };
 
 const CALL_REASONS = {
@@ -30,8 +31,14 @@ function openingLine(reason, customerName) {
   return reason === CALL_REASONS.callbackRequest ? `${intro}, calling back as requested. ${who}` : `${intro}. ${who}`;
 }
 
+// Sarvam speaks the agent's greeting, whose English text is {{opening_line}}, and ignores initial_bot_message
+// while that greeting exists; both are sent so the line is right either way.
 function outboundOverrides(reason, customerName) {
   return { initial_bot_message: openingLine(reason, customerName), initial_language_name: 'English' };
+}
+
+function outboundVariables(reason, customerName, variables) {
+  return { ...variables, [VARS.callReason]: reason, [VARS.openingLine]: openingLine(reason, customerName) };
 }
 
 // The update the agent reads out on a service_update call, or null when the case lacks the data for it.
@@ -71,14 +78,13 @@ function createJobHandlers({ sarvam, config }) {
         {
           phone: payload.phone,
           identifier: `order:${payload.orderId}`,
-          variables: {
+          variables: outboundVariables(CALL_REASONS.deliveryFollowUp, payload.customerName, {
             [VARS.customerName]: payload.customerName,
             [VARS.customerPhone]: payload.phone,
             [VARS.orderNumber]: payload.erpOrderId,
             [VARS.productName]: payload.productName,
             [VARS.deliveryCity]: payload.city,
-            [VARS.callReason]: CALL_REASONS.deliveryFollowUp,
-          },
+          }),
           overrides: outboundOverrides(CALL_REASONS.deliveryFollowUp, payload.customerName),
         },
       ]);
@@ -89,13 +95,12 @@ function createJobHandlers({ sarvam, config }) {
         {
           phone: payload.phone,
           identifier: `case:${payload.caseId}`,
-          variables: {
+          variables: outboundVariables(CALL_REASONS.serviceUpdate, payload.customerName, {
             [VARS.customerName]: payload.customerName,
             [VARS.customerPhone]: payload.phone,
             [VARS.orderNumber]: payload.erpOrderId,
-            [VARS.callReason]: CALL_REASONS.serviceUpdate,
             [VARS.noticeDetails]: payload.notice,
-          },
+          }),
           overrides: outboundOverrides(CALL_REASONS.serviceUpdate, payload.customerName),
         },
       ]);
@@ -110,6 +115,7 @@ module.exports = {
   followUpJobId,
   openingLine,
   outboundOverrides,
+  outboundVariables,
   noticeFor,
   noticeJobId,
   createJobHandlers,

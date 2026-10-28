@@ -2,6 +2,7 @@ const config = require('./config');
 const { salesforce, sfRequest } = require('./salesforce');
 const { createCrm } = require('./crm/crm');
 const { createConsoleData } = require('./crm/console');
+const { createProductGuides } = require('./crm/productGuides');
 const { createDeliveredOrders } = require('./crm/deliveredOrders');
 const { createDeliveryCalls } = require('./deliveryCalls');
 const { createSarvamClient } = require('./sarvam');
@@ -89,6 +90,7 @@ function buildServer() {
     consoleData,
     deliveryCalls,
     invoices,
+    productGuides: createProductGuides({ salesforce }),
     checkSalesforce: async () => {
       const limits = await sfRequest('/limits');
       return { dailyApiRequests: limits.DailyApiRequests };

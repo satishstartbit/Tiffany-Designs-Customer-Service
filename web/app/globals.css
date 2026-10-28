@@ -521,6 +521,21 @@ h3 {
   font-weight: 500;
 }
 
+.check {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  min-height: 38px;
+  color: var(--ink);
+  font-size: 14px;
+}
+
+.check input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--ink);
+}
+
 /* Left-aligned, so the voice agent's button at the bottom right never covers them. */
 .form-actions {
   display: flex;

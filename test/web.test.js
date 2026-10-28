@@ -164,19 +164,25 @@ test('the page uses the site\'s own endpoint by default and holds no key', () =>
 });
 
 test('the mobile number typed above the widget goes into the call as customer_phone, and nothing else changes', async () => {
-  const { callerPhone, withCallerPhone, CALL_START } = await load('caller.js');
+  const { callerPhone, withCallerPhone, openingLine, CALL_START } = await load('caller.js');
   for (const [typed, phone] of [['98765 43210', '+919876543210'], ['+91 98765-43210', '+919876543210'], ['098765 43210', '+919876543210'],
     ['12345', null], ['5876543210', null], ['', null]]) {
     assert.equal(callerPhone(typed), phone, typed);
   }
   const start = JSON.stringify({ type: CALL_START, origin: 'client', timestamp: 1 });
+  const welcome = "Namaste, welcome to Tiffany Designs. I'm the AI service assistant. Hindi or English?";
+  assert.equal(openingLine(), welcome);
   assert.deepEqual(JSON.parse(withCallerPhone(start, '+919876543210')), {
-    type: CALL_START, origin: 'client', timestamp: 1, agent_variables: { customer_phone: '+919876543210' },
+    type: CALL_START, origin: 'client', timestamp: 1, agent_variables: { customer_phone: '+919876543210', opening_line: welcome },
   });
   const withVariables = JSON.stringify({ type: CALL_START, agent_variables: { call_reason: 'inbound' } });
-  assert.deepEqual(JSON.parse(withCallerPhone(withVariables, '+919876543210')).agent_variables, { call_reason: 'inbound', customer_phone: '+919876543210' });
-  assert.deepEqual(JSON.parse(withCallerPhone(start, '+919876543210', 'Satish')).agent_variables, { customer_phone: '+919876543210', customer_name: 'Satish' },
-    'a known customer\'s first name goes in as customer_name');
+  assert.deepEqual(JSON.parse(withCallerPhone(withVariables, '+919876543210')).agent_variables,
+    { call_reason: 'inbound', customer_phone: '+919876543210', opening_line: welcome });
+  assert.deepEqual(JSON.parse(withCallerPhone(start, '+919876543210', 'Satish')).agent_variables, {
+    customer_phone: '+919876543210',
+    opening_line: "Namaste Satish ji, welcome to Tiffany Designs. I'm the AI service assistant. Hindi or English?",
+    customer_name: 'Satish',
+  }, 'a known customer is welcomed by first name, which also goes in as customer_name');
   assert.equal(withCallerPhone(start, null), start, 'no number, no change');
   const audio = JSON.stringify({ type: 'client.media.audio_chunk', audio_base64: 'AAAA' });
   assert.equal(withCallerPhone(audio, '+919876543210'), audio, 'only the call-start message');

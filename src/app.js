@@ -14,8 +14,10 @@ const invoiceUploadsRouter = require('./routes/invoiceUploads');
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 
 // `invoices` ({ sender, reader, records, uploadLimiter }) turns on invoice upload links and the upload API.
+// `productGuides` (src/crm/productGuides.js) turns on product guides in the console and for the agent.
 function createApp({
-  crm, sarvam, scheduler, config, checkSalesforce, limiter, webCallLimiter, consoleData, deliveryCalls, invoices, now = () => Date.now(), logger = console,
+  crm, sarvam, scheduler, config, checkSalesforce, limiter, webCallLimiter, consoleData, deliveryCalls, invoices, productGuides,
+  now = () => Date.now(), logger = console,
 }) {
   const app = express();
   // Render and Vercel sit behind proxies; the visitor address comes from X-Forwarded-For.
@@ -65,7 +67,7 @@ function createApp({
   app.get('/api/jobs', internalKey, async (req, res) => res.json({ jobs: await scheduler.list() }));
   // Places the calls that are due; on Vercel this replaces the in-process timer.
   app.get('/api/cron/jobs', cronSecret, async (req, res) => res.json(await scheduler.tick()));
-  app.use('/api/agent', agentSecret, agentToolsRouter({ crm, now, invoiceLinks: invoices?.sender }));
+  app.use('/api/agent', agentSecret, agentToolsRouter({ crm, now, logger, invoiceLinks: invoices?.sender, productGuides }));
   if (invoices) {
     app.use('/api/invoice-uploads', invoiceUploadsRouter({
       reader: invoices.reader,
@@ -75,7 +77,7 @@ function createApp({
     }));
   }
   app.use('/api/webhooks', webhookToken, webhooksRouter({ crm, now, logger }));
-  if (consoleData) app.use('/api/admin', internalKey, adminRouter({ consoleData }));
+  if (consoleData) app.use('/api/admin', internalKey, adminRouter({ consoleData, productGuides }));
   if (deliveryCalls) app.use('/cron', cronRouter({ deliveryCalls, now }));
   app.use('/api/sarvam', webCallsRouter({
     sarvam,
