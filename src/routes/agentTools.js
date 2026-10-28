@@ -118,7 +118,7 @@ function refused(res, message) {
   return res.json({ created: false, case_number: null, message });
 }
 
-function caseResponse(res, result, successMessage) {
+function caseResponse(res, result, successMessage, extra = {}) {
   if (result.existingRequest) {
     const open = result.existingRequest;
     return res.json({
@@ -138,6 +138,7 @@ function caseResponse(res, result, successMessage) {
     service_route: result.serviceRoute,
     within_business_hours: result.withinBusinessHours,
     order_verified: result.orderVerified,
+    ...extra,
     message: `${successMessage(spokenCaseNumber(result.caseNumber))}${result.withinBusinessHours ? '' : ' The service team will follow up on the next working day.'}`,
   });
 }
@@ -576,7 +577,7 @@ module.exports = function agentToolsRouter({ crm, invoiceLinks, productGuides, n
     ));
     const place = { delivery: ' at the delivery address', customer: ' at the address on file' }[result.addressSource] || '';
     return caseResponse(res, result, (n) => `Installation request ${n} is registered${place} with a preferred slot of ${resolved.spoken}, ${slot.spoken}. `
-      + 'The service team confirms the appointment.');
+      + 'The service team confirms the appointment.', { preferred_date: resolved.date, preferred_time: slot.text });
   });
 
   router.post('/escalate', async (req, res) => {

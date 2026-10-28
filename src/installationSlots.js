@@ -20,9 +20,21 @@ const PERIODS = [
 ];
 
 const RANGE_WORD = / (?:to|and|till|until|se) /;
+const PART_OF_DAY = 'morning|afternoon|evening|subah|dopahar|shaa?m';
+const MERIDIEM = { morning: 'am', subah: 'am' };
+
+// "11 in the morning", "subah 11" and "5 shaam ko" become "11 am" and "5 pm": a part of the day said with a number
+// only says which half of the day the number is in.
+function withMeridiem(t) {
+  const after = new RegExp(`^(.*\\d.*?) (?:in the )?(${PART_OF_DAY})(?: ko| mein)?$`).exec(t);
+  if (after) return `${after[1]} ${MERIDIEM[after[2]] || 'pm'}`;
+  const before = new RegExp(`^(${PART_OF_DAY})(?: ko| mein)? (?:at )?(.*\\d.*)$`).exec(t);
+  if (before) return `${before[2]} ${MERIDIEM[before[1]] || 'pm'}`;
+  return t;
+}
 
 function normalise(text) {
-  return String(text ?? '').toLowerCase()
+  const t = String(text ?? '').toLowerCase()
     .replace(/(\d)\s*([ap])\.?\s*m\b\.?/g, '$1 $2m')
     .replace(/\s*[-–]\s*/g, ' to ')
     .replace(/\b(?:o'?clock|baje|bje|hrs|hours)\b/g, ' ')
@@ -30,6 +42,7 @@ function normalise(text) {
     .replace(/\s+/g, ' ')
     .trim()
     .replace(/^(?:(?:in the|at|around|about|approx(?:imately)?) )+/, '');
+  return withMeridiem(t).replace(/ (am|pm) (am|pm)$/, ' $1');
 }
 
 // "11", "11 am", "3:30 pm", "15:00", "noon" -> minutes after midnight. An hour from 1 to 7 without am or pm is

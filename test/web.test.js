@@ -170,7 +170,7 @@ test('the mobile number typed above the widget goes into the call as customer_ph
     assert.equal(callerPhone(typed), phone, typed);
   }
   const start = JSON.stringify({ type: CALL_START, origin: 'client', timestamp: 1 });
-  const welcome = "Namaste, welcome to Tiffany Designs. I'm the AI service assistant. Hindi or English?";
+  const welcome = 'Namaste, welcome to Tiffany Designs. How can I help you today?';
   assert.equal(openingLine(), welcome);
   assert.deepEqual(JSON.parse(withCallerPhone(start, '+919876543210')), {
     type: CALL_START, origin: 'client', timestamp: 1, agent_variables: { customer_phone: '+919876543210', opening_line: welcome },
@@ -180,7 +180,7 @@ test('the mobile number typed above the widget goes into the call as customer_ph
     { call_reason: 'inbound', customer_phone: '+919876543210', opening_line: welcome });
   assert.deepEqual(JSON.parse(withCallerPhone(start, '+919876543210', 'Satish')).agent_variables, {
     customer_phone: '+919876543210',
-    opening_line: "Namaste Satish ji, welcome to Tiffany Designs. I'm the AI service assistant. Hindi or English?",
+    opening_line: 'Namaste Satish ji, welcome to Tiffany Designs. How can I help you today?',
     customer_name: 'Satish',
   }, 'a known customer is welcomed by first name, which also goes in as customer_name');
   assert.equal(withCallerPhone(start, null), start, 'no number, no change');

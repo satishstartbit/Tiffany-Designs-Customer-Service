@@ -17,6 +17,8 @@ test('times are understood the ways customers say them', () => {
     shaam: 'evening, 4 pm to 6 pm', 'any time': '10 am to 6 pm', '2 to 4 pm': '2 pm to 4 pm', '2-4 pm': '2 pm to 4 pm',
     '10 to 1 pm': '10 am to 1 pm', 'between 2 and 4': '2 pm to 4 pm', 'after 3 pm': '3 pm to 6 pm', '3 pm ke baad': '3 pm to 6 pm',
     'before 1 pm': '10 am to 1 pm', '4 baje tak': '10 am to 4 pm', '2 se 4 tak': '2 pm to 4 pm', 'after 9 am': '10 am to 6 pm',
+    '11 in the morning': '11 am', "11 o'clock in the morning": '11 am', 'subah 11': '11 am', '10 baje subah': '10 am',
+    '3 in the afternoon': '3 pm', '5 shaam ko': '5 pm', '2 to 4 in the afternoon': '2 pm to 4 pm',
   };
   for (const [said, stored] of Object.entries(cases)) {
     const result = slot(said);
@@ -125,5 +127,7 @@ test('book_installation registers nothing outside Monday to Saturday, 10 am to 6
   const later = await book({ preferred_date: 'today', preferred_time: '4 pm' });
   assert.equal(later.body.created, true, 'later today is fine');
   assert.equal(s.crm.created[0].input.preferredTime, '4 pm');
+  assert.equal(later.body.preferred_date, '2026-10-14', 'the slot comes back for the installation_date variable');
+  assert.equal(later.body.preferred_time, '4 pm');
   assert.match(later.body.message, /preferred slot of Wednesday, 14 October, at 4 pm\./);
 });
