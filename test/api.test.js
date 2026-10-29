@@ -394,6 +394,48 @@ test.describe('agent tools used during a call', () => {
     assert.equal(res.body.latest_order_id, 'TD-ORD-1001');
   });
 
+  test('at call start the number a phone caller rings from becomes customer_phone, with the greeting by name', async (t) => {
+    const s = await startTestServer();
+    t.after(s.close);
+    const start = (body) => s.call('POST', '/api/agent/call-start', { body, headers: s.agent }).then((r) => r.body);
+    const defaults = { customer_phone: '', customer_name: '', call_reason: 'inbound', opening_line: 'Namaste, welcome to Tiffany Designs. How can I help you today?' };
+
+    assert.deepEqual(await start({ ...defaults, caller_phone: '09876543210', caller_type: 'phone_number' }), {
+      customer_phone: '+919876543210',
+      customer_name: 'Aarav',
+      opening_line: 'Namaste Aarav ji, welcome to Tiffany Designs. How can I help you today?',
+      caller_details: 'The number for this call, ending 3 2 1 0, is registered to Aarav Sharma. Recent orders: TD-ORD-1001, delivered. '
+        + 'Open requests: 1063 for Installation, Appointment Scheduled.',
+      known_customer: true,
+    });
+    assert.deepEqual(await start({ ...defaults, caller_phone: '09000000000' }), {
+      customer_phone: '+919000000000',
+      customer_name: '',
+      opening_line: defaults.opening_line,
+      caller_details: 'The number for this call, ending 0 0 0 0, is not on record as a customer.',
+      known_customer: false,
+    }, 'an unknown caller keeps the plain greeting, but the agent still has the number');
+
+    const web = await start({ ...defaults, customer_phone: '+919820011111', customer_name: 'Meera', caller_phone: 'web-visitor' });
+    assert.equal(web.customer_phone, '+919820011111', 'the number typed on the website wins');
+    assert.equal(web.customer_name, 'Meera');
+
+    const outbound = { customer_phone: '+919876543210', customer_name: 'Aarav Sharma', call_reason: 'delivery_check', opening_line: 'Hello, this is…', caller_phone: '9876543210' };
+    assert.deepEqual(await start(outbound), {
+      customer_phone: '+919876543210', customer_name: 'Aarav Sharma', opening_line: 'Hello, this is…', caller_details: '', known_customer: false,
+    }, 'outbound calls keep the variables the server set');
+
+    assert.deepEqual(await start({ ...defaults, caller_phone: 'ravi@example.com', caller_type: 'email' }),
+      { customer_phone: '', customer_name: '', opening_line: defaults.opening_line, caller_details: '', known_customer: false });
+    assert.equal((await start({ ...defaults, caller_phone: '9876543210', caller_type: 'custom' })).customer_phone, '', 'only a phone identifier is a number');
+
+    s.crm.findContactByPhone = async () => { throw new Error('Salesforce is down'); };
+    const down = await start({ ...defaults, caller_phone: '9876543210' });
+    assert.equal(down.customer_phone, '+919876543210', 'the number is kept even when the lookup fails');
+    assert.equal(down.opening_line, defaults.opening_line);
+    assert.equal(down.caller_details, '', 'nothing is claimed about the number when the lookup failed');
+  });
+
   test('customer lookup by the caller number gives the first name and the open requests', async (t) => {
     const s = await startTestServer();
     t.after(s.close);
@@ -473,6 +515,32 @@ test.describe('agent tools used during a call', () => {
       assert.equal(phoneOrder.message, 'Order 122 for Demo Kids Bed is being processed.');
     }
     assert.equal((await lookup({ order_id: '122' })).order_number, '00000122', 'an order number said as the order id still works');
+  });
+
+  test('an order without a mobile number or a delivery address says so, so the agent offers the invoice upload link', async (t) => {
+    const s = await startTestServer();
+    t.after(s.close);
+    const lookup = (body) => s.call('POST', '/api/agent/order-lookup', { body, headers: s.agent }).then((r) => r.body);
+
+    const complete = await lookup({ order_id: 'TD-ORD-1001' });
+    assert.equal(complete.mobile_on_order, true);
+    assert.equal(complete.address_on_order, true);
+    assert.equal(complete.details_missing, false);
+    assert.doesNotMatch(complete.message, /WhatsApp/);
+
+    const bare = await lookup({ order_id: 'TD-ORD-3333' });
+    assert.equal(bare.mobile_on_order, false, 'its account has no contact with a number');
+    assert.equal(bare.address_on_order, false);
+    assert.equal(bare.details_missing, true);
+    assert.equal(bare.message, 'Order TD-ORD-3333 for Demo Desk was delivered on Wednesday, 14 October. '
+      + 'The order has no mobile number and no delivery address on record. After answering what the customer asked, '
+      + 'offer to send a WhatsApp link to upload the invoice, so the order can be completed before any request is registered.');
+
+    const getOrderById = s.crm.getOrderById.bind(s.crm);
+    s.crm.getOrderById = async (id) => ({ ...(await getOrderById(id)), street: null });
+    const noStreet = await lookup({ order_id: 'TD-ORD-1001' });
+    assert.equal(noStreet.address_on_order, false, 'a city and PIN code without a street is not an address to visit');
+    assert.match(noStreet.message, /The order has no delivery address on record\./);
   });
 
   test('a misheard order id falls back to the invoice number; an unknown reference says so', async (t) => {

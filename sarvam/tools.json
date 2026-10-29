@@ -1,9 +1,9 @@
 {
   "agent_id": "Tiffany-Des-4ab4474a-620f",
   "agent_note": "The stage agent named by SARVAM_AGENT_ID in .env (Tiffany Designs Customer Service Stage). The earlier agent Tiffany-Des-0db8e21d-e099 still exists, with its own older tools calling https://tiffany-designs-customer-service.onrender.com/.",
-  "committed_version": 9,
-  "draft_version": 10,
-  "draft_note": "Version 9 (committed 2026-10-28) has every tool below as written here, the prompt in agent-prompt.md, and every language greeting set to {{opening_line}}. Draft 10 is an unchanged copy. Calls use it once SARVAM_APP_VERSION=9 is set on Render and Vercel, after the web widget change (opening_line without the language question) is deployed.",
+  "committed_version": 14,
+  "draft_version": 15,
+  "draft_note": "Version 14 (committed 2026-10-29) has every tool below as written here and the prompt in agent-prompt.md. identify_caller runs at call start (lifecycle on_start): it sends Sarvam's caller identifier to /api/agent/call-start and saves customer_phone, customer_name, opening_line and caller_details, so a phone caller is greeted by name and never asked for the mobile number. get_product_guide with purpose assembly gives the complete product guide, every numbered step with its own hardware, and step_count; when a found guide has no steps (or the server has not been deployed with this yet) its answer says so and the agent offers an installation visit instead of making steps up. Until the server is deployed, call-start fails harmlessly and the call goes on as before. The live deployment answers with the version it names; move it to 14 to use this. Draft 15 is an unchanged copy.",
   "current_base_url": "https://tiffany-designs-customer-service-1.onrender.com/",
   "base_url_note": "The server is deployed on Render. Every tool calls current_base_url + path with POST and a JSON body; change all of them together if the server moves.",
   "auth_header": "x-agent-secret (AGENT_TOOL_SECRET in .env and on Render)",
@@ -14,8 +14,73 @@
   },
   "tools": [
     {
+      "name": "identify_caller",
+      "id": "1a6cd66c-8321-463a-92b1-648c49a750d0",
+      "path": "/api/agent/call-start",
+      "modules": [
+        1,
+        3
+      ],
+      "description": "Runs when the call starts, before the greeting. Sends the number the customer is calling from to the service system, which puts it in customer_phone, looks it up, and fills caller_details with what is on record for it (name, recent orders, open requests, or not on record). When the number belongs to a customer it also sets customer_name to the first name and opening_line to a greeting by name. Outbound and website calls keep the values they already have.",
+      "lifecycle": "on_start",
+      "parameters": [
+        {
+          "name": "caller_phone",
+          "from_system_variable": "user_identifier",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "caller_type",
+          "from_system_variable": "user_identifier_type",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "customer_phone",
+          "from_agent_variable": "customer_phone",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "customer_name",
+          "from_agent_variable": "customer_name",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "call_reason",
+          "from_agent_variable": "call_reason",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "opening_line",
+          "from_agent_variable": "opening_line",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "response_fields": {
+        "customer_phone": "The number of the call, E.164: the website number when one was typed, else the phone caller's number; saved to customer_phone.",
+        "customer_name": "The first name of the customer the number belongs to, or the name already set; saved to customer_name.",
+        "opening_line": "The greeting by first name for a known caller, else the greeting already set; saved to opening_line.",
+        "caller_details": "What is on record for the number (name, recent orders, open requests) or that it is not on record; saved to caller_details.",
+        "known_customer": "true when the number belongs to a customer."
+      },
+      "send_to_agent": [],
+      "on_failure": "",
+      "save_to_variables": {
+        "customer_phone": "customer_phone",
+        "customer_name": "customer_name",
+        "opening_line": "opening_line",
+        "caller_details": "caller_details"
+      },
+      "timeout_seconds": 6
+    },
+    {
       "name": "find_customer",
-      "id": "07225d1b-f05b-405c-a324-c3c5b3b78eed",
+      "id": "9d0b4f0c-3367-4f3a-9855-d6d0f3ef62ff",
       "path": "/api/agent/customer-lookup",
       "modules": [
         3
@@ -58,7 +123,6 @@
         "customer_name",
         "latest_order_id",
         "open_requests",
-        "error",
         "error"
       ],
       "resp_template": "{{ message }}\nFields: found={{ found | default('') }}, first_name={{ first_name | default('') }}, customer_name={{ customer_name | default('') }}, latest_order_id={{ latest_order_id | default('') }}, open_requests={{ open_requests | default('') }}{% if error is defined %}, error={{ error }}{% endif %}",
@@ -68,13 +132,13 @@
     },
     {
       "name": "find_order",
-      "id": "0db13942-652a-4af0-b333-509c123d0a5e",
+      "id": "2fc4f45c-571c-4fc8-af2f-2fb5d8cb72f5",
       "path": "/api/agent/order-lookup",
       "modules": [
         4,
         15
       ],
-      "description": "Finds an order and gives its products, delivery status and delivery date, and the kinds of request already open on it. Call it as soon as the customer gives any one of: the order id (for example TD-ORD-1001, ORD-010, or only the number at its end such as 1001), the order number of a phone order (digits, for example 122), or the invoice number (for example INV-2001, or only its digits). No mobile number or name is needed. With only a mobile number it gives the latest order on that number. The answer has a message with the facts and what to ask next, and the fields found, order_id, order_number, delivery_status, products and open_requests (installation, installation_followup, damage or replacement).",
+      "description": "Finds an order and gives its products, delivery status and delivery date, the kinds of request already open on it, and whether the order has the customer's mobile number and a delivery address on record. Call it as soon as the customer gives any one of: the order id (for example TD-ORD-1001, ORD-010, or only the number at its end such as 1001), the order number of a phone order (digits, for example 122), or the invoice number (for example INV-2001, or only its digits). No mobile number or name is needed. With only a mobile number it gives the latest order on that number. The answer has a message with the facts and what to do next, and the fields found, order_id, order_number, delivery_status, products, open_requests (installation, installation_followup, damage or replacement), mobile_on_order, address_on_order and details_missing. When no order is found after a second try, or details_missing is true, offer the WhatsApp invoice upload link with tool:send_invoice_upload_link.",
       "parameters": [
         {
           "name": "order_id",
@@ -110,7 +174,10 @@
         "delivery_date": "Delivery date as YYYY-MM-DD; the message says it as weekday and date.",
         "order_source": "Website, showroom or marketplace.",
         "products": "Products on the order.",
-        "open_requests": "Kinds of request open on the order: installation, installation_followup, damage, replacement."
+        "open_requests": "Kinds of request open on the order: installation, installation_followup, damage, replacement.",
+        "mobile_on_order": "true when the order's customer has a mobile number on record.",
+        "address_on_order": "true when the order has a delivery address to visit: a street, and a city or PIN code.",
+        "details_missing": "true when either is missing; the agent then offers the WhatsApp invoice upload link (Phase 15)."
       },
       "send_to_agent": [
         "message",
@@ -120,17 +187,19 @@
         "delivery_status",
         "products",
         "open_requests",
-        "error",
+        "mobile_on_order",
+        "address_on_order",
+        "details_missing",
         "error"
       ],
-      "resp_template": "{{ message }}\nFields: found={{ found | default('') }}, order_id={{ order_id | default('') }}, order_number={{ order_number | default('') }}, delivery_status={{ delivery_status | default('') }}, products={{ products | default('') }}, open_requests={{ open_requests | default('') }}{% if error is defined %}, error={{ error }}{% endif %}",
+      "resp_template": "{{ message }}\nFields: found={{ found | default('') }}, order_id={{ order_id | default('') }}, order_number={{ order_number | default('') }}, delivery_status={{ delivery_status | default('') }}, products={{ products | default('') }}, open_requests={{ open_requests | default('') }}{% if details_missing is defined %}, mobile_on_order={{ mobile_on_order }}, address_on_order={{ address_on_order }}, details_missing={{ details_missing }}{% endif %}{% if error is defined %}, error={{ error }}{% endif %}",
       "on_failure": "The order lookup did not answer. Apologise briefly and call tool:find_order once more. When it fails again, note the order id as the customer gave it and carry on without the order.",
       "save_to_variables": {},
       "timeout_seconds": 10
     },
     {
       "name": "get_details_on_file",
-      "id": "c8568539-c633-430f-9b73-37a0002b2fa8",
+      "id": "17b474fb-8765-4abc-bbf7-8509fdd0f3b7",
       "path": "/api/agent/details-on-file",
       "modules": [
         5,
@@ -184,7 +253,6 @@
         "address_on_file",
         "city",
         "postal_code",
-        "error",
         "error"
       ],
       "resp_template": "{{ message }}\nFields: found={{ found | default('') }}, mobile_on_file={{ mobile_on_file | default('') }}, mobile_ending={{ mobile_ending | default('') }}, address_on_file={{ address_on_file | default('') }}, city={{ city | default('') }}, postal_code={{ postal_code | default('') }}{% if error is defined %}, error={{ error }}{% endif %}",
@@ -194,7 +262,7 @@
     },
     {
       "name": "get_installation_address",
-      "id": "a9c350bb-184d-4787-91d6-a654a206cf76",
+      "id": "f94fd5db-0639-4a25-ab21-f25921286237",
       "path": "/api/agent/installation-address",
       "modules": [
         6,
@@ -240,7 +308,6 @@
         "postal_code",
         "mobile_on_file",
         "mobile_ending",
-        "error",
         "error"
       ],
       "resp_template": "{{ message }}\nFields: found={{ found | default('') }}, address_source={{ address_source | default('') }}, city={{ city | default('') }}, postal_code={{ postal_code | default('') }}, mobile_on_file={{ mobile_on_file | default('') }}, mobile_ending={{ mobile_ending | default('') }}{% if error is defined %}, error={{ error }}{% endif %}",
@@ -250,13 +317,13 @@
     },
     {
       "name": "send_invoice_upload_link",
-      "id": "6d90d601-ed9c-4082-9a66-dc419439815d",
+      "id": "41fcd83f-6413-4760-ad4b-666ea193dec8",
       "path": "/api/agent/invoice-upload-link",
       "modules": [
         4,
         6
       ],
-      "description": "Sends the customer a WhatsApp link to upload a photo, a screenshot or a PDF of the invoice, when no order could be found for a new installation. The service system reads the invoice, looks for the order by its invoice number, order id or mobile number, and links the customer's request to it. Call it only after the customer agreed to get the link and the WhatsApp number was confirmed. At most 3 links per number a day. The answer has a message saying what to tell the customer, or why no link was sent, and the field sent.",
+      "description": "Sends the customer a WhatsApp link to upload a photo, a screenshot or a PDF of the invoice. Use it when the order cannot be found, or when tool:find_order says the order has no mobile number or no delivery address on record. The service system reads the invoice, finds the order by its invoice number, order id or mobile number, and completes the order with the details on the invoice; the customer then calls again to have the concern resolved. Call it only after the customer agreed to get the link and the WhatsApp number was confirmed. At most 3 links per number a day. The answer has a message saying what to tell the customer, or why no link was sent, and the field sent.",
       "parameters": [
         {
           "name": "phone",
@@ -274,7 +341,7 @@
           "name": "order_reference",
           "type": "string",
           "required": false,
-          "description": "The order id, order number or invoice number the customer gave on this call, written without spaces, even though no order was found for it. Leave empty when none was given."
+          "description": "The order id, order number or invoice number that found the order, or that the customer gave on this call even though no order was found for it, written without spaces. Leave empty when none was given."
         }
       ],
       "response_fields": {
@@ -283,22 +350,21 @@
       "send_to_agent": [
         "message",
         "sent",
-        "error",
         "error"
       ],
       "resp_template": "{{ message }}\nFields: sent={{ sent | default('') }}{% if error is defined %}, error={{ error }}{% endif %}",
-      "on_failure": "The WhatsApp link could not be sent right now. Carry on without the order, and note the order id, invoice number and product as the customer gives them.",
+      "on_failure": "The WhatsApp link could not be sent right now. Carry on with the concern without it: note the order id, invoice number and product as the customer gives them, and ask for any missing mobile number or address.",
       "save_to_variables": {},
       "timeout_seconds": 15
     },
     {
       "name": "get_product_guide",
-      "id": "f831e5f1-eaca-42c9-8248-d82dd21005f9",
+      "id": "38cf019f-01a0-4855-ae24-6c3ea9a94f14",
       "path": "/api/agent/product-guide",
       "modules": [
         7
       ],
-      "description": "Gets the product guide for the products on an order, or for a product the customer names: every part with its sticker number, quantity and part number, the hardware list, and the rules for that product, such as safety advice. Call it before registering a damaged, defective, missing or wrong part, to go through the affected parts one at a time and pass the right part number. The answer has a message with the guide, and the field found; when found is false, use tool:find_parts instead.",
+      "description": "Gets the product guide for the products on an order, or for a product the customer names. By default (purpose parts) it says what comes in the set and gives every part with its sticker number, quantity and part number, the hardware by letter, the delivery check groups, and the rules for that product, such as safety advice. Use it for a damaged, defective, missing or wrong part: ask about one part at a time, how many the set should have and how many arrived, and pass the right part number. With purpose assembly it gives the complete product guide: what the product is, its size and material, what comes in the set, the tools needed, the parts by sticker number, the hardware by letter, a parts check before starting, every assembly step numbered in order with the hardware that step uses, the tips, safety and care advice, the rules and the warranty. Review the whole guide and use it to guide a customer who assembles the product alone, one step at a time, giving nothing the guide does not have. The answer has a message with the guide and the fields found, has_assembly_steps and, for assembly, step_count; when found is false, use tool:find_parts for parts, or offer an installation visit for assembly.",
       "parameters": [
         {
           "name": "order_id",
@@ -329,26 +395,40 @@
           "type": "string",
           "required": false,
           "description": "The customer's 10 digit mobile number when it is already known: customer_phone when it is set, otherwise the number the customer gave. Leave empty when not known."
+        },
+        {
+          "name": "purpose",
+          "type": "string",
+          "required": false,
+          "one_of": [
+            "parts",
+            "assembly"
+          ],
+          "description": "parts for a damaged, defective, missing or wrong part, which is the default; assembly when the customer wants to assemble the product alone or needs help with an assembly step."
         }
       ],
       "response_fields": {
         "found": "true when a published guide exists.",
-        "products": "Each product with parts_have_number_stickers and its parts (name, part_number)."
+        "purpose": "parts (the default) or assembly, as the guide was asked for.",
+        "has_assembly_steps": "true when the guide has assembly steps to walk the customer through.",
+        "products": "Each product with parts_have_number_stickers and its parts (name, part_number).",
+        "step_count": "With purpose assembly, how many numbered assembly steps the guide has; 0 when it has none. Absent for parts."
       },
       "send_to_agent": [
         "message",
         "found",
-        "error",
+        "has_assembly_steps",
+        "step_count",
         "error"
       ],
-      "resp_template": "{{ message }}\nFields: found={{ found | default('') }}{% if error is defined %}, error={{ error }}{% endif %}",
-      "on_failure": "The product guide did not answer. Match the part with tool:find_parts instead.",
+      "resp_template": "{{ message }}\n{% if found and not step_count and (purpose is not defined or purpose == 'assembly') %}This answer has no assembly steps. For help with assembly, the agent says that the assembly steps for this product are not on record, offers an installation visit by the service team, and gives no step, number of steps or tool of its own.\n{% endif %}Fields: found={{ found | default('') }}{% if has_assembly_steps is defined %}, has_assembly_steps={{ has_assembly_steps }}{% endif %}{% if step_count is defined %}, step_count={{ step_count }}{% endif %}{% if error is defined %}, error={{ error }}{% endif %}",
+      "on_failure": "The product guide did not answer. For a part, match it with tool:find_parts instead. For assembly help, offer an installation visit by the service team.",
       "save_to_variables": {},
       "timeout_seconds": 10
     },
     {
       "name": "find_parts",
-      "id": "c49758a6-e09b-47d1-9be5-7934311a1d87",
+      "id": "1b59ceaa-ad55-4070-9cb2-39894bd42fed",
       "path": "/api/agent/part-lookup",
       "modules": [
         7
@@ -375,7 +455,6 @@
       "send_to_agent": [
         "message",
         "found",
-        "error",
         "error"
       ],
       "resp_template": "{{ message }}\nFields: found={{ found | default('') }}{% if error is defined %}, error={{ error }}{% endif %}",
@@ -385,7 +464,7 @@
     },
     {
       "name": "resolve_date",
-      "id": "7d3aaa86-c9b8-4407-9e60-f623dd3cf8db",
+      "id": "ee95ecaf-f516-4f5b-be82-d412ae05b9f1",
       "path": "/api/agent/resolve-date",
       "modules": [
         6
@@ -417,7 +496,6 @@
         "date",
         "spoken_date",
         "time",
-        "error",
         "error"
       ],
       "resp_template": "{{ message }}\nFields: valid={{ valid | default('') }}, date={{ date | default('') }}, spoken_date={{ spoken_date | default('') }}, time={{ time | default('') }}{% if error is defined %}, error={{ error }}{% endif %}",
@@ -427,7 +505,7 @@
     },
     {
       "name": "book_installation",
-      "id": "1696fee6-8b16-4888-838c-f442d05a2fe7",
+      "id": "691e2fd8-33e2-4be7-8ed1-9fb805039ccd",
       "path": "/api/agent/installation",
       "modules": [
         6,
@@ -565,7 +643,6 @@
         "spoken_case_number",
         "existing_request",
         "within_business_hours",
-        "error",
         "error"
       ],
       "resp_template": "{{ message }}\nFields: created={{ created | default('') }}, spoken_case_number={{ spoken_case_number | default('') }}, existing_request={{ existing_request | default('') }}, within_business_hours={{ within_business_hours | default('') }}{% if error is defined %}, error={{ error }}{% endif %}",
@@ -577,7 +654,7 @@
     },
     {
       "name": "register_service_request",
-      "id": "5d643921-f7ea-4f1c-9534-48e45efcf87c",
+      "id": "bbcca210-83eb-4311-b33e-523fcdec25f5",
       "path": "/api/agent/cases",
       "modules": [
         5,
@@ -728,7 +805,6 @@
         "spoken_case_number",
         "existing_request",
         "within_business_hours",
-        "error",
         "error"
       ],
       "resp_template": "{{ message }}\nFields: created={{ created | default('') }}, spoken_case_number={{ spoken_case_number | default('') }}, existing_request={{ existing_request | default('') }}, within_business_hours={{ within_business_hours | default('') }}{% if error is defined %}, error={{ error }}{% endif %}",
@@ -740,7 +816,7 @@
     },
     {
       "name": "request_human_callback",
-      "id": "2a43971f-6f71-43e1-a266-6c54490785f0",
+      "id": "6f584680-d12e-4c9a-9836-599ed907c9a6",
       "path": "/api/agent/escalate",
       "modules": [
         10
@@ -801,7 +877,6 @@
         "created",
         "spoken_case_number",
         "within_business_hours",
-        "error",
         "error"
       ],
       "resp_template": "{{ message }}\nFields: created={{ created | default('') }}, spoken_case_number={{ spoken_case_number | default('') }}, within_business_hours={{ within_business_hours | default('') }}{% if error is defined %}, error={{ error }}{% endif %}",
@@ -813,7 +888,7 @@
     },
     {
       "name": "check_request_status",
-      "id": "b239d303-142d-49b5-80ea-cbad17c77f69",
+      "id": "5c5ffaf0-6e59-4bd8-9208-3b296bd7dfc4",
       "path": "/api/agent/case-status",
       "modules": [
         11,
@@ -857,7 +932,6 @@
         "found",
         "status",
         "open_requests",
-        "error",
         "error"
       ],
       "resp_template": "{{ message }}\nFields: found={{ found | default('') }}, status={{ status | default('') }}, open_requests={{ open_requests | default('') }}{% if error is defined %}, error={{ error }}{% endif %}",
@@ -867,7 +941,7 @@
     },
     {
       "name": "get_service_history",
-      "id": "f2f3c8bb-4871-4a1b-b3e6-7cefa607b329",
+      "id": "21858043-3772-4601-b984-79511db883c7",
       "path": "/api/agent/history",
       "modules": [
         14
@@ -889,7 +963,6 @@
         "message",
         "found",
         "open_requests",
-        "error",
         "error"
       ],
       "resp_template": "{{ message }}\nFields: found={{ found | default('') }}, open_requests={{ open_requests | default('') }}{% if error is defined %}, error={{ error }}{% endif %}",
@@ -899,7 +972,7 @@
     },
     {
       "name": "check_service_hours",
-      "id": "79fffe44-5670-4782-9990-b08eef250598",
+      "id": "cdd8c4a5-5aa3-4cda-8fb0-4e40e9ebacc1",
       "path": "/api/agent/service-hours",
       "modules": [
         2,
@@ -917,7 +990,6 @@
         "message",
         "open",
         "hours",
-        "error",
         "error"
       ],
       "resp_template": "{{ message }}\nFields: open={{ open | default('') }}, hours={{ hours | default('') }}{% if error is defined %}, error={{ error }}{% endif %}",
@@ -927,7 +999,7 @@
     },
     {
       "name": "check_service_area",
-      "id": "94482184-f157-424f-96b7-de8be9291663",
+      "id": "db895054-a687-46a9-b710-432de18c4313",
       "path": "/api/agent/service-area",
       "modules": [
         9
@@ -955,7 +1027,6 @@
         "message",
         "valid",
         "route",
-        "error",
         "error"
       ],
       "resp_template": "{{ message }}\nFields: valid={{ valid | default('') }}, route={{ route | default('') }}{% if error is defined %}, error={{ error }}{% endif %}",
@@ -965,7 +1036,7 @@
     },
     {
       "name": "find_products",
-      "id": "f8d6488a-85e0-4656-9d65-3a293ef9907d",
+      "id": "082c007b-f86c-4016-b3f9-94a5e291e03b",
       "path": "/api/agent/products",
       "modules": [
         "phone orders"
@@ -986,7 +1057,6 @@
       "send_to_agent": [
         "message",
         "found",
-        "error",
         "error"
       ],
       "resp_template": "{{ message }}\nFields: found={{ found | default('') }}{% if error is defined %}, error={{ error }}{% endif %}",
@@ -996,7 +1066,7 @@
     },
     {
       "name": "place_order",
-      "id": "7fda98d2-13d2-4ddb-8f72-8cf52d76e946",
+      "id": "73b9a8bc-f344-4035-a266-c72562898c77",
       "path": "/api/agent/orders",
       "modules": [
         "phone orders"
@@ -1064,7 +1134,6 @@
         "created",
         "spoken_order_number",
         "total",
-        "error",
         "error"
       ],
       "resp_template": "{{ message }}\nFields: created={{ created | default('') }}, spoken_order_number={{ spoken_order_number | default('') }}, total={{ total | default('') }}{% if error is defined %}, error={{ error }}{% endif %}",
@@ -1076,7 +1145,7 @@
     },
     {
       "name": "save_customer_details",
-      "id": "79370f50-3fa4-4896-955c-6aaf09d64692",
+      "id": "c81e07b7-d45e-4012-9a27-64a4ac49c24d",
       "path": "/api/agent/customer",
       "modules": [
         3
@@ -1140,7 +1209,6 @@
         "message",
         "saved",
         "new_customer",
-        "error",
         "error"
       ],
       "resp_template": "{{ message }}\nFields: saved={{ saved | default('') }}, new_customer={{ new_customer | default('') }}{% if error is defined %}, error={{ error }}{% endif %}",
@@ -1149,5 +1217,5 @@
       "timeout_seconds": 15
     }
   ],
-  "ids_note": "Each version holds its own copy of the tools; id is the copy in version 9. Draft 10 has its own copies with other ids; read them with agents get include tools before editing."
+  "ids_note": "Each version holds its own copy of the tools; id is the copy in version 14. Draft 15 has its own copies with other ids; read them with agents get include tools before editing."
 }

@@ -56,6 +56,11 @@ const GUIDE_ROW = {
   PartsList__c: '1. Worktop x 1, part number KIS-WALKY-01\n10. Fluted acrylic doors x 2, part number KIS-WALKY-10',
   HardwareList__c: 'A. Cam bolts, for joining panels\nAll hardware comes in one pack, part number KIS-WALKY-HW.',
   AgentRulesForThisProduct__c: '- The parts carry number stickers 1 to 16.\n- A burning smell is a safety risk.',
+  ToolsNeeded__c: 'Phillips screwdriver (not included); Allen key (J, included)',
+  AssemblySteps__c: '1. Fit the wheels. Turn the base panel (5) upside down.\n2. Attach the side panels with the cam bolts (A).',
+  HardwarePerStep__c: '1. Fit the wheels: E\n2. Attach the side panels: A, J',
+  AssemblyTips__c: 'Before you start: unpack everything onto a soft surface.\n\nSafety and care:\n- Do not plug in until assembly is complete.',
+  DeliveryCheckScript__c: 'Check one at a time: the worktop and the foldable extension leaf; both side panels.',
 };
 
 // Salesforce as the guide module uses it: describe, a few query shapes, create and update.
@@ -207,19 +212,59 @@ test('a save Salesforce refuses comes back with its message and the field it nam
   assert.deepEqual(await guides.saveGuide(PRODUCT.Id, { brand: 'Other' }), { error: 'rejected', message: 'Brand is not allowed.', field: 'brand' });
 });
 
-test('the agent hears a published guide: numbered parts with part numbers, the hardware and the rules', async () => {
+test('the agent hears a published guide: the set, numbered parts with quantities, the hardware, the delivery check and the rules', async () => {
   const { guides } = setup({ guides: [GUIDE_ROW, { ...GUIDE_ROW, Id: 'a0EDRAFT', Product__c: '01tOTHERPRODUCT000', Status__c: 'Draft' }] });
   const found = await guides.publishedFor([PRODUCT.Id, '01tOTHERPRODUCT000', 'bad id']);
   assert.equal(found.length, 1, 'a draft guide is not used');
   assert.equal(
     guideMessage(found[0]),
-    'Product guide for the Rocco Walky Kitchen Island by Rocco. Every part carries a number sticker. '
+    'Product guide for the Rocco Walky Kitchen Island by Rocco. In the set: 1 kitchen island: 16 numbered parts and a hardware pack. '
+      + 'Every part carries a number sticker. '
       + 'Parts: 1. Worktop x 1, part number KIS-WALKY-01; 10. Fluted acrylic doors x 2, part number KIS-WALKY-10. '
       + 'Part numbers on record: LED light strip, KIS-WALKY-14. '
       + 'Hardware: A. Cam bolts, for joining panels; All hardware comes in one pack, part number KIS-WALKY-HW. '
+      + 'Delivery check: Check one at a time: the worktop and the foldable extension leaf; both side panels. '
       + 'Rules for this product: The parts carry number stickers 1 to 16; A burning smell is a safety risk.',
   );
   assert.deepEqual(await guides.publishedFor([]), []);
+});
+
+test('for assembly the agent hears the complete guide, each step with its hardware named in it', async () => {
+  const { guides } = setup({
+    guides: [{
+      ...GUIDE_ROW,
+      Overview__c: 'A grey mobile kitchen island with a foldable top.\n\nStorage: 2 door cabinets.',
+      Dimensions__c: '120 x 70 x 84 cm',
+      HardwareList__c: 'A. Cam bolts, for joining panels\nE. Castor mounting screws, for the wheels\nJ. Allen key, for tightening',
+      HardwarePerStep__c: '1. Fit the wheels: E\n2. Attach the side panels: A, J\n3. Fix the worktop: A and B, or D\n4. Fit the electrical parts: no hardware',
+      AssemblySteps__c: '1. Fit the wheels. Turn the base panel (5) upside down.\n2. Attach the side panels with the cam bolts (A).\n'
+        + '3. Fix the worktop.\n4. Fit the electrical parts.',
+      WarrantyInformation__c: '1 year on manufacturing defects.',
+    }],
+  });
+  const [guide] = await guides.publishedFor([PRODUCT.Id]);
+  assert.equal(
+    guideMessage(guide, 'assembly'),
+    'Product guide for the Rocco Walky Kitchen Island by Rocco. '
+      + 'About it: A grey mobile kitchen island with a foldable top. Size: 120 x 70 x 84 cm. '
+      + 'In the set: 1 kitchen island: 16 numbered parts and a hardware pack. Every part carries a number sticker. '
+      + 'Tools needed: Phillips screwdriver (not included); Allen key (J, included). '
+      + 'Parts by sticker number: 1. Worktop x 1, part number KIS-WALKY-01; 10. Fluted acrylic doors x 2, part number KIS-WALKY-10. '
+      + 'Hardware by letter: A. Cam bolts, for joining panels; E. Castor mounting screws, for the wheels; J. Allen key, for tightening. '
+      + 'Parts check before starting: Check one at a time: the worktop and the foldable extension leaf; both side panels. '
+      + 'Assembly steps, 4 in all, to give one at a time in this order: '
+      + 'Step 1 of 4: Fit the wheels. Turn the base panel (5) upside down. Hardware: E, Castor mounting screws. '
+      + 'Step 2 of 4: Attach the side panels with the cam bolts (A). Hardware: A, Cam bolts; J, Allen key. '
+      + 'Step 3 of 4: Fix the worktop. Hardware: A and B, or D (A, Cam bolts). '
+      + 'Step 4 of 4: Fit the electrical parts. No hardware. '
+      + 'Tips, safety and care: Before you start: unpack everything onto a soft surface; Safety and care; Do not plug in until assembly is complete. '
+      + 'Rules for this product: The parts carry number stickers 1 to 16; A burning smell is a safety risk. '
+      + 'Warranty: 1 year on manufacturing defects.',
+  );
+  assert.equal(
+    guideMessage({ ...guide, assemblySteps: null }, 'assembly'),
+    'Product guide for the Rocco Walky Kitchen Island by Rocco. No assembly steps are on record for it. Offer an installation visit by the service team instead.',
+  );
 });
 
 async function serve(t, router) {
@@ -271,9 +316,23 @@ test('the agent tool finds the guide from the order, or from the product the cus
 
   const byName = await call('POST', '/product-guide', { product_name: 'kitchen island' });
   assert.equal(byName.body.found, true);
+  assert.equal(byName.body.purpose, 'parts');
+  assert.match(byName.body.message, /Delivery check: /);
+  assert.doesNotMatch(byName.body.message, /Assembly steps/, 'the steps come only when asked for assembly');
+
+  const assembly = await call('POST', '/product-guide', { order_id: 'TD-ORD-1020', purpose: 'assembly' });
+  assert.equal(assembly.body.purpose, 'assembly');
+  assert.equal(assembly.body.has_assembly_steps, true);
+  assert.equal(assembly.body.step_count, 2);
+  assert.match(assembly.body.message, /Step 1 of 2: Fit the wheels\./);
+  assert.match(assembly.body.message, /Assembly steps, 2 in all, to give one at a time in this order: Step 1 of 2/);
+  assert.match(assembly.body.message, /Parts by sticker number: 1\. Worktop/, 'the parts list comes with the steps');
+  assert.doesNotMatch(assembly.body.message, /Delivery check/);
 
   const none = await call('POST', '/product-guide', { product_name: 'kids bed' });
   assert.deepEqual(none.body, { found: false, message: 'No product guide is on record for this product. Match the part with tool:find_parts instead.' });
+  const noAssembly = await call('POST', '/product-guide', { product_name: 'kids bed', purpose: 'assembly' });
+  assert.equal(noAssembly.body.message, 'No assembly guide is on record for this product. Offer an installation visit by the service team instead.');
   assert.equal((await call('POST', '/product-guide', {})).body.message, 'An order id, order number or invoice number, or the product name, is needed.');
   assert.match((await call('POST', '/product-guide', { order_id: 'TD-ORD-9999' })).body.message, /^No order matches/);
 });

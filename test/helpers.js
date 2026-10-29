@@ -33,14 +33,14 @@ function createFakeCrm({ now = () => Date.now() } = {}) {
     { id: '003B', name: 'Meera Iyer', firstName: 'Meera', accountId: '001B', mobile: null, phone: '+91 98200 11111', postalCode: '600001' },
   ];
   const orders = [
-    { id: '801A', orderNumber: '00000101', erpOrderId: 'TD-ORD-1001', invoiceNumber: 'INV-2001', orderSource: 'Website', deliveryStatus: 'Delivered', deliveryDate: '2026-10-14', accountId: '001A', accountName: 'Aarav Sharma', contactId: null, city: 'Delhi', postalCode: '110001', productSummary: 'Demo 3-Door Wardrobe' },
-    { id: '801B', orderNumber: '00000114', erpOrderId: 'TD-ORD-1111', invoiceNumber: 'INV-1111', orderSource: 'Flipkart', deliveryStatus: 'Processing', deliveryDate: null, accountId: '001B', accountName: 'Meera Iyer', contactId: '003B', city: 'Jaipur', postalCode: '302012', productSummary: 'Demo Bookcase' },
+    { id: '801A', orderNumber: '00000101', erpOrderId: 'TD-ORD-1001', invoiceNumber: 'INV-2001', orderSource: 'Website', deliveryStatus: 'Delivered', deliveryDate: '2026-10-14', accountId: '001A', accountName: 'Aarav Sharma', contactId: null, street: '12 Lodhi Road', city: 'Delhi', postalCode: '110001', productSummary: 'Demo 3-Door Wardrobe' },
+    { id: '801B', orderNumber: '00000114', erpOrderId: 'TD-ORD-1111', invoiceNumber: 'INV-1111', orderSource: 'Flipkart', deliveryStatus: 'Processing', deliveryDate: null, accountId: '001B', accountName: 'Meera Iyer', contactId: '003B', street: '4 MI Road', city: 'Jaipur', postalCode: '302012', productSummary: 'Demo Bookcase' },
     { id: '801C', orderNumber: '00000117', erpOrderId: 'TD-ORD-3333', invoiceNumber: 'INV-3333', orderSource: 'Showroom', deliveryStatus: 'Delivered', deliveryDate: '2026-10-14', accountId: '001C', accountName: 'No Phone Customer', contactId: null, city: null, postalCode: null, productSummary: 'Demo Desk' },
     // A phone order: no ERP id or invoice yet, only the Salesforce order number.
     // Two orders sharing one invoice number, as the org has (INV-2006).
     { id: '801E', orderNumber: '00000105', erpOrderId: 'TD-ORD-1006', invoiceNumber: 'INV-7777', orderSource: 'Website', deliveryStatus: 'Delivered', deliveryDate: '2026-10-01', accountId: '001C', accountName: 'No Phone Customer', contactId: null, city: null, postalCode: null, productSummary: 'Demo Desk' },
     { id: '801F', orderNumber: '00000120', erpOrderId: 'TD-ORD-1008', invoiceNumber: 'INV-7777', orderSource: 'Website', deliveryStatus: 'Delivered', deliveryDate: '2026-10-02', accountId: '001C', accountName: 'No Phone Customer', contactId: null, city: null, postalCode: null, productSummary: 'Demo Desk' },
-    { id: '801D', orderNumber: '00000122', erpOrderId: null, invoiceNumber: null, orderSource: 'Other', deliveryStatus: null, deliveryDate: null, accountId: '001B', accountName: 'Meera Iyer', contactId: '003B', city: 'Jaipur', postalCode: '302012', productSummary: 'Demo Kids Bed' },
+    { id: '801D', orderNumber: '00000122', erpOrderId: null, invoiceNumber: null, orderSource: 'Other', deliveryStatus: null, deliveryDate: null, accountId: '001B', accountName: 'Meera Iyer', contactId: '003B', street: '4 MI Road', city: 'Jaipur', postalCode: '302012', productSummary: 'Demo Kids Bed' },
   ];
   const parts = [
     { name: 'Hardware Kit', partNumber: 'WRD-3D-HDW-001', productName: 'Demo 3-Door Wardrobe' },

@@ -261,19 +261,105 @@ function createProductGuides({ salesforce, now = () => Date.now(), logger = cons
   return { getGuide, saveGuide, findProductIds, publishedFor };
 }
 
-// What the agent hears about a guide: the parts with their sticker numbers and part numbers, the hardware, and the
-// rules for this product. Assembly steps are left out; they are for the service team and the customer's manual.
-function guideMessage(guide) {
+const sentence = (text) => String(text).trim().replace(/[.\s]+$/, '');
+
+// Numbered lines ("1. Fit the wheels. Turn…") by their number; a line without a number continues the one before it.
+function numbered(text) {
+  const items = [];
+  for (const line of String(text || '').split('\n')) {
+    const m = /^\s*(\d+)[.)]\s*(.+?)\s*$/.exec(line);
+    if (m) items.push({ n: Number(m[1]), text: m[2] });
+    else if (items.length && line.trim()) items[items.length - 1].text += ` ${line.trim()}`;
+  }
+  return items;
+}
+
+const assemblyStepCount = (guide) => numbered(guide.assemblySteps).length;
+
+// "A. Cam bolts, for joining panels" -> { A: 'cam bolts' }
+function hardwareNames(text) {
+  const names = {};
+  for (const line of String(text || '').split('\n')) {
+    const m = /^\s*([A-Z])[.)]\s*([^,\n]+)/.exec(line);
+    if (m) names[m[1]] = sentence(m[2]);
+  }
+  return names;
+}
+
+// Each step with the hardware it uses named in it, so a step can be given without looking anything up:
+// "Step 1 of 12: Fit the wheels. … Hardware: E (E, castor mounting screws)." Null when the steps are not numbered.
+function stepsWithHardware(guide) {
+  const steps = numbered(guide.assemblySteps);
+  if (!steps.length) return null;
+  const perStep = Object.fromEntries(numbered(guide.hardwarePerStep).map((s) => [s.n, sentence(s.text.replace(/^[^:]*:\s*/, ''))]));
+  const names = hardwareNames(guide.hardwareList);
+  return steps.map((s) => {
+    const uses = perStep[s.n];
+    let hardware = '';
+    if (uses && /^no(ne| hardware)?$/i.test(uses)) hardware = ' No hardware.';
+    else if (uses) {
+      const letters = [...new Set(uses.match(/\b[A-Z]\b/g) || [])];
+      const named = letters.filter((l) => names[l]).map((l) => `${l}, ${names[l]}`).join('; ');
+      // "A, B, J" becomes the named list; anything else ("A and B, or D") keeps its wording with the names after it.
+      hardware = /^[A-Z](\s*,\s*[A-Z])*$/.test(uses) && letters.every((l) => names[l])
+        ? ` Hardware: ${named}.`
+        : ` Hardware: ${uses}${named ? ` (${named})` : ''}.`;
+    }
+    return `Step ${s.n} of ${steps.length}: ${sentence(s.text)}.${hardware}`;
+  });
+}
+
+// What the agent hears about a guide. For a damaged, missing or wrong part (purpose 'parts'): what the set contains,
+// the parts with their sticker numbers, quantities and part numbers, the hardware, the delivery check and the rules
+// for this product, so it asks about one part at a time and how many arrived. For a customer assembling the product
+// (purpose 'assembly'): the complete guide, with each step carrying its own hardware, to give one step at a time.
+function guideMessage(guide, purpose = 'parts') {
   const brand = guide.brand ? ` by ${guide.brand}` : '';
   const lines = [`Product guide for the ${guide.productName}${brand}.`];
-  if (guide.partsHaveNumberStickers) lines.push('Every part carries a number sticker.');
+  const stickers = guide.partsHaveNumberStickers ? 'Every part carries a number sticker.' : null;
+
+  if (purpose === 'assembly') {
+    if (!guide.assemblySteps) {
+      lines.push('No assembly steps are on record for it. Offer an installation visit by the service team instead.');
+      return lines.join(' ');
+    }
+    const about = [
+      guide.overview && sentence(String(guide.overview).split(/\n\s*\n/)[0].replace(/\s*\n\s*/g, ' ')),
+      guide.dimensions && `Size: ${sentence(guide.dimensions)}`,
+      guide.material && `Material: ${sentence(guide.material)}`,
+    ].filter(Boolean);
+    if (about.length) lines.push(`About it: ${about.join('. ')}.`);
+    if (guide.setContents) lines.push(`In the set: ${sentence(guide.setContents)}.`);
+    else if (guide.totalParts) lines.push(`The set has ${guide.totalParts} parts.`);
+    if (stickers) lines.push(stickers);
+    if (guide.toolsNeeded) lines.push(`Tools needed: ${sentence(guide.toolsNeeded)}.`);
+    if (guide.partsList) lines.push(`Parts by sticker number: ${asList(guide.partsList)}.`);
+    if (guide.hardwareList) lines.push(`Hardware by letter: ${asList(guide.hardwareList)}.`);
+    if (guide.deliveryCheckScript) lines.push(`Parts check before starting: ${asList(guide.deliveryCheckScript)}.`);
+    const steps = stepsWithHardware(guide);
+    if (steps) {
+      lines.push(`Assembly steps, ${steps.length} in all, to give one at a time in this order: ${steps.join(' ')}`);
+    } else {
+      lines.push(`Assembly steps, to give one at a time: ${asList(guide.assemblySteps)}.`);
+      if (guide.hardwarePerStep) lines.push(`Hardware for each step: ${asList(guide.hardwarePerStep)}.`);
+    }
+    if (guide.assemblyTips) lines.push(`Tips, safety and care: ${asList(guide.assemblyTips)}.`);
+    if (guide.agentRules) lines.push(`Rules for this product: ${asList(guide.agentRules)}.`);
+    if (guide.warranty) lines.push(`Warranty: ${sentence(String(guide.warranty).replace(/\s*\n\s*/g, ' '))}.`);
+    return lines.join(' ');
+  }
+
+  if (guide.setContents) lines.push(`In the set: ${sentence(guide.setContents)}.`);
+  else if (guide.totalParts) lines.push(`The set has ${guide.totalParts} parts.`);
+  if (stickers) lines.push(stickers);
   if (guide.partsList) lines.push(`Parts: ${asList(guide.partsList)}.`);
   const listed = `${guide.partsList || ''}\n${guide.hardwareList || ''}`;
   const unlisted = guide.parts.filter((p) => p.partNumber && !listed.includes(p.partNumber));
   if (unlisted.length) lines.push(`Part numbers on record: ${unlisted.map((p) => `${p.name}, ${p.partNumber}`).join('; ')}.`);
   if (guide.hardwareList) lines.push(`Hardware: ${asList(guide.hardwareList)}.`);
+  if (guide.deliveryCheckScript) lines.push(`Delivery check: ${asList(guide.deliveryCheckScript)}.`);
   if (guide.agentRules) lines.push(`Rules for this product: ${asList(guide.agentRules)}.`);
   return lines.join(' ');
 }
 
-module.exports = { createProductGuides, guideMessage, GUIDE_FIELDS };
+module.exports = { createProductGuides, guideMessage, assemblyStepCount, GUIDE_FIELDS };

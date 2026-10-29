@@ -4,7 +4,7 @@ const { formatDate, formatDateTime, formatClock, describeWeek, spokenCaseNumber,
 const { resolveDate, todayInIst, MAX_DAYS_AHEAD } = require('../dates');
 const { checkInstallationDay, checkInstallationSlot, INSTALLATION_HOURS } = require('../installationSlots');
 const { formatRupees } = require('../crm/orderItems');
-const { guideMessage } = require('../crm/productGuides');
+const { guideMessage, assemblyStepCount } = require('../crm/productGuides');
 
 const MAX_PRODUCTS_SPOKEN = 5;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -150,6 +150,48 @@ function caseResponse(res, result, successMessage, extra = {}) {
 module.exports = function agentToolsRouter({ crm, invoiceLinks, productGuides, now = () => Date.now(), logger = console }) {
   const router = express.Router();
 
+  // Runs as the call starts (the agent's on-start tool), before the greeting. On a phone call Sarvam sends the number
+  // the customer is calling from; it becomes customer_phone, so the agent never asks for it, and a customer on record
+  // is greeted by first name. Outbound calls and website calls already carry these, and keep what they have. It answers
+  // with every variable it is given back, so a failed lookup leaves the call as it was.
+  router.post('/call-start', async (req, res) => {
+    const body = req.body || {};
+    const given = {
+      customer_phone: String(body.customer_phone || ''),
+      customer_name: String(body.customer_name || ''),
+      opening_line: String(body.opening_line || ''),
+    };
+    const inbound = !body.call_reason || body.call_reason === 'inbound';
+    // Sarvam's caller identifier is the phone number on a phone call ("07357558134") and an email in its own test chat.
+    const callerIsPhone = !body.caller_type || body.caller_type === 'phone_number';
+    const caller = [body.customer_phone, callerIsPhone ? body.caller_phone : null]
+      .map(normalizePhone).find((p) => p && /^\+91[6-9]\d{9}$/.test(p));
+    if (!inbound || !caller) return res.json({ ...given, caller_details: '', known_customer: false });
+
+    // What is on record for the number, so the agent starts the call knowing it and never asks for the number.
+    const number = `The number for this call, ending ${spokenDigits(lastTenDigits(caller).slice(-4))},`;
+    let firstName = null;
+    let details = `${number} is not on record as a customer.`;
+    try {
+      const contact = await crm.findContactByPhone(caller);
+      if (contact) {
+        firstName = contact.firstName || String(contact.name || '').trim().split(/\s+/)[0] || null;
+        const { orderLine, requestLine } = await recordsOf(contact);
+        details = `${number} is registered to ${contact.name}. ${orderLine}${requestLine}`;
+      }
+    } catch (err) {
+      logger.error(`Looking up the caller at call start failed: ${err.message}`);
+      details = '';
+    }
+    return res.json({
+      customer_phone: caller,
+      customer_name: given.customer_name || firstName || '',
+      opening_line: firstName ? `Namaste ${firstName} ji, welcome to Tiffany Designs. How can I help you today?` : given.opening_line,
+      caller_details: details,
+      known_customer: Boolean(firstName),
+    });
+  });
+
   // The model does no calendar arithmetic; every spoken date is resolved here, in IST. The dates are installation
   // dates, so the visiting days and hours apply (src/installationSlots.js); with `time_text` the time is checked too.
   router.post('/resolve-date', (req, res) => {
@@ -207,6 +249,21 @@ module.exports = function agentToolsRouter({ crm, invoiceLinks, productGuides, n
     };
   }
 
+  // A customer's recent orders and open requests, as the agent hears them; the open requests come with every answer,
+  // so the agent knows them before asking about the concern.
+  async function recordsOf(contact) {
+    const orders = contact.accountId ? await crm.findRecentOrdersForAccount(contact.accountId) : [];
+    const named = orders.filter((o) => o.erpOrderId);
+    const requests = contact.accountId ? await crm.getCaseStatus({ accountId: contact.accountId }) : [];
+    const orderLine = named.length
+      ? `Recent orders: ${named.map((o) => `${o.erpOrderId}, ${o.deliveryStatus ? o.deliveryStatus.toLowerCase() : 'status unknown'}`).join('; ')}.`
+      : 'No order id is on record.';
+    const requestLine = requests.length
+      ? ` Open requests: ${requests.map((c) => `${spokenCaseNumber(c.caseNumber)} for ${c.serviceType || 'service'}, ${c.status}`).join('; ')}.`
+      : '';
+    return { named, requests, orderLine, requestLine };
+  }
+
   router.post('/customer-lookup', async (req, res) => {
     const phone = normalizePhone(req.body?.phone);
     const { customer_name: customerName, postal_code: postalCode } = req.body || {};
@@ -233,17 +290,8 @@ module.exports = function agentToolsRouter({ crm, invoiceLinks, productGuides, n
       return res.json({ found: false, message: 'The registered mobile number is needed, or the full name with the six digit PIN code.' });
     }
 
-    const orders = contact.accountId ? await crm.findRecentOrdersForAccount(contact.accountId) : [];
-    const named = orders.filter((o) => o.erpOrderId);
-    // The customer's open requests come with the answer, so the agent knows them before asking about the concern.
-    const requests = contact.accountId ? await crm.getCaseStatus({ accountId: contact.accountId }) : [];
+    const { named, requests, orderLine, requestLine } = await recordsOf(contact);
     const firstName = contact.firstName || String(contact.name || '').trim().split(/\s+/)[0] || null;
-    const orderLine = named.length
-      ? `Recent orders: ${named.map((o) => `${o.erpOrderId}, ${o.deliveryStatus ? o.deliveryStatus.toLowerCase() : 'status unknown'}`).join('; ')}.`
-      : 'No order id is on record.';
-    const requestLine = requests.length
-      ? ` Open requests: ${requests.map((c) => `${spokenCaseNumber(c.caseNumber)} for ${c.serviceType || 'service'}, ${c.status}`).join('; ')}.`
-      : '';
     return res.json({
       found: true,
       verified_by: phone ? 'mobile' : 'name_and_pin',
@@ -259,9 +307,15 @@ module.exports = function agentToolsRouter({ crm, invoiceLinks, productGuides, n
     });
   });
 
+  // An order the service team can act on has its customer's mobile number and a delivery address it can visit (a
+  // street, and a city or PIN code). When either is missing, the agent offers the invoice upload link, whose upload
+  // fills them in on the order (src/crm/invoiceUploads.js).
   async function orderAnswer(order, lead = '') {
     const spokenId = order.erpOrderId || spokenCaseNumber(order.orderNumber);
-    const openRequests = await crm.getOpenRequests(order.id);
+    const [openRequests, details] = await Promise.all([crm.getOpenRequests(order.id), crm.getDetailsOnFile({ order })]);
+    const hasMobile = Boolean(details.mobile);
+    const hasAddress = Boolean(order.street && (order.city || order.postalCode));
+    const missing = [!hasMobile && 'mobile number', !hasAddress && 'delivery address'].filter(Boolean);
     return {
       found: true,
       order_id: order.erpOrderId || null,
@@ -272,8 +326,15 @@ module.exports = function agentToolsRouter({ crm, invoiceLinks, productGuides, n
       order_source: order.orderSource,
       products: order.productSummary || '',
       open_requests: [...new Set(openRequests.map((r) => r.kind))],
+      mobile_on_order: hasMobile,
+      address_on_order: hasAddress,
+      details_missing: missing.length > 0,
       message: `${lead}${describeOrder({ orderId: spokenId, products: order.productSummary, deliveryStatus: order.deliveryStatus, deliveryDate: order.deliveryDate })}`
-        + openRequestsLine(openRequests),
+        + openRequestsLine(openRequests)
+        + (missing.length
+          ? ` The order has no ${missing.join(' and no ')} on record. After answering what the customer asked, offer to send a WhatsApp link `
+            + 'to upload the invoice, so the order can be completed before any request is registered.'
+          : ''),
     };
   }
 
@@ -439,7 +500,8 @@ module.exports = function agentToolsRouter({ crm, invoiceLinks, productGuides, n
       return res.json({
         sent: true,
         message: `The upload link is sent on WhatsApp to the number ending ${spokenDigits(result.ending)}. Tell the customer to open it and upload `
-          + 'a clear photo or screenshot of the invoice; the service system then looks for the order and links it to the request.',
+          + 'a clear photo, screenshot or PDF of the invoice; the service system then finds the order and completes it with the details on the '
+          + 'invoice. Ask the customer to call again once it is uploaded, so the concern can be resolved.',
       });
     }
     return res.json({
@@ -511,12 +573,16 @@ module.exports = function agentToolsRouter({ crm, invoiceLinks, productGuides, n
     });
   });
 
-  // The published product guide for the products on an order, or for a product the customer names: every part with
-  // its sticker number and part number, the hardware, and the rules for that product, so the agent can go through a
-  // damaged, defective or missing part one part at a time.
+  // The published product guide for the products on an order, or for a product the customer names. By default every
+  // part with its sticker number, quantity and part number, the hardware, the delivery check and the rules for that
+  // product, so the agent goes through a damaged, defective or missing part one part at a time; with purpose
+  // 'assembly' the complete guide, each numbered step with its own hardware, so it walks the customer through assembly.
   router.post('/product-guide', async (req, res) => {
     const body = req.body || {};
-    const noGuide = 'No product guide is on record for this product. Match the part with tool:find_parts instead.';
+    const purpose = /assembl/i.test(String(body.purpose || '')) ? 'assembly' : 'parts';
+    const noGuide = purpose === 'assembly'
+      ? 'No assembly guide is on record for this product. Offer an installation visit by the service team instead.'
+      : 'No product guide is on record for this product. Match the part with tool:find_parts instead.';
     if (!productGuides) return res.json({ found: false, message: noGuide });
     const { order, problem } = await orderFromReferences(body);
     if (problem) return res.json({ found: false, message: problem });
@@ -532,12 +598,15 @@ module.exports = function agentToolsRouter({ crm, invoiceLinks, productGuides, n
     if (!guides.length) return res.json({ found: false, message: noGuide });
     return res.json({
       found: true,
+      purpose,
+      has_assembly_steps: guides.some((g) => Boolean(g.assemblySteps)),
+      ...(purpose === 'assembly' ? { step_count: guides.reduce((n, g) => n + assemblyStepCount(g), 0) } : {}),
       products: guides.map((g) => ({
         product: g.productName,
         parts_have_number_stickers: Boolean(g.partsHaveNumberStickers),
         parts: g.parts.map((p) => ({ name: p.name, part_number: p.partNumber })),
       })),
-      message: guides.map(guideMessage).join(' '),
+      message: guides.map((g) => guideMessage(g, purpose)).join(' '),
     });
   });
 
