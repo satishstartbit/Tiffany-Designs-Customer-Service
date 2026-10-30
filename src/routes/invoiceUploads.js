@@ -1,11 +1,12 @@
 const express = require('express');
-const { FILE_TYPES } = require('../invoiceReader');
+const { FILE_TYPES, SELLER, soldByTiffany } = require('../invoiceReader');
 
 const MAX_BYTES = 8 * 1024 * 1024;
 
 // The invoice upload page (web/app/invoice) reaches these through its own route. They are public, have one address
-// for everyone and take nothing but the file: the customer and the order are found from the invoice itself
-// (src/crm/invoiceUploads.js). Uploads are rate-limited per visitor and overall, because each is a paid AI call.
+// for everyone and take nothing but the file: the customer and the order are found from the invoice itself, or the
+// order is added from it (src/crm/invoiceUploads.js). Only invoices sold by Tiffany Designs Private Limited are taken.
+// Uploads are rate-limited per visitor and overall, because each is a paid AI call.
 // Answers name nothing from Salesforce, only what the customer's own invoice says.
 module.exports = function invoiceUploadsRouter({ reader, records, limiter, logger = console }) {
   const router = express.Router();
@@ -54,6 +55,14 @@ module.exports = function invoiceUploadsRouter({ reader, records, limiter, logge
         message: 'We could not find an invoice in this file. Please upload a clear photo or screenshot of the whole invoice.',
       });
     }
+    // Only Tiffany Designs' own invoices are taken; anything else is refused before it reaches Salesforce.
+    if (!soldByTiffany(invoice)) {
+      logger.warn(`An uploaded invoice was refused: it is sold by ${invoice.soldBy || invoice.seller || 'no seller it names'}.`);
+      return res.status(422).json({
+        error: 'not_tiffany_invoice',
+        message: `This invoice does not show ${SELLER} as the seller. Please upload the Tiffany Designs invoice for your order, where Sold By shows ${SELLER}.`,
+      });
+    }
 
     let result;
     try {
@@ -66,6 +75,14 @@ module.exports = function invoiceUploadsRouter({ reader, records, limiter, logge
     const answer = { invoice_number: invoice.invoiceNumber, order_id: invoice.orderId };
     if (result.matched) {
       return res.json({ status: 'matched', ...answer, message: 'Thank you. We found your order and added your invoice to it. Our service team will take it from here.' });
+    }
+    if (result.created) {
+      return res.json({
+        status: 'created',
+        ...answer,
+        message: 'Thank you. Your order was not in our records, so we have added it from your invoice. Our service team will check it. '
+          + 'Please call us again to continue with your request.',
+      });
     }
     if (result.recorded) {
       return res.json({

@@ -1,7 +1,7 @@
 // The invoice upload page (/invoice) sends the customer's file through its own route (app/api/invoice), which
-// forwards it here to the Node server's public /api/invoice-uploads. The server finds the customer and the order from
-// the invoice itself, so nothing else is sent and no server key is involved. Keep the file rules in step with
-// src/routes/invoiceUploads.js.
+// forwards it here to the Node server's public /api/invoice-uploads. The server checks the invoice is Tiffany Designs'
+// and finds the customer and the order from the invoice itself, or adds the order from it, so nothing else is sent
+// and no server key is involved. Keep the file rules in step with src/routes/invoiceUploads.js.
 
 const FILE_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'];
 // Vercel functions take request bodies up to 4.5 MB; the page scales photos down well below this.

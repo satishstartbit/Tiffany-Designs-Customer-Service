@@ -1,4 +1,6 @@
-const { lastTenDigits, normalizePhone, nameWords, namesMatch, joinDigits, trailingNumber, sameReference } = require('../rules');
+const {
+  lastTenDigits, normalizePhone, nameWords, fullName, hasName, namesMatch, joinDigits, trailingNumber, sameReference,
+} = require('../rules');
 const { todayInIst } = require('../dates');
 const { createBusinessHours } = require('./businessHours');
 const { parseItems } = require('./orderItems');
@@ -24,6 +26,26 @@ const RECORD_TYPE_BY_SERVICE_TYPE = {
 
 // Requests that need no visit or pickup, so no address.
 const ADDRESS_FREE_ISSUES = new Set(['general', 'escalation']);
+
+// Installation, damage and replacement requests are registered only for an order the service system holds, and a
+// request reached on a number that is not on the customer's record names the person to ask for. What the agent hears.
+const ORDER_NEEDED = 'An installation, damage or replacement request is registered only for an order. Ask for the order id, '
+  + 'order number or invoice number, and call this tool again with the one that found the order.';
+const ORDER_NOT_FOUND = 'Nothing was registered, because this request needs the order. When the order cannot be found, offer the '
+  + 'WhatsApp link to upload the invoice.';
+const NAME_NEEDED = {
+  order: "This mobile number is not on the customer's record for the order, so the full name, first and last, of the person "
+    + 'the service team should ask for on it is needed. Ask for it and call this tool again with it as customer_name.',
+  customer: 'No customer with a name is on record for this mobile number, so the full name, first and last, is needed. '
+    + 'Ask for it and call this tool again with it as customer_name.',
+};
+// An order is the caller's only when a number given in the call is a mobile on its customer record.
+const NUMBER_NEEDED = {
+  ask: "Nothing was registered, because the order is not confirmed as the customer's yet. Ask which mobile number the order "
+    + 'was placed with, call tool:find_order with the order reference and that number as order_phone, then call this tool again.',
+  none: "Nothing was registered: no mobile number is on record for this order, so it cannot be confirmed as the customer's. "
+    + 'Offer the WhatsApp link to upload the invoice.',
+};
 
 // Voice issue types -> the org's restricted Service_Type__c / Service_Sub_Type__c values.
 const SERVICE_TYPES = {
@@ -105,12 +127,15 @@ function toOrder(row, items = []) {
   };
 }
 
+// A record saved without a name ("Unknown Customer") has no name to use.
 function toContact(row) {
   if (!row) return null;
+  const name = [row.FirstName, row.LastName].filter(Boolean).join(' ');
+  const named = hasName(name);
   return {
     id: row.Id,
-    name: [row.FirstName, row.LastName].filter(Boolean).join(' '),
-    firstName: row.FirstName,
+    name: named ? name : null,
+    firstName: named ? row.FirstName || null : null,
     accountId: row.AccountId,
     mobile: row.MobilePhone,
     phone: row.Phone,
@@ -167,6 +192,45 @@ function indianStatesOf(described) {
 
 function compact(fields) {
   return Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined && v !== null && v !== ''));
+}
+
+// The order a caller means by an order id, the Salesforce order number of a phone order, or an invoice number, found
+// with the CRM's lookups. Returns { order }, { problem } to say, or {} when no reference was given.
+async function findOrderFromReferences(lookups, { orderId, orderNumber, invoiceNumber, phone } = {}) {
+  const text = (value) => String(value ?? '').trim();
+  let invoice = text(invoiceNumber);
+  let references = [text(orderId), text(orderNumber)].filter(Boolean);
+  // An invoice number said where the order id was expected.
+  if (!invoice) invoice = references.find((r) => /^inv/i.test(r)) || '';
+  references = references.filter((r) => r !== invoice);
+  if (!references.length && !invoice) return {};
+
+  // A short number can match several orders, and one invoice number can be on several: the caller's mobile picks
+  // theirs, otherwise more is needed.
+  const narrow = async (matches) => {
+    if (matches.length > 1 && phone) {
+      const contact = await lookups.findContactByPhone(phone);
+      const own = matches.filter((o) => contact?.accountId && o.accountId === contact.accountId);
+      if (own.length) return own;
+    }
+    return matches;
+  };
+  const chosen = async (matches) => ({ order: await lookups.getOrderById(matches[0].id) || matches[0] });
+
+  // The order id or order number, said in full or as the number at its end ("1009" for TD-ORD-1009).
+  for (const reference of references) {
+    const matches = await narrow(await lookups.findOrdersByReference(reference));
+    if (matches.length === 1) return chosen(matches);
+    if (matches.length > 1) return { problem: 'More than one order ends in these digits. Ask for the full order id or the invoice number.' };
+  }
+  // The invoice number, in full or as its digits ("009" for INV-009). Digits that named no order are tried as an
+  // invoice number too, since callers often say only the number.
+  for (const reference of [invoice, ...references.filter((r) => !/[a-z]/i.test(r))].filter(Boolean)) {
+    const matches = await narrow(await lookups.findOrdersByInvoice(reference));
+    if (matches.length === 1) return chosen(matches);
+    if (matches.length > 1) return { problem: 'More than one order has this invoice number. Ask for the order id or the order number.' };
+  }
+  return { notFound: true, problem: 'No order matches that number. Ask the customer to read the order id, order number or invoice number again.' };
 }
 
 function createCrm({
@@ -316,19 +380,43 @@ function createCrm({
     return matches.length === 1 ? matches[0] : null;
   }
 
+  // Who on the order's account the caller is: the contact with one of the mobiles given, or with the full name given
+  // (the account's own name counts); and whether one of the factors is the order's invoice number.
+  async function matchOrderCustomer(order, factors, customerName) {
+    const contacts = order.accountId ? await accountContacts(order.accountId) : [];
+    const mobiles = factors.map(lastTenDigits).filter(Boolean);
+    return {
+      contacts,
+      byInvoice: Boolean(order.invoiceNumber) && factors.some((f) => sameReference(f, order.invoiceNumber)),
+      byPhone: contacts.find((c) => [c.mobile, c.phone].some((p) => p && mobiles.includes(lastTenDigits(p)))) || null,
+      byName: customerName
+        ? contacts.find((c) => namesMatch(customerName, c.name)) || (namesMatch(customerName, order.accountName) ? contacts[0] || {} : null)
+        : null,
+    };
+  }
+
+  // Whether one of these numbers is a mobile on the order's customer record: its own contact, or a contact of its
+  // account. The voice agent shares an order's details and registers requests for it only then. `onRecord` is false
+  // when the order has no number to compare with; `phone` is the number that matched (+91 form).
+  async function confirmOrderNumber(order, phones) {
+    const contacts = order.accountId ? await accountContacts(order.accountId) : [];
+    if (order.contactId && !contacts.some((c) => c.id === order.contactId)) {
+      const own = await getContactById(order.contactId);
+      if (own) contacts.push(own);
+    }
+    const onRecord = new Set(contacts.flatMap((c) => [c.mobile, c.phone]).map(lastTenDigits).filter(Boolean));
+    const match = [].concat(phones).map(lastTenDigits).find((p) => p && onRecord.has(p));
+    return { onRecord: onRecord.size > 0, confirmed: Boolean(match), phone: match ? normalizePhone(match) : null };
+  }
+
   async function verifyOrder(erpOrderId, verification, { customerName } = {}) {
     const factors = [].concat(verification).map((f) => String(f ?? '').trim()).filter(Boolean);
     if (!erpOrderId || (!factors.length && !customerName)) return { found: false };
     const order = await findOrderByReference(erpOrderId);
     if (!order) return { found: false };
 
-    const byInvoice = Boolean(order.invoiceNumber) && factors.some((f) => sameReference(f, order.invoiceNumber));
-    const contacts = order.accountId ? await accountContacts(order.accountId) : [];
-    const mobiles = factors.map(lastTenDigits).filter(Boolean);
-    const matched = contacts.find((c) => [c.mobile, c.phone].some((p) => p && mobiles.includes(lastTenDigits(p))));
-    const named = !byInvoice && !matched && customerName
-      ? contacts.find((c) => namesMatch(customerName, c.name)) || (namesMatch(customerName, order.accountName) ? contacts[0] || {} : null)
-      : null;
+    const { contacts, byInvoice, byPhone: matched, byName } = await matchOrderCustomer(order, factors, customerName);
+    const named = !byInvoice && !matched ? byName : null;
     if (!byInvoice && !matched && !named) return { found: false };
 
     return {
@@ -374,24 +462,41 @@ function createCrm({
     return { status: 'found', contact: toContact(matches[0]) };
   }
 
-  async function createCustomer(phone, customerName, accountFields = {}, contactFields = {}) {
-    const fullName = String(customerName || '').trim() || 'Unknown Customer';
-    const words = fullName.split(/\s+/);
-    const account = await salesforce.create('Account', compact({ Name: fullName, RecordTypeId: await accountRecordTypeId(), ...accountFields }));
+  // A new caller's account and contact. `name` is a first and last name (rules fullName); nothing is saved without one.
+  async function createCustomer(phone, name, accountFields = {}, contactFields = {}) {
+    const words = name.split(' ');
+    const account = await salesforce.create('Account', compact({ Name: name, RecordTypeId: await accountRecordTypeId(), ...accountFields }));
     const contact = await salesforce.create('Contact', compact({
       AccountId: account.id,
-      FirstName: words.length > 1 ? words[0] : undefined,
-      LastName: words.length > 1 ? words.slice(1).join(' ') : words[0],
+      FirstName: words[0],
+      LastName: words.slice(1).join(' '),
       MobilePhone: phone,
       ...contactFields,
     }));
-    return { id: contact.id, accountId: account.id, name: fullName, created: true };
+    return { id: contact.id, accountId: account.id, name, created: true };
   }
 
-  async function resolveOrCreateContact(phone, customerName, accountFields = {}) {
+  // A record the voice agent once saved without a name (Unknown Customer) takes the full name given for its number,
+  // on the contact and on its account when that has no name either. A named record is never changed.
+  async function nameCustomer(contact, name) {
+    const words = name.split(' ');
+    await salesforce.update('Contact', contact.id, { FirstName: words[0], LastName: words.slice(1).join(' ') });
+    if (contact.accountId) {
+      const [account] = await salesforce.query(`SELECT Name FROM Account WHERE Id = '${escapeSoql(contact.accountId)}' LIMIT 1`);
+      if (account && !hasName(account.Name)) await salesforce.update('Account', contact.accountId, { Name: name });
+    }
+    return { ...contact, name, firstName: words[0] };
+  }
+
+  // The customer record for a mobile number, made when there is none. Null when the number has no named record and no
+  // full name was given, so nothing is saved under a made-up name.
+  async function resolveOrCreateContact(phone, customerName, accountFields = {}, contactFields = {}) {
     const existing = await findContactByPhone(phone);
-    if (existing) return { ...existing, created: false };
-    return createCustomer(phone, customerName, accountFields);
+    if (existing?.name) return { ...existing, created: false };
+    const name = fullName(customerName);
+    if (!name) return null;
+    if (existing) return { ...(await nameCustomer(existing, name)), created: false };
+    return createCustomer(phone, name, accountFields, contactFields);
   }
 
   async function accountAddress(accountId) {
@@ -523,6 +628,7 @@ function createCrm({
     });
     const prefixed = (prefix) => Object.fromEntries(Object.entries(address).map(([k, v]) => [`${prefix}${k}`, v]));
     const customer = await resolveOrCreateContact(input.phone, input.customerName, prefixed('Billing'));
+    if (!customer) return { created: false, error: "The customer's full name, first and last, is needed to place the order. Ask for it." };
     const givenName = String(input.customerName || '').trim();
 
     const order = await salesforce.create('Order', compact({
@@ -608,16 +714,33 @@ function createCrm({
 
   // Classifies the request, links order, contact and part, and saves the Case. Salesforce's
   // Case_Service_Routing flow then sets Service_Route__c and the owning queue from the city and PIN.
+  // Installation, damage and replacement requests need the order, confirmed as the caller's by a number on its
+  // customer record (the request's mobile, the number of the call, or the number the caller said the order was placed
+  // with): the case carries the order, its invoice number and the order's customer, whichever number the caller uses
+  // to be reached. General queries and call backs can go without one; an order they cannot confirm is not linked.
   async function createServiceCase(input) {
     const mapping = SERVICE_TYPES[input.issueType];
     if (!mapping) throw new Error(`Unknown issue type: ${input.issueType}`);
     if (!String(input.description || '').trim()) return { created: false, error: 'A description of the issue is required.' };
 
-    const verified = input.erpOrderId
-      ? await verifyOrder(input.erpOrderId, [input.verification, input.invoiceNumber, input.phone])
-      : { found: false };
-    // The order the caller named is linked even when their mobile is not on it; the caller stays the case contact.
-    const order = verified.found ? verified.order : input.erpOrderId ? await findOrderByReference(input.erpOrderId) : null;
+    const needsOrder = mapping.serviceType !== 'General Query';
+    const found = await findOrderFromReferences(
+      { findOrdersByReference, findOrdersByInvoice, findContactByPhone, getOrderById },
+      { orderId: input.erpOrderId, orderNumber: input.orderNumber, invoiceNumber: input.invoiceNumber, phone: input.phone },
+    );
+    let { order } = found;
+    if (!order && needsOrder) {
+      return { created: false, error: found.problem ? `${found.problem} ${ORDER_NOT_FOUND}` : ORDER_NEEDED };
+    }
+    let unlinkedNote = null;
+    if (order) {
+      const check = await confirmOrderNumber(order, [input.phone, input.orderPhone, input.callerPhone]);
+      if (!check.confirmed && needsOrder) return { created: false, numberNeeded: true, error: check.onRecord ? NUMBER_NEEDED.ask : NUMBER_NEEDED.none };
+      if (!check.confirmed) {
+        unlinkedNote = 'The order given is not linked: no number given in the call is on its customer record.';
+        order = null;
+      }
+    }
 
     // A reschedule changes the open installation request, so only new requests are compared.
     const kind = input.issueType === 'installation_reschedule' ? null : requestKind(mapping.serviceType, mapping.subType);
@@ -638,12 +761,14 @@ function createCrm({
         if (known) onFile = await getDetailsOnFile({ contact: known });
       }
     }
-    const mobile = input.phone || onFile?.mobile || null;
-    if (!order && !mobile) {
-      return { created: false, error: 'A mobile number is needed to register the request.' };
-    }
-    if (onFile && !mobile) {
+    if (onFile && !input.phone && !onFile.mobile) {
       return { created: false, error: 'No mobile number is on file for this order. Ask the customer for a mobile number to reach them on.' };
+    }
+    // Every request has the number the service team calls: the one given for it, else the one on file for the order.
+    const orderContact = !order ? null : onFile ? { id: onFile.contactId, mobile: onFile.mobile } : await getOrderContact(order);
+    const mobile = input.phone || onFile?.mobile || normalizePhone(orderContact?.mobile) || normalizePhone(orderContact?.phone) || null;
+    if (!mobile) {
+      return { created: false, error: 'A mobile number is needed to register the request. Ask for the 10 digit number the service team should call.' };
     }
 
     // The caller chose the address the order was delivered to, or the customer's address on file when the order has
@@ -669,12 +794,28 @@ function createCrm({
     // A new city or PIN code means a new address, so the street on file no longer applies.
     const street = delivery ? delivery.street : input.address || (onFile && !givenPlace ? onFile.street : null);
 
+    // With an order, the case belongs to the order's customer: the contact with the request's mobile, or the one the
+    // caller verified as, else the order's own contact. A number that is not on the customer's record makes no new
+    // customer; the case names the person to ask for on it. Without an order, the caller's record for the number.
     let customer;
-    if (verified.found) customer = { id: verified.contactId, accountId: order.accountId };
-    // The order's own customer; a different number given for this request does not make a new customer.
-    else if (onFile && (order || onFile.contactId)) customer = { id: onFile.contactId, accountId: onFile.accountId || order?.accountId };
-    else if (input.phone) customer = await resolveOrCreateContact(input.phone, input.customerName);
-    else customer = { id: (await getOrderContact(order))?.id || null, accountId: order.accountId };
+    let contactNote = null;
+    if (order) {
+      const factors = [input.phone, input.orderPhone, input.callerPhone].map((f) => String(f ?? '').trim()).filter(Boolean);
+      const match = await matchOrderCustomer(order, factors, input.customerName);
+      const isMobile = (p) => Boolean(p) && lastTenDigits(p) === lastTenDigits(mobile);
+      const reached = match.contacts.find((c) => isMobile(c.mobile) || isMobile(c.phone))
+        || (isMobile(orderContact?.mobile) || isMobile(orderContact?.phone) ? orderContact : null);
+      customer = { id: (reached || match.byPhone || match.byName)?.id || orderContact?.id || null, accountId: order.accountId };
+      if (!reached) {
+        const person = fullName(input.customerName) || fullName((await findContactByPhone(mobile))?.name);
+        if (!person) return { created: false, error: NAME_NEEDED.order };
+        contactNote = `Contact for this request: ${person}, on ${mobile}, a number that is not on the customer's record.`;
+      }
+    } else {
+      // An upload has nobody to ask (customerOptional): without a name it is saved with no customer, never a made-up one.
+      customer = await resolveOrCreateContact(mobile, input.customerName) || (input.customerOptional ? { id: null, accountId: null } : null);
+      if (!customer) return { created: false, error: NAME_NEEDED.customer };
+    }
 
     const changed = [
       onFile && input.phone && onFile.mobile && lastTenDigits(input.phone) !== lastTenDigits(onFile.mobile) && 'mobile number',
@@ -697,25 +838,29 @@ function createCrm({
       input.quantity && `Quantity: ${input.quantity}`,
       input.productName && `Product: ${input.productName}`,
       input.erpOrderId && `Order id given: ${input.erpOrderId}`,
+      input.orderNumber && `Order number given: ${input.orderNumber}`,
+      unlinkedNote,
       street && `Address: ${street}`,
       (input.preferredDate || input.preferredTime) && `Preferred slot: ${[input.preferredDate, input.preferredTime].filter(Boolean).join(' ')}`,
       placeNote,
       detailsNote,
+      contactNote,
       input.capturedBy || 'Captured by the AI voice agent.',
     ].filter(Boolean).join('\n');
 
+    const orderName = order?.erpOrderId || order?.orderNumber;
     const fields = compact({
       RecordTypeId: await caseRecordTypeId(mapping.serviceType),
-      Subject: `${mapping.serviceType}${order?.erpOrderId ? ` - ${order.erpOrderId}` : ''}`,
+      Subject: `${mapping.serviceType}${orderName ? ` - ${orderName}` : ''}`,
       Description: description,
       Origin: input.origin || 'Phone',
       Status: input.issueType === 'escalation' ? 'Escalated' : undefined,
       ContactId: customer.id,
-      AccountId: customer.id ? undefined : customer.accountId,
+      AccountId: order || !customer.id ? customer.accountId : undefined,
       Service_Type__c: mapping.serviceType,
       Service_Sub_Type__c: mapping.subType,
       Order__c: order?.id,
-      Invoice_Number__c: order ? order.invoiceNumber : input.invoiceNumber,
+      Invoice_Number__c: order?.invoiceNumber || input.invoiceNumber,
       Order_Source__c: order ? order.orderSource : input.orderSource,
       Customer_Mobile__c: mobile,
       Damaged_Component__c: await componentId(input.partNumber),
@@ -732,7 +877,7 @@ function createCrm({
       caseNumber: saved?.CaseNumber || null,
       serviceRoute: saved?.Service_Route__c || null,
       withinBusinessHours,
-      orderVerified: verified.found,
+      orderVerified: Boolean(order),
       orderLinked: Boolean(order),
       ...(onFile ? { usedDetailsOnFile: true } : {}),
       ...(addressSource ? { addressSource } : {}),
@@ -874,20 +1019,23 @@ function createCrm({
 
     const existing = await findContactByPhone(input.phone);
     if (!existing) {
-      if (!name) return { saved: false, error: "The customer's name is needed to save a new customer." };
+      if (!fullName(name)) return { saved: false, error: "The customer's full name, first and last, is needed to save a new customer." };
       const stateCode = await indianStateCode(input.state).catch(() => undefined);
       const address = compact({ Street: street, City: cityName, PostalCode: pin, StateCode: stateCode, CountryCode: street || cityName || pin ? 'IN' : undefined });
       const prefixed = (prefix) => Object.fromEntries(Object.entries(address).map(([k, v]) => [`${prefix}${k}`, v]));
-      const customer = await createCustomer(input.phone, name, prefixed('Billing'), compact({ Email: email, OtherPhone: otherPhone, ...prefixed('Mailing') }));
+      const customer = await createCustomer(input.phone, fullName(name), prefixed('Billing'), compact({ Email: email, OtherPhone: otherPhone, ...prefixed('Mailing') }));
       return { saved: true, newCustomer: true, name: customer.name, contactId: customer.id };
     }
 
+    // A record saved without a name takes the full name now; any other change is checked first.
+    const named = !existing.name && fullName(name) ? await nameCustomer(existing, fullName(name)) : null;
     const details = [
-      name && `Name: ${name}`,
+      name && !named && `Name: ${name}`,
       email && `Email: ${email}`,
       otherPhone && `Other phone: ${otherPhone}`,
       (street || cityName || input.state || pin) && `Address: ${[street, cityName, input.state, pin].filter(Boolean).join(', ')}`,
     ].filter(Boolean);
+    if (named && !details.length) return { saved: true, newCustomer: false, name: named.name, contactId: existing.id };
     if (!details.length) return { saved: false, error: 'No details were given to save. Ask what should be saved.' };
     await salesforce.create('Task', compact({
       WhoId: existing.id,
@@ -897,7 +1045,7 @@ function createCrm({
       Priority: 'Normal',
       ActivityDate: todayInIst(now()).toISOString().slice(0, 10),
     }));
-    return { saved: true, newCustomer: false, name: existing.name, contactId: existing.id };
+    return { saved: true, newCustomer: false, name: named?.name || existing.name, contactId: existing.id };
   }
 
   // The customer's latest requests, open or closed, and the latest logged calls.
@@ -952,6 +1100,8 @@ function createCrm({
     getOrderByInvoice,
     findRecentOrdersForAccount,
     getOrderContact,
+    confirmOrderNumber,
+    resolveOrCreateContact,
     verifyOrder,
     findOrderByReference,
     findOrdersByReference,
@@ -978,5 +1128,6 @@ function createCrm({
 }
 
 module.exports = {
-  createCrm, SERVICE_TYPES, AGENT_LANGUAGES, requestKind, escapeSoql, escapeSoqlLike, escapeSosl, soqlDateTime, indianStatesOf,
+  createCrm, findOrderFromReferences, SERVICE_TYPES, AGENT_LANGUAGES, requestKind, escapeSoql, escapeSoqlLike, escapeSosl, soqlDateTime,
+  indianStatesOf,
 };

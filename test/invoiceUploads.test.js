@@ -10,7 +10,7 @@ const { createInvoiceReader, normalizeInvoice, INVOICE_SCHEMA } = require('../sr
 const { createInvoiceUploads, productFor, LINK_SUBJECT } = require('../src/crm/invoiceUploads');
 const { createInvoiceLinkLimiter, createInvoiceUploadLimiter } = require('../src/rateLimit');
 const { createCrm } = require('../src/crm/crm');
-const { lastTenDigits } = require('../src/rules');
+const { lastTenDigits, fullName } = require('../src/rules');
 const { startTestServer } = require('./helpers');
 
 const NOW = Date.parse('2026-10-14T06:30:00Z');
@@ -20,8 +20,10 @@ const INVOICE = {
   isInvoice: true,
   invoiceNumber: 'INV-2010',
   orderId: 'TD-ORD-2010',
+  orderNumber: null,
   invoiceDate: '2026-10-10',
   orderDate: '2026-10-08',
+  soldBy: 'Tiffany Designs Private Limited',
   seller: 'Tiffany Designs',
   platform: 'Website',
   customerName: 'Asha Sharma',
@@ -137,7 +139,7 @@ test('when WhatsApp refuses, the note is removed; when nothing is set up, nothin
   t.after(srv.close);
   const res = await srv.call('POST', '/api/agent/invoice-upload-link', { headers: srv.agent, body: { phone: '9876543210' } });
   assert.equal(res.body.sent, false);
-  assert.match(res.body.message, /cannot be sent right now\. Carry on without the order/);
+  assert.match(res.body.message, /cannot be sent right now\. Register no installation, damage or replacement request without the order: offer a call back/);
   assert.deepEqual(refused.records.removed, ['00T1'], 'a number that got no message has no link on record');
 
   for (const options of [{ apiKey: '' }, { canRead: false }]) {
@@ -226,6 +228,37 @@ test('other files, oversized files and pictures that are not invoices are refuse
   assert.equal(calls.record.length, 0, 'nothing reaches Salesforce');
 });
 
+test('only an invoice sold by Tiffany Designs Private Limited is taken', async (t) => {
+  const sellers = { other: { soldBy: 'Comfort Furniture Traders' }, none: { soldBy: null, seller: null }, short: { soldBy: 'TIFFANY DESIGNS PVT. LTD.' }, header: { soldBy: null, seller: 'Tiffany Designs Private Limited' } };
+  const { srv, calls, upload } = await uploadServer({ reader: (file) => ({ ...INVOICE, ...sellers[file.data.toString()] }) });
+  t.after(srv.close);
+
+  for (const name of ['other', 'none']) {
+    const refused = await upload(Buffer.from(name));
+    assert.equal(refused.status, 422, name);
+    assert.deepEqual(refused.body, {
+      error: 'not_tiffany_invoice',
+      message: 'This invoice does not show Tiffany Designs Private Limited as the seller. Please upload the Tiffany Designs invoice for your order, where Sold By shows Tiffany Designs Private Limited.',
+    });
+  }
+  assert.equal(calls.record.length, 0, 'nothing reaches Salesforce');
+  assert.equal((await upload(Buffer.from('short'))).status, 200, 'Pvt. Ltd. is the same company');
+  assert.equal((await upload(Buffer.from('header'))).status, 200, 'an invoice without Sold By counts its seller');
+  assert.equal(calls.record.length, 2);
+});
+
+test('an invoice that matches no order is answered as added', async (t) => {
+  const { srv, upload } = await uploadServer({ records: () => ({ matched: false, created: true, recorded: true, orderId: '801N', orderName: 'TD-ORD-2010' }) });
+  t.after(srv.close);
+  const res = await upload(Buffer.from('a'));
+  assert.deepEqual(res.body, {
+    status: 'created',
+    invoice_number: 'INV-2010',
+    order_id: 'TD-ORD-2010',
+    message: 'Thank you. Your order was not in our records, so we have added it from your invoice. Our service team will check it. Please call us again to continue with your request.',
+  });
+});
+
 test('each visitor gets 10 uploads an hour, and a failed reading says to try again', async (t) => {
   let fail = false;
   const { srv, calls, upload } = await uploadServer({ reader: () => { if (fail) throw new Error('OpenAI request failed (500): boom'); return INVOICE; } });
@@ -277,8 +310,10 @@ const READ = {
   is_invoice: true,
   invoice_number: ' INV-2010 ',
   order_id: 'TD-ORD-2010',
+  order_number: null,
   invoice_date: '2026-10-10',
   order_date: '2026-02-30',
+  sold_by: ' Tiffany Designs Private Limited ',
   seller: 'Tiffany Designs',
   platform: 'Myntra',
   customer_name: 'Asha  Sharma',
@@ -302,6 +337,8 @@ test('an image goes to the vision model with a strict schema, and the answer is 
   assert.equal(request.body.response_format.json_schema.strict, true);
 
   assert.equal(invoice.invoiceNumber, 'INV-2010');
+  assert.equal(invoice.soldBy, 'Tiffany Designs Private Limited');
+  assert.equal(invoice.orderNumber, null);
   assert.equal(invoice.orderDate, null, '30 February is no date');
   assert.equal(invoice.platform, null, 'only the org\'s channels');
   assert.equal(invoice.customerName, 'Asha Sharma');
@@ -381,6 +418,7 @@ function fakeOrg({ order = {}, contact = null, items = [], waiting = [], links =
     async query(soql) {
       log.queries.push(soql);
       if (soql.includes('FROM Order WHERE Id')) return [row];
+      if (soql.includes('FROM Pricebook2 WHERE IsStandard = true')) return [{ Id: '01sSTD' }];
       if (soql.includes('FROM Contact WHERE Id')) return contact && soql.includes(`'${contact.Id}'`) ? [contact] : [];
       if (soql.includes('FROM PricebookEntry')) return ENTRIES;
       if (soql.includes('FROM OrderItem')) return items;
@@ -418,13 +456,28 @@ const ORDER = { id: '801Z', accountId: '001Z', invoiceNumber: null, erpOrderId: 
 
 function fakeCrm({ byInvoice = [], byReference = [], contacts = [], accountOrders = {}, orderCustomer = null } = {}) {
   const cases = [];
+  const customers = [];
+  const references = [];
   return {
     cases,
+    customers,
+    references,
+    // Like the real one: the named record for the number, else a new customer under a full name, else nothing.
+    async resolveOrCreateContact(phone, name, accountFields, contactFields) {
+      const known = contacts.find((c) => lastTenDigits(c.mobile) === lastTenDigits(phone));
+      if (known?.name) return { ...known, created: false };
+      if (!fullName(name)) return null;
+      customers.push({ phone, name: fullName(name), accountFields, contactFields });
+      return { id: '003N', accountId: '001N', name: fullName(name), created: true };
+    },
     async findContactByPhone(phone) {
       return contacts.find((c) => lastTenDigits(c.mobile) === lastTenDigits(phone)) || null;
     },
     async findOrdersByInvoice() { return byInvoice; },
-    async findOrdersByReference() { return byReference; },
+    async findOrdersByReference(reference) {
+      references.push(reference);
+      return typeof byReference === 'function' ? byReference(reference) : byReference;
+    },
     async findRecentOrdersForAccount(accountId) { return accountOrders[accountId] || []; },
     async getOrderContact() { return orderCustomer; },
     async indianStateCode(name) { return { rajasthan: 'RJ', delhi: 'DL' }[String(name).toLowerCase()]; },
@@ -599,42 +652,108 @@ test('the order id is never replaced, and the same invoice adds its notes once',
   assert.equal(updatesOf(org.log, 'Order').filter((u) => u.fields.Description).length, 1);
 });
 
-test('by the phone on the invoice, only a customer with exactly one recent order without another invoice number is matched', async () => {
+test('by the phone on the invoice, only a customer with exactly one recent order without another invoice number or order id is matched', async () => {
   const customer = { id: '003C', name: 'Asha Sharma', accountId: '001Z', mobile: '+919876500000' };
   const one = uploadsWith({
     org: fakeOrg({ contact: contactRow({ Id: '003C', MobilePhone: '+919876500000' }) }),
-    crm: fakeCrm({ contacts: [customer], accountOrders: { '001Z': [ORDER, { id: '801Y', accountId: '001Z', invoiceNumber: 'INV-1' }] } }),
+    crm: fakeCrm({ contacts: [customer], accountOrders: { '001Z': [ORDER, { id: '801Y', accountId: '001Z', invoiceNumber: 'INV-1' }, { id: '801X', accountId: '001Z', erpOrderId: 'TD-ORD-1' }] } }),
   });
   const result = await one.uploads.record({ invoice: INVOICE, file: FILE });
   assert.equal(result.matchedBy, 'mobile number');
   assert.equal(updatesOf(one.org.log, 'Order')[0].fields.CustomerAuthorizedById, '003C', 'the customer is a contact of the order\'s account');
+  assert.deepEqual(one.crm.references, [], 'the phone comes before the order number and the order id');
 
   const two = uploadsWith({ crm: fakeCrm({ contacts: [customer], accountOrders: { '001Z': [ORDER, { id: '801Y', accountId: '001Z', invoiceNumber: null }] } }) });
   const unsure = await two.uploads.record({ invoice: INVOICE, file: FILE });
-  assert.deepEqual(unsure, { matched: false, recorded: true, caseNumber: '00001300' });
-  assert.match(two.crm.cases[0].description, /Asha Sharma \(mobile ending 0000\) has 2 recent orders\./);
+  assert.equal(unsure.matched, false, 'two orders on the number: neither is picked');
+  const [task] = created(two.org.log, 'Task');
+  assert.match(task.Description, /Asha Sharma \(mobile ending 0000\) has 2 recent orders\./);
 });
 
-test('an invoice that matches no order goes on the caller\'s waiting request, else on a new web request, else nowhere', async () => {
+test('an order is looked up by the invoice number, else the phone, else the order number, else the order id', async () => {
+  const invoice = { ...INVOICE, invoiceNumber: 'INV-NEW', orderNumber: '00000130' };
+  const byNumber = uploadsWith({ crm: fakeCrm({ byReference: (ref) => (ref === '00000130' ? [ORDER] : []) }) });
+  assert.equal((await byNumber.uploads.record({ invoice, file: FILE })).matchedBy, 'order number');
+  assert.deepEqual(byNumber.crm.references, ['00000130'], 'the order id is not needed once the order number found it');
+
+  const byId = uploadsWith({ crm: fakeCrm({ byReference: (ref) => (ref === 'TD-ORD-2010' ? [ORDER] : []) }) });
+  assert.equal((await byId.uploads.record({ invoice, file: FILE })).matchedBy, 'order id');
+  assert.deepEqual(byId.crm.references, ['00000130', 'TD-ORD-2010']);
+  assert.equal(created(byId.org.log, 'Order').length, 0, 'no order is added for an invoice that matches one');
+});
+
+test('an invoice that matches no order becomes a Draft order with its customer, its details and its products', async () => {
+  const org = fakeOrg({ links: [LINK_TO_INVOICE_PHONE], waiting: [{ Id: '500W', CaseNumber: '00001290', ContactId: '003W', Invoice_Number__c: null, Order_Source__c: null }] });
+  const { uploads, crm } = uploadsWith({ org });
+  const invoice = { ...INVOICE, items: [...INVOICE.items, { name: 'Mystery Lamp', quantity: 1, sku: null, amount: 999 }] };
+  const result = await uploads.record({ invoice, file: FILE });
+  assert.deepEqual(result, { matched: false, created: true, recorded: true, orderId: 'Order-1', orderName: 'TD-ORD-2010', linkedCases: ['00001290'] });
+
+  assert.deepEqual(crm.customers, [{
+    phone: '+919876500000', name: 'Asha Sharma', accountFields: addressOf('Billing'), contactFields: { Email: 'asha@example.com', ...addressOf('Mailing') },
+  }], 'a new customer under the full name on the invoice, with its email and address');
+  const [order] = created(org.log, 'Order');
+  assert.deepEqual({ ...order, Description: undefined }, {
+    AccountId: '001N', CustomerAuthorizedById: '003N', Status: 'Draft', EffectiveDate: '2026-10-08', Pricebook2Id: '01sSTD', Description: undefined,
+    Invoice_Number__c: 'INV-2010', ERP_Order_Id__c: 'TD-ORD-2010', Order_Source__c: 'Website', ...addressOf('Shipping'), ...addressOf('Billing'),
+  });
+  assert.match(order.Description, /^Added from the invoice the customer uploaded on 14 October 2026 \(invoice INV-2010\), because no order matched it\. Check it against the attached invoice and activate it\.\nInvoice number: INV-2010\n/);
+  assert.match(order.Description, /\nSold by: Tiffany Designs Private Limited\n/);
+  assert.deepEqual(org.log.many, [{ sobject: 'OrderItem', records: [{ OrderId: 'Order-1', PricebookEntryId: '01uTBL', Quantity: 1, UnitPrice: 8999 }] }]);
+
+  assert.equal(created(org.log, 'ContentVersion')[0].FirstPublishLocationId, 'Order-1');
+  assert.deepEqual(updatesOf(org.log, 'Case')[0].fields, { Order__c: 'Order-1', Invoice_Number__c: 'INV-2010', Order_Source__c: 'Website' });
+  const [task] = created(org.log, 'Task');
+  assert.deepEqual([task.WhatId, task.WhoId, task.Subject, task.Status], ['Order-1', '003N', 'Order added from the uploaded invoice', 'Not Started']);
+  assert.match(task.Description, /\nCustomer: Asha Sharma \(new customer\), mobile \+919876500000\.\nProducts:\n- Demo Study Table: added, quantity 1 at 8,999 rupees\n/);
+  assert.match(task.Description, /\nCheck these:\n- "Mystery Lamp" on the invoice is not in the product catalog, so it was not added\.\n/);
+  assert.match(updatesOf(org.log, 'Task')[0].fields.Description, /Invoice uploaded on 14 October 2026: no order matched; order TD-ORD-2010 was added from it\.$/);
+  assert.equal(crm.cases.length, 0, 'no request is opened for it');
+
+  // A customer already on record for the phone gets the order; a name that differs is noted.
+  const known = uploadsWith({ crm: fakeCrm({ contacts: [{ id: '003K', name: 'Kiran Sharma', accountId: '001K', mobile: '+919876500000' }] }) });
+  await known.uploads.record({ invoice, file: FILE });
+  assert.deepEqual(known.crm.customers, []);
+  assert.equal(created(known.org.log, 'Order')[0].AccountId, '001K');
+  assert.match(created(known.org.log, 'Task')[0].Description, /- The invoice names Asha Sharma; the mobile number \+919876500000 belongs to Kiran Sharma, so the order is on that customer\./);
+
+  // A value Salesforce refuses costs only the invoice's details on the order.
+  const strict = fakeOrg();
+  strict.salesforce.create = async (sobject, fields) => {
+    if (sobject === 'Order' && fields.ERP_Order_Id__c) throw new Error('Salesforce request failed (400): [{"message":"duplicate value found: ERP_Order_Id__c"}]');
+    const id = sobject + '-' + (strict.log.creates.length + 1);
+    strict.log.creates.push({ sobject, fields, id });
+    return { id };
+  };
+  const saved = await uploadsWith({ org: strict }).uploads.record({ invoice: INVOICE, file: FILE });
+  assert.equal(saved.created, true);
+  assert.equal(created(strict.log, 'Order')[0].ERP_Order_Id__c, undefined);
+  assert.match(created(strict.log, 'Task')[0].Description, /- The order was saved without its invoice number, order id, channel and addresses, because Salesforce refused them: duplicate value found: ERP_Order_Id__c\n/);
+});
+
+test('without a full name or a phone, no order is added: the invoice goes on the caller\'s waiting request, else a new web request, else nowhere', async () => {
+  const unnamed = { ...INVOICE, customerName: 'Asha' };
   const org = fakeOrg({ links: [{ ...LINK_TO_INVOICE_PHONE, Description: 'Link sent.' }], waiting: [{ Id: '500W', CaseNumber: '00001290', ContactId: '003W' }] });
   const waiting = uploadsWith({ org });
-  assert.deepEqual(await waiting.uploads.record({ invoice: INVOICE, file: FILE }), { matched: false, recorded: true, caseNumber: '00001290' });
+  assert.deepEqual(await waiting.uploads.record({ invoice: unnamed, file: FILE }), { matched: false, recorded: true, caseNumber: '00001290' });
+  assert.equal(created(org.log, 'Order').length, 0);
   assert.equal(created(org.log, 'ContentVersion')[0].FirstPublishLocationId, '500W');
   const [task] = created(org.log, 'Task');
   assert.deepEqual([task.WhatId, task.WhoId, task.Subject, task.Status], ['500W', '003W', 'Invoice uploaded: order not found', 'Not Started']);
+  assert.match(task.Description, /\nNo order was added from it, because it shows no full name, first and last, for the customer\.\n/);
   assert.equal(waiting.crm.cases.length, 0);
   assert.deepEqual(updatesOf(org.log, 'Task')[0], {
     sobject: 'Task', id: 'lnk1', fields: { Status: 'Completed', Description: 'Link sent.\nInvoice uploaded on 14 October 2026: no order matched; the invoice is on request 00001290.' },
   });
 
   const fresh = uploadsWith();
-  await fresh.uploads.record({ invoice: INVOICE, file: FILE });
+  await fresh.uploads.record({ invoice: unnamed, file: FILE });
   const [input] = fresh.crm.cases;
   assert.deepEqual({ ...input, description: undefined }, {
-    issueType: 'general', description: undefined, phone: '+919876500000', customerName: 'Asha Sharma', invoiceNumber: 'INV-2010', orderSource: 'Website',
-    city: 'Jaipur', state: 'Rajasthan', postalCode: '302006', origin: 'Web', capturedBy: 'Registered when the customer uploaded the invoice.',
+    issueType: 'general', description: undefined, phone: '+919876500000', customerName: 'Asha', customerOptional: true, invoiceNumber: 'INV-2010',
+    orderSource: 'Website', city: 'Jaipur', state: 'Rajasthan', postalCode: '302006', origin: 'Web', capturedBy: 'Registered when the customer uploaded the invoice.',
   });
-  assert.match(input.description, /no order could be matched to it\.\n.*\nNo order has this invoice number or order id, and no single order is on the mobile number\./);
+  assert.match(input.description, /no order could be matched to it\.\n.*\nNo order has this invoice number, order number or order id, and no single order is on the mobile number\./);
   assert.equal(created(fresh.org.log, 'ContentVersion')[0].FirstPublishLocationId, '500N');
 
   const nobody = uploadsWith();
@@ -665,8 +784,17 @@ test('a request opened from an upload is a web request, not a phone one', async 
     async create(sobject, fields) { creates.push({ sobject, fields }); return { id: `${sobject}-${creates.length}` }; },
   };
   const crm = createCrm({ salesforce, businessHours: { isOpen: async () => true } });
-  await crm.createServiceCase({ issueType: 'general', description: 'Invoice uploaded.', phone: '+919876543210', origin: 'Web', capturedBy: 'Registered when the customer uploaded the invoice.' });
+  await crm.createServiceCase({
+    issueType: 'general', description: 'Invoice uploaded.', phone: '+919876543210', origin: 'Web', customerOptional: true, capturedBy: 'Registered when the customer uploaded the invoice.',
+  });
   const fields = creates.find((c) => c.sobject === 'Case').fields;
   assert.equal(fields.Origin, 'Web');
   assert.match(fields.Description, /Invoice uploaded\.\nRegistered when the customer uploaded the invoice\.$/);
+  assert.deepEqual(creates.map((c) => c.sobject), ['Case'], 'with no name to save, no customer is made up');
+  assert.equal(fields.Customer_Mobile__c, '+919876543210');
+
+  // On a call the agent can ask, so the same request without a name is refused until it has one.
+  const refused = await crm.createServiceCase({ issueType: 'general', description: 'x', phone: '+919876543211' });
+  assert.equal(refused.created, false);
+  assert.match(refused.error, /full name, first and last, is needed/);
 });

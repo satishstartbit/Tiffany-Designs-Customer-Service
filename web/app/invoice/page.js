@@ -11,8 +11,8 @@ export const metadata = {
 };
 
 const TIPS = [
-  'Show the whole invoice, with the invoice number, the order id, your phone number and your address.',
-  'An invoice from our website, a showroom bill, or an Amazon, Flipkart or FirstCry invoice all work, and so does a screenshot of the order page in the shopping app.',
+  'Show the whole invoice, with the invoice number, the order id, your name, your phone number and your address.',
+  'It must be a Tiffany Designs invoice, where Sold By shows Tiffany Designs Private Limited. An invoice from our website, a showroom bill, or an Amazon, Flipkart or FirstCry invoice works when it shows this.',
 ];
 
 // Public, no sign-in, one address for every customer: the WhatsApp link the voice agent sends when it cannot find a
@@ -39,7 +39,7 @@ export default function InvoicePage() {
         <div className="eyebrow">Customer care</div>
         <h1>Upload your invoice</h1>
         <p className="upload-lead">
-          We could not find your order on the call. Send us your invoice and we will find the order and link it to your request.
+          We could not find your order on the call. Send us your invoice and we will find the order, or add it from the invoice, and link it to your request.
         </p>
 
         <InvoiceUpload />

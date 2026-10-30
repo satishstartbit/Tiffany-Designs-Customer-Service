@@ -58,7 +58,9 @@ const crmWith = (answers = org()) => {
   return { salesforce, crm: createCrm({ salesforce, businessHours: open }) };
 };
 const savedCase = (salesforce) => salesforce.log.creates.find((c) => c.sobject === 'Case')?.fields;
-const INSTALL = { issueType: 'installation', description: 'Customer requested installation.', erpOrderId: 'TD-ORD-2002', invoiceNumber: 'INV-2002' };
+// The call comes from the number the order was placed with, which confirms the order.
+const CALLER = '+917878454578';
+const INSTALL = { issueType: 'installation', description: 'Customer requested installation.', erpOrderId: 'TD-ORD-2002', invoiceNumber: 'INV-2002', callerPhone: CALLER };
 
 // ---------- The server: createServiceCase with atDeliveryAddress ----------
 
@@ -95,7 +97,7 @@ test('with no address on record, or no order, the delivery address cannot be use
   const noOrder = crmWith();
   const withoutOrder = await noOrder.crm.createServiceCase({ issueType: 'installation', description: 'x', phone: '+917878454578', atDeliveryAddress: true });
   assert.equal(withoutOrder.created, false);
-  assert.match(withoutOrder.error, /The order is needed/);
+  assert.match(withoutOrder.error, /registered only for an order/);
 });
 
 test('with the details on file too, the mobile comes from the record and the address from the delivery', async () => {
@@ -127,7 +129,7 @@ async function serverWith(answers) {
 test('get_installation_address gives the delivery address to confirm, then the mobile on file', async (t) => {
   const { s } = await serverWith(org());
   t.after(s.close);
-  const res = await s.call('POST', '/api/agent/installation-address', { body: { order_id: 'TD-ORD-2002' }, headers: s.agent });
+  const res = await s.call('POST', '/api/agent/installation-address', { body: { order_id: 'TD-ORD-2002', caller_phone: CALLER }, headers: s.agent });
   assert.deepEqual(res.body, {
     found: true,
     order_id: 'TD-ORD-2002',
@@ -143,6 +145,15 @@ test('get_installation_address gives the delivery address to confirm, then the m
       + 'After that, ask whether to use the mobile number ending 4 5 7 8.',
   });
   assert.doesNotMatch(JSON.stringify(res.body), /Pratapnagar|7878454578/, 'the street and the full number stay on the server');
+
+  const other = await s.call('POST', '/api/agent/installation-address', { body: { order_id: 'TD-ORD-2002', caller_phone: '+919000000000' }, headers: s.agent });
+  assert.equal(other.body.found, false, 'only for an order confirmed as the caller\'s');
+  assert.match(other.body.message, /^This order is not confirmed as the customer's yet/);
+  assert.equal(other.body.city, undefined);
+  const confirmed = await s.call('POST', '/api/agent/installation-address', {
+    body: { order_id: 'TD-ORD-2002', caller_phone: '+919000000000', order_phone: '78784 54578' }, headers: s.agent,
+  });
+  assert.equal(confirmed.body.city, 'Jaipur', 'the number the caller said the order was placed with');
 });
 
 test('get_installation_address offers the customer\'s address when the order has none, or asks for one', async (t) => {
@@ -151,14 +162,14 @@ test('get_installation_address offers the customer\'s address when the order has
     account: { BillingCity: 'Delhi', BillingState: 'Delhi', BillingPostalCode: '110001' },
   }));
   t.after(billing.s.close);
-  const fallback = await billing.s.call('POST', '/api/agent/installation-address', { body: { order_id: 'TD-ORD-2002' }, headers: billing.s.agent });
+  const fallback = await billing.s.call('POST', '/api/agent/installation-address', { body: { order_id: 'TD-ORD-2002', caller_phone: CALLER }, headers: billing.s.agent });
   assert.equal(fallback.body.address_source, 'customer');
   assert.equal(fallback.body.delivered, false);
   assert.match(fallback.body.message, /^Order TD-ORD-2002 has no delivery address on record\. The customer's address on file is in Delhi, PIN code 1 1 0 0 0 1\. Ask the customer whether/);
 
   const empty = await serverWith(org({ order: { ...JAIPUR_ORDER, ...NO_SHIPPING } }));
   t.after(empty.s.close);
-  const nothing = await empty.s.call('POST', '/api/agent/installation-address', { body: { order_id: 'TD-ORD-2002' }, headers: empty.s.agent });
+  const nothing = await empty.s.call('POST', '/api/agent/installation-address', { body: { order_id: 'TD-ORD-2002', caller_phone: CALLER }, headers: empty.s.agent });
   assert.equal(nothing.body.address_source, null);
   assert.match(nothing.body.message, /^No address is on record for order TD-ORD-2002\. Ask where the installation should be: the house, street and area, then the city, then the six digit PIN code\./);
 
@@ -173,7 +184,7 @@ test('book_installation with at_delivery_address registers the request at the de
   const { s, salesforce } = await serverWith(org());
   t.after(s.close);
   const res = await s.call('POST', '/api/agent/installation', {
-    body: { order_id: 'TD-ORD-2002', preferred_date: '2026-10-17', preferred_time: 'morning', use_details_on_file: true, at_delivery_address: true },
+    body: { order_id: 'TD-ORD-2002', preferred_date: '2026-10-17', preferred_time: 'morning', use_details_on_file: true, at_delivery_address: true, caller_phone: CALLER },
     headers: s.agent,
   });
   assert.equal(res.body.created, true);

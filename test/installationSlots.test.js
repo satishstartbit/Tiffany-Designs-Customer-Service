@@ -106,7 +106,7 @@ test('resolve_date refuses a Sunday and checks a time when one is given', async 
 test('book_installation registers nothing outside Monday to Saturday, 10 am to 6 pm, or in the past', async (t) => {
   const s = await startTestServer();
   t.after(s.close);
-  const book = (body) => s.call('POST', '/api/agent/installation', { headers: s.agent, body: { phone: '9876543210', ...body } });
+  const book = (body) => s.call('POST', '/api/agent/installation', { headers: s.agent, body: { order_id: 'TD-ORD-1001', phone: '9876543210', ...body } });
 
   for (const [body, pattern] of [
     [{ preferred_date: '2026-10-18', preferred_time: '11 am' }, /^Sunday, 18 October cannot be used/],

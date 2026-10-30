@@ -120,7 +120,8 @@ test('without an order, or with nothing open on it, nothing is compared', async 
   assert.equal((await empty.crm.createServiceCase({ issueType: 'installation', description: 'x', phone: '+919810000001', erpOrderId: 'TD-ORD-1001' })).created, true);
 
   const noOrder = crmWith();
-  assert.equal((await noOrder.crm.createServiceCase({ issueType: 'installation', description: 'x', phone: '+919810000001' })).created, true);
+  assert.equal((await noOrder.crm.createServiceCase({ issueType: 'general', description: 'x', phone: '+919810000001' })).created, true);
+  assert.equal((await noOrder.crm.createServiceCase({ issueType: 'installation', description: 'x', phone: '+919810000001' })).created, false, 'an installation needs the order');
   assert.equal(noOrder.salesforce.log.queries.some((q) => q.includes('IsClosed = false')), false);
 });
 
@@ -145,14 +146,14 @@ test('find_order names the open requests on the order, without their numbers', a
     { orderId: '801A', caseNumber: '00001087', kind: 'installation', createdDate: '2026-10-12T05:00:00.000Z' },
     { orderId: '801A', caseNumber: '00001080', kind: 'installation', createdDate: '2026-10-05T05:00:00.000Z' },
   );
-  const res = await s.call('POST', '/api/agent/order-lookup', { body: { order_id: 'TD-ORD-1001' }, headers: s.agent });
+  const res = await s.call('POST', '/api/agent/order-lookup', { body: { order_id: 'TD-ORD-1001', phone: '9876543210' }, headers: s.agent });
   assert.deepEqual(res.body.open_requests, ['damage', 'installation']);
   assert.match(res.body.message, /^Order TD-ORD-1001 for Demo 3-Door Wardrobe was delivered on Wednesday, 14 October\. /);
   assert.match(res.body.message, /Open requests on this order: a request about a damaged, defective or missing part, registered on Tuesday, 13 October; an installation request, registered on Monday, 12 October\. /);
   assert.match(res.body.message, /ask whether the customer wants an update on it or a new request\.$/);
   assert.doesNotMatch(res.body.message, /1090|1087|1080/, 'request numbers need the mobile number or the name');
 
-  const none = await s.call('POST', '/api/agent/order-lookup', { body: { order_id: 'TD-ORD-1111' }, headers: s.agent });
+  const none = await s.call('POST', '/api/agent/order-lookup', { body: { order_id: 'TD-ORD-1111', phone: '9820011111' }, headers: s.agent });
   assert.deepEqual(none.body.open_requests, []);
   assert.doesNotMatch(none.body.message, /Open requests/);
 });

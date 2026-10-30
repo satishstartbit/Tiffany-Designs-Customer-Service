@@ -2,7 +2,7 @@ const { createApp } = require('../src/app');
 const { createScheduler, createMemoryJobStore } = require('../src/scheduler');
 const { createJobHandlers } = require('../src/callFlows');
 const { lastTenDigits, nameWords, namesMatch, sameReference } = require('../src/rules');
-const { SERVICE_TYPES, requestKind } = require('../src/crm/crm');
+const { SERVICE_TYPES, requestKind, findOrderFromReferences } = require('../src/crm/crm');
 
 const SECRETS = { internalApiKey: 'internal-key', siteCallApiKey: 'site-key', agentToolSecret: 'agent-secret', webhookToken: 'hook-token', cronSecret: 'cron-secret' };
 
@@ -209,18 +209,37 @@ function createFakeCrm({ now = () => Date.now() } = {}) {
         postalCode: order ? order.postalCode : person?.postalCode || null,
       };
     },
+    // Like the real one: a number on the order's customer record (a contact of its account or its own contact).
+    async confirmOrderNumber(order, phones) {
+      const onRecord = contacts.filter((c) => c.accountId === order.accountId || c.id === order.contactId)
+        .flatMap((c) => [c.mobile, c.phone]).map(lastTenDigits).filter(Boolean);
+      const match = phones.map(lastTenDigits).find((p) => p && onRecord.includes(p));
+      return { onRecord: onRecord.length > 0, confirmed: Boolean(match), phone: match ? `+91${match}` : null };
+    },
     async createServiceCase(input) {
-      if (!input.phone && !(input.erpOrderId && (input.verification || input.invoiceNumber || input.useDetailsOnFile))) {
-        return { created: false, error: 'Customer mobile or email (or a verifiable order) is required.' };
+      const { serviceType, subType } = SERVICE_TYPES[input.issueType];
+      // Like the real one: installation, damage and replacement requests need an order found by any of its numbers,
+      // confirmed by a number on its customer record.
+      const { order: found } = await findOrderFromReferences(this, {
+        orderId: input.erpOrderId, orderNumber: input.orderNumber, invoiceNumber: input.invoiceNumber, phone: input.phone,
+      });
+      if (!found && serviceType !== 'General Query') {
+        return { created: false, error: 'An installation, damage or replacement request is registered only for an order.' };
+      }
+      const check = found ? await this.confirmOrderNumber(found, [input.phone, input.orderPhone, input.callerPhone]) : null;
+      if (found && !check.confirmed && serviceType !== 'General Query') {
+        return { created: false, error: check.onRecord ? "Nothing was registered, because the order is not confirmed as the customer's yet." : 'Nothing was registered: no mobile number is on record for this order.' };
+      }
+      const linked = check?.confirmed ? found : null;
+      if (!input.phone && !(linked && input.useDetailsOnFile)) {
+        return { created: false, error: 'A mobile number is needed to register the request.' };
       }
       // Like the real one: a new request of a kind already open on the order is refused unless the caller wants a second.
-      const linked = input.erpOrderId ? await this.findOrderByReference(input.erpOrderId) : null;
-      const { serviceType, subType } = SERVICE_TYPES[input.issueType];
       const kind = input.issueType === 'installation_reschedule' ? null : requestKind(serviceType, subType);
       const existing = linked && kind && !input.newRequest ? openRequests.find((r) => r.orderId === linked.id && r.kind === kind) : null;
       if (existing) return { created: false, existingRequest: existing, error: `Request ${existing.caseNumber} of this kind is already open for the order.` };
-      const verified = input.erpOrderId ? (await this.verifyOrder(input.erpOrderId, [input.verification, input.invoiceNumber, input.phone])).found : false;
-      const order = verified ? orders.find((o) => o.erpOrderId === input.erpOrderId) : null;
+      const verified = Boolean(linked);
+      const order = linked;
       const city = (input.city || order?.city || '').toLowerCase();
       const pin = String(input.postalCode || order?.postalCode || '');
       const route = !city && !pin ? null : ncr.includes(city) || ['110', '121', '122', '201'].includes(pin.slice(0, 3)) ? 'Internal' : 'External Provider';

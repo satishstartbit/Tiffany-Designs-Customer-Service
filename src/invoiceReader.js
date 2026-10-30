@@ -28,9 +28,11 @@ const INVOICE_SCHEMA = {
   properties: {
     is_invoice: { type: 'boolean', description: 'True when the image shows an invoice, a bill, a receipt or an order details page.' },
     invoice_number: text('The invoice or bill number exactly as printed.'),
-    order_id: text('The order id or order number exactly as printed, for example TD-ORD-1009, an Amazon order id such as 402-1234567-1234567, or a Flipkart order id starting with OD.'),
+    order_id: text('The order id exactly as printed, for example TD-ORD-1009, an Amazon order id such as 402-1234567-1234567, or a Flipkart order id starting with OD.'),
+    order_number: text('An order number of digits only, exactly as printed, when the invoice shows one apart from the order id, for example 00000142.'),
     invoice_date: text('The invoice date as YYYY-MM-DD.'),
     order_date: text('The order date as YYYY-MM-DD.'),
+    sold_by: text('The company printed after Sold By (or Sold by, Seller), exactly as printed, for example Tiffany Designs Private Limited.'),
     seller: text('The seller or store name.'),
     platform: {
       type: ['string', 'null'],
@@ -59,9 +61,20 @@ const INVOICE_SCHEMA = {
     },
     total_amount: number('Invoice total in rupees.'),
   },
-  required: ['is_invoice', 'invoice_number', 'order_id', 'invoice_date', 'order_date', 'seller', 'platform', 'customer_name', 'phone', 'email',
-    'shipping_address', 'billing_address', 'items', 'total_amount'],
+  required: ['is_invoice', 'invoice_number', 'order_id', 'order_number', 'invoice_date', 'order_date', 'sold_by', 'seller', 'platform',
+    'customer_name', 'phone', 'email', 'shipping_address', 'billing_address', 'items', 'total_amount'],
 };
+
+// Every Tiffany Designs invoice, from its website, its showrooms or a marketplace, names the company after Sold By.
+const SELLER = 'Tiffany Designs Private Limited';
+const sellerWords = (name) => String(name || '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)
+  .map((w) => ({ pvt: 'private', ltd: 'limited' }[w] || w)).join(' ');
+
+// Whether the invoice was issued by Tiffany Designs: Sold By names it ("Pvt. Ltd." counts), or, when the invoice has
+// no Sold By, the seller does.
+function soldByTiffany(invoice) {
+  return sellerWords(invoice?.soldBy || invoice?.seller) === sellerWords(SELLER);
+}
 
 const INSTRUCTIONS = 'You read invoices and order pages for Tiffany Designs, an Indian home furniture brand that sells through its website, '
   + 'its showrooms and marketplaces such as Amazon, Flipkart and FirstCry. Customers upload a photo, a screenshot or a PDF. '
@@ -99,8 +112,10 @@ function normalizeInvoice(raw) {
     isInvoice: raw?.is_invoice === true,
     invoiceNumber: clean(raw?.invoice_number, 60),
     orderId: clean(raw?.order_id, 60),
+    orderNumber: clean(raw?.order_number, 60),
     invoiceDate: isoDate(raw?.invoice_date),
     orderDate: isoDate(raw?.order_date),
+    soldBy: clean(raw?.sold_by, 120),
     seller: clean(raw?.seller, 120),
     platform: ORDER_SOURCES.includes(raw?.platform) ? raw.platform : null,
     customerName: clean(raw?.customer_name, 80),
@@ -161,4 +176,4 @@ function createInvoiceReader({ apiKey, model, baseUrl = 'https://api.openai.com/
   return { configured: Boolean(apiKey && model), read };
 }
 
-module.exports = { createInvoiceReader, normalizeInvoice, INVOICE_SCHEMA, FILE_TYPES, IMAGE_TYPES, ORDER_SOURCES };
+module.exports = { createInvoiceReader, normalizeInvoice, soldByTiffany, INVOICE_SCHEMA, FILE_TYPES, IMAGE_TYPES, ORDER_SOURCES, SELLER };

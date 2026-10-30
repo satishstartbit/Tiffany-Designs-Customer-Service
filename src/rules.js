@@ -64,13 +64,28 @@ function normalizeIssueType(value) {
   return ISSUE_TYPES.includes(resolved) ? resolved : null;
 }
 
-// Words that say nothing about who someone is: titles, and the "Demo Customer - " prefix on the org's sample accounts.
-const NAME_FILLER = new Set(['mr', 'mrs', 'ms', 'miss', 'dr', 'shri', 'smt', 'sri', 'ji', 'demo', 'customer', 'test']);
+// Words that say nothing about who someone is: titles, the "Demo Customer - " prefix on the org's sample accounts, and
+// the "Unknown Customer" the voice agent once saved for callers who gave no name.
+const NAME_FILLER = new Set(['mr', 'mrs', 'ms', 'miss', 'dr', 'shri', 'smt', 'sri', 'ji', 'demo', 'customer', 'test', 'unknown']);
 
 function nameWords(name) {
   return String(name || '').toLowerCase().normalize('NFKD').replace(/[^a-z\s]/g, ' ')
     .split(/\s+/).filter((w) => w.length >= 2 && !NAME_FILLER.has(w));
 }
+
+// The words of a person's name in any script ("Ravi Kumar", "रवि चौधरी"), as written, without titles or fillers.
+function personNameWords(name) {
+  return String(name || '').normalize('NFC').split(/[^\p{L}\p{M}]+/u).filter((w) => w.length >= 2 && !NAME_FILLER.has(w.toLowerCase()));
+}
+
+// The name to save for a person: a first and a last name, as said, without titles; null when that is not what was given.
+function fullName(name) {
+  const words = personNameWords(name);
+  return words.length >= 2 ? words.join(' ') : null;
+}
+
+// Whether a record's name says who the person is; "Unknown Customer" does not.
+const hasName = (name) => personNameWords(name).length > 0;
 
 // Equal, or one letter added, dropped or changed in a word of four letters or more ("Arav" for "Aarav").
 function sameWord(a, b) {
@@ -134,5 +149,6 @@ function sameReference(said, stored) {
 }
 
 module.exports = {
-  ISSUE_TYPES, normalizePhone, lastTenDigits, normalizeIssueType, nameWords, namesMatch, joinDigits, trailingNumber, sameReference,
+  ISSUE_TYPES, normalizePhone, lastTenDigits, normalizeIssueType, nameWords, personNameWords, fullName, hasName, namesMatch, joinDigits,
+  trailingNumber, sameReference,
 };

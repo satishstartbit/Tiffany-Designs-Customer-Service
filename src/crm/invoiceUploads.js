@@ -1,6 +1,6 @@
 const { escapeSoql, escapeSoqlLike, soqlDateTime } = require('./crm');
 const { formatRupees } = require('./orderItems');
-const { normalizePhone, lastTenDigits, namesMatch, sameReference } = require('../rules');
+const { normalizePhone, lastTenDigits, namesMatch, sameReference, fullName } = require('../rules');
 const { todayInIst } = require('../dates');
 
 const HOUR_MS = 60 * 60 * 1000;
@@ -52,8 +52,10 @@ function invoiceLines(invoice) {
   return [
     invoice.invoiceNumber && `Invoice number: ${invoice.invoiceNumber}`,
     invoice.orderId && `Order id on the invoice: ${invoice.orderId}`,
+    invoice.orderNumber && `Order number on the invoice: ${invoice.orderNumber}`,
     invoice.invoiceDate && `Invoice date: ${longDate(invoice.invoiceDate)}`,
     invoice.orderDate && `Order date: ${longDate(invoice.orderDate)}`,
+    invoice.soldBy && `Sold by: ${invoice.soldBy}`,
     (invoice.platform || invoice.seller) && `Bought from: ${[invoice.platform, invoice.seller && `seller ${invoice.seller}`].filter(Boolean).join(', ')}`,
     (invoice.customerName || invoice.phone || invoice.email) && `Customer: ${[invoice.customerName, invoice.phone, invoice.email].filter(Boolean).join(', ')}`,
     hasAddress(invoice.address) && `Delivery address: ${addressLine(invoice.address)}`,
@@ -119,12 +121,17 @@ function productFor(item, entries, onOrder) {
 }
 
 const round2 = (n) => Math.round(n * 100) / 100;
+const section = (title, lines) => (lines.length ? [title, ...lines] : []);
+// "142" and "00000142" are the same Salesforce order number.
+const sameOrderNumber = (a, b) => String(a || '').replace(/\D/g, '').replace(/^0+/, '') === String(b || '').replace(/\D/g, '').replace(/^0+/, '');
 
-// What happens to an invoice a customer uploads on the website's /invoice page: the order it belongs to is looked up
-// by the invoice number, the order id, then the phone on the invoice. A matched order is brought in line with the
-// invoice: its details, its customer and its products (every change is noted, old value and new), it gets the file,
-// and the caller's requests that were registered without an order. An invoice that matches no order goes to the
-// service team on the caller's waiting request, or on a new request.
+// What happens to an invoice a customer uploads on the website's /invoice page (the route has already checked that
+// Tiffany Designs sold it): the order it belongs to is looked up by the invoice number, else the phone on the invoice,
+// else the order number, else the order id. A matched order is brought in line with the invoice: its details, its
+// customer and its products (every change is noted, old value and new), it gets the file, and the caller's requests
+// that were registered without an order. No order is ever added for an invoice that matches one. An invoice that
+// matches no order becomes a new Draft order with its customer, its details and its products; only when no customer
+// can be saved for it (no phone, or no full name) does it go to the service team on a request instead.
 // The upload page asks for nothing but the file, so the WhatsApp link an upload answers is found from the invoice:
 // a link sent in the last `linkDays` to the phone on the invoice or to the customer of the matched order.
 function createInvoiceUploads({ salesforce, crm, linkDays = 7, productCodePrefix = 'TD-', now = () => Date.now(), logger = console }) {
@@ -201,19 +208,23 @@ function createInvoiceUploads({ salesforce, crm, linkDays = 7, productCodePrefix
       if (matches.length === 1) return { order: matches[0], matchedBy: 'invoice number' };
       if (matches.length > 1) notes.push(`${matches.length} orders have invoice number ${invoice.invoiceNumber}.`);
     }
-    if (invoice.orderId) {
-      const matches = narrow(await crm.findOrdersByReference(invoice.orderId));
-      if (matches.length === 1) return { order: matches[0], matchedBy: 'order id' };
-      if (matches.length > 1) notes.push(`${matches.length} orders match order id ${invoice.orderId}.`);
-    }
-    // By mobile only when the customer has exactly one recent order that does not carry another invoice number.
+    // By mobile only when the customer has exactly one recent order that carries no other invoice number, order id
+    // or order number than the invoice's.
+    const other = (o) => (invoice.invoiceNumber && o.invoiceNumber && !sameReference(invoice.invoiceNumber, o.invoiceNumber))
+      || (invoice.orderId && o.erpOrderId && !sameReference(invoice.orderId, o.erpOrderId))
+      || (invoice.orderNumber && o.orderNumber && !sameOrderNumber(invoice.orderNumber, o.orderNumber));
     for (const contact of contacts.filter((c) => c.accountId)) {
-      const orders = (await crm.findRecentOrdersForAccount(contact.accountId, 5))
-        .filter((o) => !invoice.invoiceNumber || !o.invoiceNumber || sameReference(invoice.invoiceNumber, o.invoiceNumber));
+      const orders = (await crm.findRecentOrdersForAccount(contact.accountId, 5)).filter((o) => !other(o));
       if (orders.length === 1) return { order: orders[0], matchedBy: 'mobile number' };
       if (orders.length > 1) notes.push(`${contact.name || 'The customer'} (mobile ending ${lastTenDigits(contact.mobile || contact.phone)?.slice(-4)}) has ${orders.length} recent orders.`);
     }
-    if (!notes.length) notes.push('No order has this invoice number or order id, and no single order is on the mobile number.');
+    for (const [reference, label] of [[invoice.orderNumber, 'order number'], [invoice.orderId, 'order id']]) {
+      if (!reference) continue;
+      const matches = narrow(await crm.findOrdersByReference(reference));
+      if (matches.length === 1) return { order: matches[0], matchedBy: label };
+      if (matches.length > 1) notes.push(`${matches.length} orders match ${label} ${reference}.`);
+    }
+    if (!notes.length) notes.push('No order has this invoice number, order number or order id, and no single order is on the mobile number.');
     return { order: null, notes };
   }
 
@@ -482,6 +493,77 @@ function createInvoiceUploads({ salesforce, crm, linkDays = 7, productCodePrefix
     };
   }
 
+  // An invoice that matches no order becomes a Draft order, for the service team to check against the invoice and
+  // activate. Its customer is the one the phone on the invoice (else the caller's WhatsApp number) belongs to, else a
+  // new customer under the full name on the invoice or given on the call, with the invoice's email and address. The
+  // order takes every detail the invoice shows and the products it can match in the catalog.
+  // Returns { added } or { reason } when no customer can be saved for it.
+  async function addOrder(invoice, link) {
+    const phone = normalizePhone(invoice.phone) || link?.phone || null;
+    if (!phone) return { reason: 'No order was added from it, because it shows no phone number for the customer.' };
+    const billed = hasAddress(invoice.billingAddress) ? invoice.billingAddress : invoice.address;
+    const customer = await crm.resolveOrCreateContact(
+      phone,
+      fullName(invoice.customerName) || fullName(link?.customerName),
+      await addressFields('Billing', billed),
+      compact({ Email: invoice.email, ...(await addressFields('Mailing', billed)) }),
+    );
+    if (!customer) return { reason: 'No order was added from it, because it shows no full name, first and last, for the customer.' };
+    if (!customer.accountId) return { reason: `No order was added from it, because the customer record for ${phone} has no account.` };
+
+    const problems = [];
+    if (invoice.customerName && customer.name && !namesMatch(invoice.customerName, customer.name)) {
+      problems.push(`The invoice names ${invoice.customerName}; the mobile number ${phone} belongs to ${customer.name}, so the order is on that customer.`);
+    }
+    const [pricebook] = await salesforce.query('SELECT Id FROM Pricebook2 WHERE IsStandard = true LIMIT 1');
+    const marker = `(invoice ${invoice.invoiceNumber || invoice.orderId || today()})`;
+    const essentials = compact({
+      AccountId: customer.accountId,
+      CustomerAuthorizedById: customer.id,
+      Status: 'Draft',
+      EffectiveDate: invoice.orderDate || invoice.invoiceDate || today(),
+      Pricebook2Id: pricebook?.Id,
+      Description: [
+        `Added from the invoice the customer uploaded on ${longDate(now())} ${marker}, because no order matched it. Check it against the attached invoice and activate it.`,
+        ...invoiceLines(invoice),
+      ].join('\n').slice(0, DESCRIPTION_MAX),
+    });
+    const details = compact({
+      Invoice_Number__c: invoice.invoiceNumber,
+      ERP_Order_Id__c: invoice.orderId,
+      Order_Source__c: invoice.platform,
+      ...(await addressFields('Shipping', invoice.address)),
+      ...(await addressFields('Billing', billed)),
+    });
+    let created;
+    try {
+      created = await salesforce.create('Order', { ...essentials, ...details });
+    } catch (err) {
+      // A value Salesforce refuses costs only the invoice's details, which are in the notes and filled in by the team.
+      logger.error(`Adding an order from an uploaded invoice failed: ${err.message}`);
+      problems.push(`The order was saved without its invoice number, order id, channel and addresses, because Salesforce refused them: ${refusal(err)}`);
+      created = await salesforce.create('Order', essentials);
+    }
+
+    const products = pricebook?.Id
+      ? await updateProducts({ Id: created.id, Pricebook2Id: pricebook.Id, Status: 'Draft' }, invoice)
+      : { changes: [], problems: invoice.items.length ? ['No standard price book was found, so no products were added.'] : [] };
+    problems.push(...products.problems);
+    const [saved] = await salesforce.query(`SELECT OrderNumber FROM Order WHERE Id = '${escapeSoql(created.id)}' LIMIT 1`);
+    return {
+      added: {
+        id: created.id,
+        name: invoice.orderId || `order number ${saved?.OrderNumber || created.id}`,
+        invoiceNumber: invoice.invoiceNumber || null,
+        orderSource: invoice.platform || null,
+        contactId: customer.id,
+        customer: `${customer.name}${customer.created ? ' (new customer)' : ''}, mobile ${phone}`,
+        productChanges: products.changes,
+        problems,
+      },
+    };
+  }
+
   async function linkCases(cases, order) {
     const linked = [];
     for (const c of cases) {
@@ -503,7 +585,8 @@ function createInvoiceUploads({ salesforce, crm, linkDays = 7, productCodePrefix
 
   // An uploaded invoice (`file` is { data, contentType }). The page sends nothing else, so the customer is found from
   // the invoice: the phone printed on it, and the WhatsApp link sent to that phone or to the matched order's customer.
-  // Returns { matched, recorded, ... }; an invoice with no order and no phone to reach anyone on is not recorded.
+  // Returns { matched, created, recorded, ... }: matched for an order found, created for an order added from the
+  // invoice; an invoice with no order and no phone to reach anyone on is not recorded.
   async function record({ invoice, file }) {
     const invoicePhone = normalizePhone(invoice.phone);
     const contacts = await contactsFor([invoicePhone].filter(Boolean));
@@ -524,7 +607,6 @@ function createInvoiceUploads({ salesforce, crm, linkDays = 7, productCodePrefix
       const order = await updateOrder(found.order.id, invoice, link, contacts);
       const linked = await linkCases(waiting, order);
       const fileId = await attach(file, order.id);
-      const section = (title, lines) => (lines.length ? [title, ...lines] : []);
       await note({
         whatId: order.id,
         whoId: order.contactId || caller?.id,
@@ -551,12 +633,40 @@ function createInvoiceUploads({ salesforce, crm, linkDays = 7, productCodePrefix
       return { matched: true, recorded: true, matchedBy: found.matchedBy, orderId: order.id, orderName: order.name, linkedCases: linked, changed };
     }
 
+    const { added, reason } = await addOrder(invoice, link);
+    if (added) {
+      const linked = await linkCases(waiting, added);
+      const fileId = await attach(file, added.id);
+      await note({
+        whatId: added.id,
+        whoId: added.contactId,
+        subject: 'Order added from the uploaded invoice',
+        open: true,
+        lines: [
+          'The customer uploaded an invoice that matched no order, so this order was added from it as a Draft. Check it against the attached invoice and activate it.',
+          sentTo,
+          ...found.notes,
+          `Customer: ${added.customer}.`,
+          ...section('Products:', added.productChanges.map((c) => `- ${c}`)),
+          linked.length ? `Requests linked to the order: ${linked.join(', ')}.` : null,
+          ...section('Check these:', added.problems.map((p) => `- ${p}`)),
+          fileId ? 'The invoice file is attached to the order.' : 'The invoice file could not be attached.',
+          '',
+          'Read from the invoice:',
+          ...invoiceLines(invoice),
+        ].filter((line) => line !== null),
+      });
+      if (link) await closeLink(link, `no order matched; order ${added.name} was added from it.`);
+      return { matched: false, created: true, recorded: true, orderId: added.id, orderName: added.name, linkedCases: linked };
+    }
+
     const phone = link?.phone || invoicePhone;
     if (!phone) return { matched: false, recorded: false };
     const details = [
       'The customer uploaded an invoice on the invoice upload page, and no order could be matched to it.',
       sentTo,
       ...found.notes,
+      reason,
       'Find the order, link it to this request and fill in its details from the attached invoice.',
       '',
       'Read from the invoice:',
@@ -575,6 +685,7 @@ function createInvoiceUploads({ salesforce, crm, linkDays = 7, productCodePrefix
       description: details.join('\n'),
       phone,
       customerName: link?.customerName || invoice.customerName,
+      customerOptional: true,
       invoiceNumber: invoice.invoiceNumber,
       orderSource: invoice.platform,
       city: invoice.address.city,

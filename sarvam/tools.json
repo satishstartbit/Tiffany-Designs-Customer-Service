@@ -1,9 +1,9 @@
 {
   "agent_id": "Tiffany-Des-4ab4474a-620f",
   "agent_note": "The stage agent named by SARVAM_AGENT_ID in .env (Tiffany Designs Customer Service Stage). The earlier agent Tiffany-Des-0db8e21d-e099 still exists, with its own older tools calling https://tiffany-designs-customer-service.onrender.com/.",
-  "committed_version": 14,
-  "draft_version": 15,
-  "draft_note": "Version 14 (committed 2026-10-29) has every tool below as written here and the prompt in agent-prompt.md. identify_caller runs at call start (lifecycle on_start): it sends Sarvam's caller identifier to /api/agent/call-start and saves customer_phone, customer_name, opening_line and caller_details, so a phone caller is greeted by name and never asked for the mobile number. get_product_guide with purpose assembly gives the complete product guide, every numbered step with its own hardware, and step_count; when a found guide has no steps (or the server has not been deployed with this yet) its answer says so and the agent offers an installation visit instead of making steps up. Until the server is deployed, call-start fails harmlessly and the call goes on as before. The live deployment answers with the version it names; move it to 14 to use this. Draft 15 is an unchanged copy.",
+  "committed_version": 17,
+  "draft_version": 18,
+  "draft_note": "Version 17 (committed 2026-10-29) has the prompt in the git history and the tools before draft 18. Draft 18 (2026-10-30, not committed) has every tool below as written here and the prompt in agent-prompt.md: find_order gives an order's details only once a number given in the call is the mobile number the order was placed with (number_confirmed), asks for that number otherwise (order_phone), and saves it to the agent variable order_phone; get_details_on_file, get_installation_address and the three request tools send order_phone and caller_phone (from customer_phone), and the server registers installation, damage and replacement requests only for a confirmed order. The invoice upload takes only invoices sold by Tiffany Designs Private Limited and adds the order from the invoice when none matches. Version 17 added order_number to the request tools; versions 14 to 16 had earlier copies of them. identify_caller runs at call start (lifecycle on_start) and saves customer_phone, customer_name, opening_line and caller_details. The live phone deployment answers with the version it names.",
   "current_base_url": "https://tiffany-designs-customer-service-1.onrender.com/",
   "base_url_note": "The server is deployed on Render. Every tool calls current_base_url + path with POST and a JSON body; change all of them together if the server moves.",
   "auth_header": "x-agent-secret (AGENT_TOOL_SECRET in .env and on Render)",
@@ -15,7 +15,7 @@
   "tools": [
     {
       "name": "identify_caller",
-      "id": "1a6cd66c-8321-463a-92b1-648c49a750d0",
+      "id": "f3e468e2-c776-4864-8182-8e3d172ecbdd",
       "path": "/api/agent/call-start",
       "modules": [
         1,
@@ -80,7 +80,7 @@
     },
     {
       "name": "find_customer",
-      "id": "9d0b4f0c-3367-4f3a-9855-d6d0f3ef62ff",
+      "id": "1b18e50b-3c6d-46d2-9c47-b11fca0501b2",
       "path": "/api/agent/customer-lookup",
       "modules": [
         3
@@ -132,13 +132,13 @@
     },
     {
       "name": "find_order",
-      "id": "2fc4f45c-571c-4fc8-af2f-2fb5d8cb72f5",
+      "id": "43c7b020-7769-43df-af2a-b78d66d7cc3e",
       "path": "/api/agent/order-lookup",
       "modules": [
         4,
         15
       ],
-      "description": "Finds an order and gives its products, delivery status and delivery date, the kinds of request already open on it, and whether the order has the customer's mobile number and a delivery address on record. Call it as soon as the customer gives any one of: the order id (for example TD-ORD-1001, ORD-010, or only the number at its end such as 1001), the order number of a phone order (digits, for example 122), or the invoice number (for example INV-2001, or only its digits). No mobile number or name is needed. With only a mobile number it gives the latest order on that number. The answer has a message with the facts and what to do next, and the fields found, order_id, order_number, delivery_status, products, open_requests (installation, installation_followup, damage or replacement), mobile_on_order, address_on_order and details_missing. When no order is found after a second try, or details_missing is true, offer the WhatsApp invoice upload link with tool:send_invoice_upload_link.",
+      "description": "Finds an order and, once it is confirmed as the customer's, gives its products, delivery status and delivery date, the kinds of request already open on it, and whether the order has a delivery address on record. Call it as soon as the customer gives any one of: the order id (for example TD-ORD-1001, ORD-010, or only the number at its end such as 1001), the order number of a phone order (digits, for example 122), or the invoice number (for example INV-2001, or only its digits). The order is confirmed when the number of this call, or a mobile number the customer says, is the mobile number the order was placed with; then number_confirmed is true and order_phone is saved for the other tools. When an order matches but is not confirmed, nothing about it is given: ask which mobile number the order was placed with and call this tool again with the same reference and that number as order_phone. With only a mobile number it gives the latest order on that number. The answer has a message with the facts and what to do next, and the fields found, number_confirmed, order_id, order_number, delivery_status, products, open_requests (installation, installation_followup, damage or replacement), mobile_on_order, address_on_order and details_missing. When no order is found after a second try, or no mobile number is on record for it, or details_missing is true, offer the WhatsApp invoice upload link with tool:send_invoice_upload_link.",
       "parameters": [
         {
           "name": "order_id",
@@ -163,10 +163,24 @@
           "type": "string",
           "required": false,
           "description": "The customer's 10 digit mobile number when it is already known: customer_phone when it is set, otherwise the number the customer gave. Leave empty when not known; it is not needed to find an order by its number."
+        },
+        {
+          "name": "order_phone",
+          "type": "string",
+          "required": false,
+          "description": "The 10 digit mobile number the customer says the order was placed with, only after this tool asked for it. Leave empty otherwise."
+        },
+        {
+          "name": "caller_phone",
+          "from_agent_variable": "customer_phone",
+          "type": "string",
+          "required": false
         }
       ],
       "response_fields": {
         "found": "true when one order matches.",
+        "number_confirmed": "true when a number given (phone, order_phone or the number of the call) is a mobile on the order's customer record; only then are the order's details given.",
+        "order_phone": "The number that confirmed the order, +91 form; left out when the order is not confirmed, so a number confirmed earlier in the call stays saved. Saved to the agent variable order_phone, which the other order tools send.",
         "order_id": "The order id, or null for a phone order.",
         "order_number": "The Salesforce order number.",
         "customer_name": "Account name on the order. Not sent to the agent, so a name is never confirmed from an order id.",
@@ -175,13 +189,14 @@
         "order_source": "Website, showroom or marketplace.",
         "products": "Products on the order.",
         "open_requests": "Kinds of request open on the order: installation, installation_followup, damage, replacement.",
-        "mobile_on_order": "true when the order's customer has a mobile number on record.",
+        "mobile_on_order": "true when the order's customer has a mobile number on record; false means the order cannot be confirmed.",
         "address_on_order": "true when the order has a delivery address to visit: a street, and a city or PIN code.",
         "details_missing": "true when either is missing; the agent then offers the WhatsApp invoice upload link (Phase 15)."
       },
       "send_to_agent": [
         "message",
         "found",
+        "number_confirmed",
         "order_id",
         "order_number",
         "delivery_status",
@@ -192,14 +207,16 @@
         "details_missing",
         "error"
       ],
-      "resp_template": "{{ message }}\nFields: found={{ found | default('') }}, order_id={{ order_id | default('') }}, order_number={{ order_number | default('') }}, delivery_status={{ delivery_status | default('') }}, products={{ products | default('') }}, open_requests={{ open_requests | default('') }}{% if details_missing is defined %}, mobile_on_order={{ mobile_on_order }}, address_on_order={{ address_on_order }}, details_missing={{ details_missing }}{% endif %}{% if error is defined %}, error={{ error }}{% endif %}",
+      "resp_template": "{{ message }}\nFields: found={{ found | default('') }}, number_confirmed={{ number_confirmed | default('') }}, order_id={{ order_id | default('') }}, order_number={{ order_number | default('') }}, delivery_status={{ delivery_status | default('') }}, products={{ products | default('') }}, open_requests={{ open_requests | default('') }}{% if details_missing is defined %}, mobile_on_order={{ mobile_on_order }}, address_on_order={{ address_on_order }}, details_missing={{ details_missing }}{% endif %}{% if error is defined %}, error={{ error }}{% endif %}",
       "on_failure": "The order lookup did not answer. Apologise briefly and call tool:find_order once more. When it fails again, note the order id as the customer gave it and carry on without the order.",
-      "save_to_variables": {},
+      "save_to_variables": {
+        "order_phone": "order_phone"
+      },
       "timeout_seconds": 10
     },
     {
       "name": "get_details_on_file",
-      "id": "17b474fb-8765-4abc-bbf7-8509fdd0f3b7",
+      "id": "5ea1024d-6e76-4331-8fce-c58bbd560c8d",
       "path": "/api/agent/details-on-file",
       "modules": [
         5,
@@ -208,7 +225,7 @@
         8,
         10
       ],
-      "description": "Gets the mobile number and address on file for an order (its customer and delivery address) or for a registered mobile number, so they are confirmed with the customer instead of asked for again. Call it before registering a service request, a return, a replacement or a call back, once the order was found or the registered mobile is known, without asking first. Only the last four digits of the mobile and the city, state and PIN code are given; the request tools fill in the rest with use_details_on_file. The answer has a message saying what is on file and what to ask for, and the fields found, mobile_on_file, mobile_ending, address_on_file, city and postal_code.",
+      "description": "Gets the mobile number and address on file for an order (its customer and delivery address) or for a registered mobile number, so they are confirmed with the customer instead of asked for again. Call it before registering a service request, a return, a replacement or a call back, once the order was found or the registered mobile is known, without asking first. Only the last four digits of the mobile and the city, state and PIN code are given; the request tools fill in the rest with use_details_on_file. The answer has a message saying what is on file and what to ask for, and the fields found, mobile_on_file, mobile_ending, address_on_file, city and postal_code. For an order, it answers only once find_order confirmed the order as the customer's (it sends order_phone and the number of the call itself); otherwise its message says to confirm the order first.",
       "parameters": [
         {
           "name": "order_id",
@@ -233,6 +250,18 @@
           "type": "string",
           "required": false,
           "description": "The customer's registered 10 digit mobile number when no order is known: customer_phone when it is set, otherwise the number the customer gave. Leave empty when an order reference is given."
+        },
+        {
+          "name": "order_phone",
+          "from_agent_variable": "order_phone",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "caller_phone",
+          "from_agent_variable": "customer_phone",
+          "type": "string",
+          "required": false
         }
       ],
       "response_fields": {
@@ -262,13 +291,13 @@
     },
     {
       "name": "get_installation_address",
-      "id": "f94fd5db-0639-4a25-ab21-f25921286237",
+      "id": "444e2fed-c337-413b-a135-0177baa6714e",
       "path": "/api/agent/installation-address",
       "modules": [
         6,
         9
       ],
-      "description": "For an installation, gives the city, state and PIN code of the address the order was delivered to, or of the customer's address on file when the order has none, and the last four digits of the mobile number on file. Call it once the order is found, without asking first, then ask whether the installation should be at that address or somewhere else. When the customer chooses it, book_installation is called with at_delivery_address set to true and the service system fills in the full address. The street and the full mobile number are never given. The answer has a message to say back and what to ask next, and the fields found, address_source (delivery, customer, or empty when no address is on record), city, postal_code, mobile_on_file and mobile_ending.",
+      "description": "For an installation, gives the city, state and PIN code of the address the order was delivered to, or of the customer's address on file when the order has none, and the last four digits of the mobile number on file. Call it once the order is found, without asking first, then ask whether the installation should be at that address or somewhere else. When the customer chooses it, book_installation is called with at_delivery_address set to true and the service system fills in the full address. The street and the full mobile number are never given. The answer has a message to say back and what to ask next, and the fields found, address_source (delivery, customer, or empty when no address is on record), city, postal_code, mobile_on_file and mobile_ending. For an order, it answers only once find_order confirmed the order as the customer's (it sends order_phone and the number of the call itself); otherwise its message says to confirm the order first.",
       "parameters": [
         {
           "name": "order_id",
@@ -287,6 +316,18 @@
           "type": "string",
           "required": false,
           "description": "The invoice number that found the order, for example INV-2001. Leave empty when not known."
+        },
+        {
+          "name": "order_phone",
+          "from_agent_variable": "order_phone",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "caller_phone",
+          "from_agent_variable": "customer_phone",
+          "type": "string",
+          "required": false
         }
       ],
       "response_fields": {
@@ -317,13 +358,13 @@
     },
     {
       "name": "send_invoice_upload_link",
-      "id": "41fcd83f-6413-4760-ad4b-666ea193dec8",
+      "id": "34d1deeb-ede9-4a97-9b89-c0672326f167",
       "path": "/api/agent/invoice-upload-link",
       "modules": [
         4,
         6
       ],
-      "description": "Sends the customer a WhatsApp link to upload a photo, a screenshot or a PDF of the invoice. Use it when the order cannot be found, or when tool:find_order says the order has no mobile number or no delivery address on record. The service system reads the invoice, finds the order by its invoice number, order id or mobile number, and completes the order with the details on the invoice; the customer then calls again to have the concern resolved. Call it only after the customer agreed to get the link and the WhatsApp number was confirmed. At most 3 links per number a day. The answer has a message saying what to tell the customer, or why no link was sent, and the field sent.",
+      "description": "Sends the customer a WhatsApp link to upload a photo, a screenshot or a PDF of the invoice slip. Use it when no order can be found by the order id, order number, invoice number or mobile number, or when tool:find_order says the order has no mobile number or no delivery address on record. Only a Tiffany Designs invoice is taken, one where Sold By shows Tiffany Designs Private Limited. The service system reads the invoice, finds the order by its invoice number, the mobile number, the order number or the order id and completes it with the details on the invoice, or adds the order from the invoice when none matches; the customer then calls again to have the concern resolved. Call it only after the customer agreed to get the link and the WhatsApp number was confirmed. At most 3 links per number a day. The answer has a message saying what to tell the customer, or why no link was sent, and the field sent.",
       "parameters": [
         {
           "name": "phone",
@@ -353,13 +394,13 @@
         "error"
       ],
       "resp_template": "{{ message }}\nFields: sent={{ sent | default('') }}{% if error is defined %}, error={{ error }}{% endif %}",
-      "on_failure": "The WhatsApp link could not be sent right now. Carry on with the concern without it: note the order id, invoice number and product as the customer gives them, and ask for any missing mobile number or address.",
+      "on_failure": "The WhatsApp link could not be sent right now. Register no installation, damage or replacement request without the order: offer a call back from the service team instead, with the order id, invoice number and product the customer gave in the reason.",
       "save_to_variables": {},
       "timeout_seconds": 15
     },
     {
       "name": "get_product_guide",
-      "id": "38cf019f-01a0-4855-ae24-6c3ea9a94f14",
+      "id": "c3f64326-ea94-488d-8cfe-c747a3859050",
       "path": "/api/agent/product-guide",
       "modules": [
         7
@@ -428,7 +469,7 @@
     },
     {
       "name": "find_parts",
-      "id": "1b59ceaa-ad55-4070-9cb2-39894bd42fed",
+      "id": "af27a977-cd51-4741-8865-1d98218463eb",
       "path": "/api/agent/part-lookup",
       "modules": [
         7
@@ -464,7 +505,7 @@
     },
     {
       "name": "resolve_date",
-      "id": "ee95ecaf-f516-4f5b-be82-d412ae05b9f1",
+      "id": "4cfe5f89-6a75-4a3b-80a4-afebc707c15a",
       "path": "/api/agent/resolve-date",
       "modules": [
         6
@@ -505,14 +546,14 @@
     },
     {
       "name": "book_installation",
-      "id": "691e2fd8-33e2-4be7-8ed1-9fb805039ccd",
+      "id": "75aeb0f8-6239-48ca-82f0-afd02da88067",
       "path": "/api/agent/installation",
       "modules": [
         6,
         8,
         9
       ],
-      "description": "Registers an installation request, or a request to move one, with the customer's preferred slot. The slot must be Monday to Saturday, 10 am to 6 pm, and still ahead; it is checked again and nothing is registered when it does not fit. Pass the date and the time from the latest resolve_date answer, after the customer confirmed the slot and the place. The service team confirms the final appointment. When the customer chose the address from get_installation_address, set at_delivery_address to true and leave the address empty; when the customer agreed to the mobile number on file, set use_details_on_file to true and leave the mobile empty. A second installation request on an order that has one open needs new_request set to true. The answer has a message with the request number and slot to give, or what to ask instead, and the fields created, spoken_case_number (say it digit by digit), existing_request (true when one is already open and nothing was registered) and within_business_hours.",
+      "description": "Registers an installation request, or a request to move one, with the customer's preferred slot. It is registered only for an order that find_order has found and confirmed as the customer's: pass the order id or the order number that found it, and the invoice number when known. Always pass customer_name, the full name, first and last, and the mobile number the service team should call; when that number is not the one on the order, the full name is required. The slot must be Monday to Saturday, 10 am to 6 pm, and still ahead; it is checked again and nothing is registered when it does not fit. Pass the date and the time from the latest resolve_date answer, after the customer confirmed the slot and the place. The service team confirms the final appointment. When the customer chose the address from get_installation_address, set at_delivery_address to true and leave the address empty; when the customer agreed to the mobile number on file, set use_details_on_file to true and leave the mobile empty. A second installation request on an order that has one open needs new_request set to true. The answer has a message with the request number and slot to give, or what to ask instead, and the fields created, spoken_case_number (say it digit by digit), existing_request (true when one is already open and nothing was registered) and within_business_hours.",
       "parameters": [
         {
           "name": "preferred_date",
@@ -566,19 +607,25 @@
           "name": "customer_name",
           "type": "string",
           "required": false,
-          "description": "The customer's full name."
+          "description": "The full name, first and last, of the person the service team should contact: the name caller_details or find_customer gives for the number, otherwise the first and last name the customer said in this call. Always pass it."
         },
         {
           "name": "order_id",
           "type": "string",
           "required": false,
-          "description": "The order id or order number that found the order, when known."
+          "description": "The order id that found the order with find_order, for example TD-ORD-1001, written without spaces. Leave empty when find_order gave no order id, as for a phone order."
+        },
+        {
+          "name": "order_number",
+          "type": "string",
+          "required": false,
+          "description": "The order number of digits that found the order with find_order, for example 00000142. Pass it whenever find_order gave one, and always when the order has no order id."
         },
         {
           "name": "invoice_number",
           "type": "string",
           "required": false,
-          "description": "The invoice number, when known."
+          "description": "The invoice number of the order, written without spaces, when the customer gave it or it found the order."
         },
         {
           "name": "order_source",
@@ -592,7 +639,7 @@
             "Showroom",
             "Other"
           ],
-          "description": "Where the order was bought, when no order was found and the customer said so."
+          "description": "Where the order was bought, when the customer said so."
         },
         {
           "name": "product_name",
@@ -623,6 +670,18 @@
           "type": "string",
           "required": false,
           "description": "State of that installation address."
+        },
+        {
+          "name": "order_phone",
+          "from_agent_variable": "order_phone",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "caller_phone",
+          "from_agent_variable": "customer_phone",
+          "type": "string",
+          "required": false
         }
       ],
       "response_fields": {
@@ -632,7 +691,7 @@
         "existing_request": "true when an installation request is already open on the order and nothing was registered.",
         "within_business_hours": "false when registered outside service hours.",
         "service_route": "Internal or External Provider.",
-        "order_verified": "true when the request is linked to the order.",
+        "order_verified": "true when the order is linked: a number given in the call (the mobile for the request, the number of the call, or order_phone) is a mobile on the order's customer record. Installation, damage and replacement requests are registered only then.",
         "preferred_date": "The registered date, YYYY-MM-DD.",
         "preferred_time": "The registered time.",
         "case_id": "Salesforce record id; not sent to the agent."
@@ -654,7 +713,7 @@
     },
     {
       "name": "register_service_request",
-      "id": "bbcca210-83eb-4311-b33e-523fcdec25f5",
+      "id": "0b2edb3c-0cd6-44a1-9616-3a6f70a185f1",
       "path": "/api/agent/cases",
       "modules": [
         5,
@@ -663,7 +722,7 @@
         9,
         12
       ],
-      "description": "Registers a service request for a damaged, defective, missing or wrong part, a product quality problem, a replacement, a return, an installation follow-up, a re-installation or a general question. Salesforce routes it to the Delhi NCR service team or a service partner from the city and PIN code. Call it once, after the customer confirmed the summary. When the customer agreed to the mobile number and address from get_details_on_file, set use_details_on_file to true and leave them empty; pass only details the customer changed. A second request of the same kind on an order that has one open needs new_request set to true. The answer has a message with the request number to give, or what is missing, and the fields created, spoken_case_number (say it digit by digit), existing_request (true when one of this kind is already open and nothing was registered) and within_business_hours.",
+      "description": "Registers a service request for a damaged, defective, missing or wrong part, a product quality problem, a replacement, a return, an installation follow-up, a re-installation or a general question. Every request except a general question is registered only for an order that find_order has found and confirmed as the customer's: pass the order id or the order number that found it, and the invoice number when known. Always pass customer_name, the full name, first and last, and the mobile number the service team should call; when that number is not the one on the order, the full name is required. Salesforce routes it to the Delhi NCR service team or a service partner from the city and PIN code. Call it once, after the customer confirmed the summary. When the customer agreed to the mobile number and address from get_details_on_file, set use_details_on_file to true and leave them empty; pass only details the customer changed. A second request of the same kind on an order that has one open needs new_request set to true. The answer has a message with the request number to give, or what is missing, and the fields created, spoken_case_number (say it digit by digit), existing_request (true when one of this kind is already open and nothing was registered) and within_business_hours.",
       "parameters": [
         {
           "name": "issue_type",
@@ -712,19 +771,25 @@
           "name": "customer_name",
           "type": "string",
           "required": false,
-          "description": "The customer's full name."
+          "description": "The full name, first and last, of the person the service team should contact: the name caller_details or find_customer gives for the number, otherwise the first and last name the customer said in this call. Always pass it."
         },
         {
           "name": "order_id",
           "type": "string",
           "required": false,
-          "description": "The order id or order number that found the order, when known."
+          "description": "The order id that found the order with find_order, for example TD-ORD-1001, written without spaces. Leave empty when find_order gave no order id, as for a phone order."
+        },
+        {
+          "name": "order_number",
+          "type": "string",
+          "required": false,
+          "description": "The order number of digits that found the order with find_order, for example 00000142. Pass it whenever find_order gave one, and always when the order has no order id."
         },
         {
           "name": "invoice_number",
           "type": "string",
           "required": false,
-          "description": "The invoice number, when known."
+          "description": "The invoice number of the order, written without spaces, when the customer gave it or it found the order."
         },
         {
           "name": "order_source",
@@ -787,6 +852,18 @@
           "type": "string",
           "required": false,
           "description": "State of the service address, only when the customer gave a new address or none is on file."
+        },
+        {
+          "name": "order_phone",
+          "from_agent_variable": "order_phone",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "caller_phone",
+          "from_agent_variable": "customer_phone",
+          "type": "string",
+          "required": false
         }
       ],
       "response_fields": {
@@ -796,7 +873,7 @@
         "existing_request": "true when a request of this kind is already open on the order and nothing was registered.",
         "within_business_hours": "false when registered outside service hours.",
         "service_route": "Internal or External Provider.",
-        "order_verified": "true when the request is linked to the order.",
+        "order_verified": "true when the order is linked: a number given in the call (the mobile for the request, the number of the call, or order_phone) is a mobile on the order's customer record. Installation, damage and replacement requests are registered only then.",
         "case_id": "Salesforce record id; not sent to the agent."
       },
       "send_to_agent": [
@@ -816,18 +893,18 @@
     },
     {
       "name": "request_human_callback",
-      "id": "6f584680-d12e-4c9a-9836-599ed907c9a6",
+      "id": "e2929bff-fc40-4c53-a63f-d11f5b0d9096",
       "path": "/api/agent/escalate",
       "modules": [
         10
       ],
-      "description": "Registers a request for a member of the service team to call the customer back. Use it when the customer asks for a person, stays upset, reports an injury or a safety risk, says a delivered order never arrived, asks to be called at a later time, or when the agent cannot help. No live transfer is available. When the customer agreed to the mobile number and address from get_details_on_file, set use_details_on_file to true and leave the mobile number, city and PIN code empty. The answer has a message with the request number to give, and the fields created, spoken_case_number (say it digit by digit) and within_business_hours.",
+      "description": "Registers a request for a member of the service team to call the customer back. Use it when the customer asks for a person, stays upset, reports an injury or a safety risk, says a delivered order never arrived, asks to be called at a later time, or when the agent cannot help, including an installation, damage or replacement request whose order cannot be found; then put the order id, invoice number and product the customer gave in the reason. No live transfer is available. Always pass customer_name, the full name, first and last, and the order id or order number when find_order found the order; an order that is not confirmed as the customer's is noted but not linked. When the customer agreed to the mobile number and address from get_details_on_file, set use_details_on_file to true and leave the mobile number, city and PIN code empty. The answer has a message with the request number to give, or what is missing, and the fields created, spoken_case_number (say it digit by digit) and within_business_hours.",
       "parameters": [
         {
           "name": "reason",
           "type": "string",
           "required": true,
-          "description": "Why a person needs to call back, in one plain English sentence, including any time the customer asked to be called and any other number they gave."
+          "description": "Why a person needs to call back, in one plain English sentence, including any time the customer asked to be called, any other number they gave, and the order id, invoice number and product when the order could not be found."
         },
         {
           "name": "use_details_on_file",
@@ -845,13 +922,25 @@
           "name": "customer_name",
           "type": "string",
           "required": false,
-          "description": "The customer's full name."
+          "description": "The full name, first and last, of the person the service team should contact: the name caller_details or find_customer gives for the number, otherwise the first and last name the customer said in this call. Always pass it."
         },
         {
           "name": "order_id",
           "type": "string",
           "required": false,
-          "description": "The order id or order number that found the order, when known."
+          "description": "The order id that found the order with find_order, for example TD-ORD-1001, written without spaces. Leave empty when find_order gave no order id, as for a phone order."
+        },
+        {
+          "name": "order_number",
+          "type": "string",
+          "required": false,
+          "description": "The order number of digits that found the order with find_order, for example 00000142. Pass it whenever find_order gave one, and always when the order has no order id."
+        },
+        {
+          "name": "invoice_number",
+          "type": "string",
+          "required": false,
+          "description": "The invoice number of the order, written without spaces, when the customer gave it or it found the order."
         },
         {
           "name": "city",
@@ -864,13 +953,26 @@
           "type": "string",
           "required": false,
           "description": "The customer's six digit PIN code, only when the customer gave a new one or none is on file."
+        },
+        {
+          "name": "order_phone",
+          "from_agent_variable": "order_phone",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "caller_phone",
+          "from_agent_variable": "customer_phone",
+          "type": "string",
+          "required": false
         }
       ],
       "response_fields": {
         "created": "true when the call back is registered.",
         "case_number": "Salesforce request number.",
         "spoken_case_number": "The request number to say.",
-        "within_business_hours": "false when registered outside service hours."
+        "within_business_hours": "false when registered outside service hours.",
+        "order_verified": "true when the order is linked: a number given in the call (the mobile for the request, the number of the call, or order_phone) is a mobile on the order's customer record. Installation, damage and replacement requests are registered only then."
       },
       "send_to_agent": [
         "message",
@@ -888,7 +990,7 @@
     },
     {
       "name": "check_request_status",
-      "id": "5c5ffaf0-6e59-4bd8-9208-3b296bd7dfc4",
+      "id": "b5095e4d-e06c-4c36-b111-64c38e4d3d6e",
       "path": "/api/agent/case-status",
       "modules": [
         11,
@@ -941,7 +1043,7 @@
     },
     {
       "name": "get_service_history",
-      "id": "21858043-3772-4601-b984-79511db883c7",
+      "id": "0910ed96-e618-44dd-9ee2-a33df0aff955",
       "path": "/api/agent/history",
       "modules": [
         14
@@ -972,7 +1074,7 @@
     },
     {
       "name": "check_service_hours",
-      "id": "cdd8c4a5-5aa3-4cda-8fb0-4e40e9ebacc1",
+      "id": "c2ce0635-0259-45ad-b91a-686a1097318c",
       "path": "/api/agent/service-hours",
       "modules": [
         2,
@@ -999,7 +1101,7 @@
     },
     {
       "name": "check_service_area",
-      "id": "db895054-a687-46a9-b710-432de18c4313",
+      "id": "9fbc4249-d344-4231-a027-fab287ebf539",
       "path": "/api/agent/service-area",
       "modules": [
         9
@@ -1036,7 +1138,7 @@
     },
     {
       "name": "find_products",
-      "id": "082c007b-f86c-4016-b3f9-94a5e291e03b",
+      "id": "e42adce4-d36d-4ded-9ed3-89f77079e0f7",
       "path": "/api/agent/products",
       "modules": [
         "phone orders"
@@ -1066,7 +1168,7 @@
     },
     {
       "name": "place_order",
-      "id": "73b9a8bc-f344-4035-a266-c72562898c77",
+      "id": "8765c584-86fd-46b5-a7ac-0cedb13093b5",
       "path": "/api/agent/orders",
       "modules": [
         "phone orders"
@@ -1145,7 +1247,7 @@
     },
     {
       "name": "save_customer_details",
-      "id": "c81e07b7-d45e-4012-9a27-64a4ac49c24d",
+      "id": "b0e53bee-732c-4eae-8aaf-585eca5a4ce5",
       "path": "/api/agent/customer",
       "modules": [
         3
@@ -1217,5 +1319,6 @@
       "timeout_seconds": 15
     }
   ],
-  "ids_note": "Each version holds its own copy of the tools; id is the copy in version 14. Draft 15 has its own copies with other ids; read them with agents get include tools before editing."
+  "ids_note": "Each version holds its own copy of the tools; id is the copy in draft 18, the one written on 2026-10-30. Version 17 has its own copies with other ids. Committing 18 keeps these ids for version 18 and opens a new draft with new ones; read them with agents get include tools before editing.",
+  "agent_variables_note": "order_phone (string, empty at call start): the number that confirmed an order in find_order, saved from its answer and sent by the order tools as order_phone. caller_phone is not a variable: the tools send customer_phone under that name."
 }

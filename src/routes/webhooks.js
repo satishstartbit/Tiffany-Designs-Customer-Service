@@ -55,6 +55,8 @@ module.exports = function webhooksRouter({ crm, now = () => Date.now(), logger =
         phone,
         customerName: vars.customer_name,
         erpOrderId: vars.order_number,
+        // The number the caller confirmed the order with during the call (find_order saves it), if any.
+        orderPhone: vars.order_phone,
         preferredDate: vars.installation_date,
         preferredTime: vars.installation_time,
         city: vars.delivery_city,

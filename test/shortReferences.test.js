@@ -33,6 +33,8 @@ test('what a caller says names an id when it is the id, or ends in its number wi
 test('find_order finds an order from the short number and an invoice from its digits', async (t) => {
   const s = await startTestServer();
   t.after(s.close);
+  // Finding is what is tested here; confirming the order by its number is tested with find_order in api.test.js.
+  s.crm.confirmOrderNumber = async () => ({ onRecord: true, confirmed: true, phone: '+919876543210' });
   const lookup = (body) => s.call('POST', '/api/agent/order-lookup', { body, headers: s.agent }).then((r) => r.body);
 
   assert.equal((await lookup({ order_number: '1111' })).order_id, 'TD-ORD-1111', 'the number at the end of the order id');

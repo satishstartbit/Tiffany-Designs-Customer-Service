@@ -85,6 +85,7 @@ test('a confirmed request uses the mobile and address on file, without asking ag
   const { crm, salesforce } = crmWith(org());
   const result = await crm.createServiceCase({
     issueType: 'installation', description: 'Customer requested installation.', erpOrderId: 'TD-ORD-2002', useDetailsOnFile: true, preferredDate: '2026-10-20',
+    callerPhone: '+917878454578',
   });
   assert.equal(result.created, true);
   assert.equal(result.usedDetailsOnFile, true);
@@ -101,7 +102,7 @@ test('a new number or address for the request replaces the details on file, and 
   const { crm, salesforce } = crmWith(org());
   await crm.createServiceCase({
     issueType: 'return', description: 'Customer requests a return of the study table.', erpOrderId: 'TD-ORD-2002', useDetailsOnFile: true,
-    phone: '+919999988888', address: 'House 5, Sector 50', city: 'Gurugram', postalCode: '122018',
+    phone: '+919999988888', orderPhone: '+917878454578', customerName: 'Satish Chaudhary', address: 'House 5, Sector 50', city: 'Gurugram', postalCode: '122018',
   });
   const { fields } = salesforce.log.creates.at(-1);
   assert.deepEqual(salesforce.log.creates.map((c) => c.sobject), ['Case'], 'a different number does not make a new customer');
@@ -110,10 +111,11 @@ test('a new number or address for the request replaces the details on file, and 
   assert.deepEqual([fields.Service_City__c, fields.Service_PIN__c], ['Gurugram', '122018']);
   assert.match(fields.Description, /Address: House 5, Sector 50/);
   assert.match(fields.Description, /The customer gave a new mobile number and address for this request; the details on file are unchanged\./);
+  assert.match(fields.Description, /Contact for this request: Satish Chaudhary, on \+919999988888/);
 
   // A new city and PIN code without a street: the old street is not kept.
   await crm.createServiceCase({
-    issueType: 'installation', description: 'Install', erpOrderId: 'TD-ORD-2002', useDetailsOnFile: true, city: 'Delhi', postalCode: '110001',
+    issueType: 'installation', description: 'Install', erpOrderId: 'TD-ORD-2002', useDetailsOnFile: true, city: 'Delhi', postalCode: '110001', callerPhone: '+917878454578',
   });
   const moved = salesforce.log.creates.at(-1).fields;
   assert.equal(moved.Customer_Mobile__c, '+917878454578', 'the mobile on file is still used');
@@ -123,16 +125,17 @@ test('a new number or address for the request replaces the details on file, and 
 
 test('when nothing usable is on file, the agent is told what to ask for', async () => {
   const noMobile = crmWith(org({ contact: { Id: '003M', FirstName: 'Satish', LastName: 'Chaudhary', AccountId: '001M', MobilePhone: null } }));
-  const refusedMobile = await noMobile.crm.createServiceCase({ issueType: 'installation', description: 'Install', erpOrderId: 'TD-ORD-2002', useDetailsOnFile: true });
-  assert.deepEqual(refusedMobile, { created: false, error: 'No mobile number is on file for this order. Ask the customer for a mobile number to reach them on.' });
+  const refusedMobile = await noMobile.crm.createServiceCase({ issueType: 'installation', description: 'Install', erpOrderId: 'TD-ORD-2002', useDetailsOnFile: true, callerPhone: '+917878454578' });
+  assert.equal(refusedMobile.numberNeeded, true, 'an order with no mobile on record cannot be confirmed');
+  assert.match(refusedMobile.error, /no mobile number is on record for this order.*Offer the WhatsApp link to upload the invoice.$/);
 
   const noAddress = crmWith(org({ order: { ...JAIPUR_ORDER, ShippingStreet: null, ShippingCity: null, ShippingState: null, ShippingPostalCode: null } }));
-  const refusedAddress = await noAddress.crm.createServiceCase({ issueType: 'installation', description: 'Install', erpOrderId: 'TD-ORD-2002', useDetailsOnFile: true });
+  const refusedAddress = await noAddress.crm.createServiceCase({ issueType: 'installation', description: 'Install', erpOrderId: 'TD-ORD-2002', useDetailsOnFile: true, callerPhone: '+917878454578' });
   assert.match(refusedAddress.error, /^No address is on file for this order\./);
   assert.equal(noAddress.salesforce.log.creates.length, 0);
 
   // A general question needs no address.
-  const general = await noAddress.crm.createServiceCase({ issueType: 'general', description: 'Warranty?', erpOrderId: 'TD-ORD-2002', useDetailsOnFile: true });
+  const general = await noAddress.crm.createServiceCase({ issueType: 'general', description: 'Warranty?', erpOrderId: 'TD-ORD-2002', useDetailsOnFile: true, callerPhone: '+917878454578' });
   assert.equal(general.created, true);
 });
 
@@ -151,18 +154,23 @@ test('get_details_on_file gives only what is needed to confirm: the last four di
   t.after(s.close);
   const ask = (body) => s.call('POST', '/api/agent/details-on-file', { body, headers: s.agent }).then((r) => r.body);
 
-  const order = await ask({ order_id: 'td ord 1111' });
+  const order = await ask({ order_id: 'td ord 1111', caller_phone: '+919820011111' });
   assert.equal(order.found, true);
   assert.equal(order.source, 'order');
   assert.equal(order.mobile_ending, '1111');
   assert.equal(order.message, 'On file: the mobile number ending 1 1 1 1, and the delivery address in Jaipur, PIN code 3 0 2 0 1 2. Ask the customer whether to use these for the request.');
   assert.doesNotMatch(JSON.stringify(order), /98200/, 'the full mobile number is never sent to the agent');
 
-  const byInvoice = await ask({ invoice_number: 'INV-1111' });
+  const byInvoice = await ask({ invoice_number: 'INV-1111', order_phone: '+919820011111' });
   assert.equal(byInvoice.mobile_ending, '1111');
 
-  const nothing = await ask({ order_id: 'TD-ORD-3333' });
-  assert.equal(nothing.message, 'No mobile number or address is on file. Ask the customer for both.');
+  // Only for an order confirmed as the caller's, like find_order.
+  const other = await ask({ order_id: 'TD-ORD-1111', caller_phone: '+919876543210' });
+  assert.equal(other.found, false);
+  assert.match(other.message, /^This order is not confirmed as the customer's yet, so nothing on file for it can be shared. Ask which mobile number the order was placed with and call tool:find_order/);
+  assert.equal(other.mobile_ending, undefined);
+  const nothing = await ask({ order_id: 'TD-ORD-3333', caller_phone: '+919876543210' });
+  assert.equal(nothing.message, "No mobile number is on record for this order, so it cannot be confirmed as the customer's. Offer the WhatsApp link to upload the invoice.");
 
   const caller = await ask({ phone: '9876543210' });
   assert.equal(caller.source, 'customer');
@@ -177,7 +185,7 @@ test('requests pass use_details_on_file to the server, so no mobile number is ne
   const s = await startTestServer();
   t.after(s.close);
   const installation = await s.call('POST', '/api/agent/installation', {
-    body: { order_id: 'TD-ORD-1111', preferred_date: '2026-10-20', preferred_time: 'morning', use_details_on_file: true },
+    body: { order_id: 'TD-ORD-1111', preferred_date: '2026-10-20', preferred_time: 'morning', use_details_on_file: true, caller_phone: '+919820011111' },
     headers: s.agent,
   });
   assert.equal(installation.body.created, true);
@@ -185,7 +193,7 @@ test('requests pass use_details_on_file to the server, so no mobile number is ne
   assert.equal(s.crm.created.at(-1).input.phone, null);
 
   const ret = await s.call('POST', '/api/agent/cases', {
-    body: { issue_type: 'return', description: 'Customer wants to return the bookcase.', order_id: 'TD-ORD-1111', use_details_on_file: 'true' },
+    body: { issue_type: 'return', description: 'Customer wants to return the bookcase.', order_id: 'TD-ORD-1111', use_details_on_file: 'true', order_phone: '+919820011111' },
     headers: s.agent,
   });
   assert.equal(ret.body.created, true);

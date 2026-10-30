@@ -47,6 +47,8 @@ const ORG = {
   'FROM Order ': (soql) => (soql.includes("'TD-ORD-1001'")
     ? [{ Id: '801A', ERP_Order_Id__c: 'TD-ORD-1001', Invoice_Number__c: 'INV-2001', Order_Source__c: 'Website', Delivery_Status__c: 'Delivered', Delivery_Date__c: '2026-10-14', AccountId: '001A', Account: { Name: 'Demo Customer - Aarav Sharma' }, ShippingCity: null, ShippingPostalCode: null }]
     : []),
+  // The order's contact is the first one on the account with a number; the account's contacts are all of them.
+  "FROM Contact WHERE AccountId = '001A' AND (MobilePhone != null": () => [{ Id: '003A', FirstName: 'Aarav', LastName: 'Sharma', AccountId: '001A', MobilePhone: '+91 98100 00001' }],
   "FROM Contact WHERE AccountId = '001A'": () => [{ Id: '003Z', FirstName: 'Other', LastName: 'Family', AccountId: '001A', MobilePhone: null }, { Id: '003A', FirstName: 'Aarav', LastName: 'Sharma', AccountId: '001A', MobilePhone: '+91 98100 00001' }],
   "FROM Account WHERE Id = '001A'": () => [{ BillingCity: 'Delhi', BillingState: 'Delhi', BillingPostalCode: '110001' }],
   'FROM RecordType': () => [
@@ -185,6 +187,7 @@ test('createServiceCase saves a classified phone case linked to the verified ord
     Description: undefined,
     Origin: 'Phone',
     ContactId: '003A',
+    AccountId: '001A',
     Service_Type__c: 'Damage or Defect',
     Service_Sub_Type__c: 'Damage During Delivery',
     Order__c: '801A',
@@ -236,17 +239,53 @@ test('new caller accounts use the configured customer record type', async () => 
   assert.equal(sf.log.queries.filter((q) => q.includes("SobjectType = 'Account'")).length, 1, 'looked up once');
 });
 
-test('an existing contact is reused when the order cannot be verified', async () => {
-  const sf = fakeSalesforce({ queries: ORG, search: [{ Id: '003A', FirstName: 'Aarav', LastName: 'Sharma', AccountId: '001A', MobilePhone: '+919810000001' }] });
-  await createCrm({ salesforce: sf, businessHours: open }).createServiceCase({ issueType: 'damaged', description: 'Door scratched', phone: '+919810000001', erpOrderId: 'TD-ORD-9999' });
+const KNOWN_AARAV = { Id: '003A', FirstName: 'Aarav', LastName: 'Sharma', AccountId: '001A', MobilePhone: '+919810000001' };
+
+test('installation, damage and replacement requests are registered only for an order that is found', async () => {
+  const sf = fakeSalesforce({ queries: ORG, search: [KNOWN_AARAV] });
+  const crm = createCrm({ salesforce: sf, businessHours: open });
+  const base = { description: 'Door scratched', phone: '+919810000001', customerName: 'Aarav Sharma' };
+
+  const unknown = await crm.createServiceCase({ ...base, issueType: 'damaged', erpOrderId: 'TD-ORD-9999' });
+  assert.equal(unknown.created, false);
+  assert.match(unknown.error, /^No order matches that number\. .* Nothing was registered, because this request needs the order\. When the order cannot be found, offer the WhatsApp link to upload the invoice\.$/);
+  for (const issueType of ['installation', 'replacement', 'return', 'missing_parts']) {
+    const none = await crm.createServiceCase({ ...base, issueType });
+    assert.match(none.error, /^An installation, damage or replacement request is registered only for an order\./, issueType);
+  }
+  assert.equal(sf.log.creates.length, 0, 'nothing is saved without the order');
+
+  // A general question can go without one; the reference the caller gave is noted, and the caller's record is used.
+  await crm.createServiceCase({ ...base, issueType: 'general', erpOrderId: 'TD-ORD-9999' });
   assert.deepEqual(sf.log.creates.map((c) => c.sobject), ['Case']);
   assert.equal(sf.log.creates[0].fields.ContactId, '003A');
   assert.equal('Order__c' in sf.log.creates[0].fields, false);
   assert.match(sf.log.creates[0].fields.Description, /Order id given: TD-ORD-9999/);
 });
 
+test('a phone order is found by its order number, and the invoice number alone finds an order too', async () => {
+  const phoneOrder = { Id: '801P', OrderNumber: '00000142', ERP_Order_Id__c: null, Invoice_Number__c: 'IN-1687', AccountId: '001A', Account: { Name: 'Aarav Sharma' } };
+  const sf = fakeSalesforce({
+    queries: {
+      "OrderNumber = '00000142'": () => [phoneOrder],
+      "Invoice_Number__c IN ('IN-1687'": () => [phoneOrder],
+      ...ORG,
+    },
+  });
+  const crm = createCrm({ salesforce: sf, businessHours: open });
+  const byNumber = await crm.createServiceCase({ issueType: 'installation', description: 'Install', phone: '+919810000001', orderNumber: '00000142' });
+  assert.equal(byNumber.orderLinked, true);
+  const { fields } = sf.log.creates.at(-1);
+  assert.deepEqual([fields.Order__c, fields.Invoice_Number__c, fields.Subject], ['801P', 'IN-1687', 'Installation - 00000142']);
+  assert.match(fields.Description, /Order number given: 00000142/);
+
+  const byInvoice = await crm.createServiceCase({ issueType: 'replacement', description: 'Shelf', phone: '+919810000001', invoiceNumber: 'IN-1687' });
+  assert.equal(byInvoice.orderLinked, true);
+  assert.equal(sf.log.creates.at(-1).fields.Order__c, '801P');
+});
+
 test('escalations are created as Escalated general queries', async () => {
-  const sf = fakeSalesforce({ queries: ORG, search: [{ Id: '003A', AccountId: '001A', MobilePhone: '+919810000001' }] });
+  const sf = fakeSalesforce({ queries: ORG, search: [KNOWN_AARAV] });
   await createCrm({ salesforce: sf, businessHours: open }).createServiceCase({ issueType: 'escalation', description: 'Wants a manager', phone: '+919810000001' });
   const { fields } = sf.log.creates[0];
   assert.equal(fields.Status, 'Escalated');
@@ -255,14 +294,14 @@ test('escalations are created as Escalated general queries', async () => {
 });
 
 test('a request outside business hours is marked for the team', async () => {
-  const sf = fakeSalesforce({ queries: ORG, search: [{ Id: '003A', AccountId: '001A', MobilePhone: '+919810000001' }] });
+  const sf = fakeSalesforce({ queries: ORG, search: [KNOWN_AARAV] });
   const result = await createCrm({ salesforce: sf, businessHours: closed }).createServiceCase({ issueType: 'general', description: 'Late question', phone: '+919810000001' });
   assert.equal(result.withinBusinessHours, false);
   assert.match(sf.log.creates[0].fields.Description, /^\[Received outside business hours\]\nLate question/);
 });
 
 test('a business hours failure does not block the request', async () => {
-  const sf = fakeSalesforce({ queries: ORG, search: [{ Id: '003A', AccountId: '001A', MobilePhone: '+919810000001' }] });
+  const sf = fakeSalesforce({ queries: ORG, search: [KNOWN_AARAV] });
   const broken = { isOpen: async () => { throw new Error('INVALID_TYPE'); } };
   const result = await createCrm({ salesforce: sf, businessHours: broken }).createServiceCase({ issueType: 'general', description: 'x', phone: '+919810000001' });
   assert.equal(result.created, true);
@@ -273,38 +312,115 @@ test('requests without a description or a way to reach the customer are refused 
   const sf = fakeSalesforce({ queries: ORG });
   const crm = createCrm({ salesforce: sf, businessHours: open });
   assert.deepEqual(await crm.createServiceCase({ issueType: 'general', description: '  ', phone: '+919810000001' }), { created: false, error: 'A description of the issue is required.' });
-  assert.deepEqual(await crm.createServiceCase({ issueType: 'general', description: 'x' }), { created: false, error: 'A mobile number is needed to register the request.' });
+  const noNumber = 'A mobile number is needed to register the request. Ask for the 10 digit number the service team should call.';
+  assert.deepEqual(await crm.createServiceCase({ issueType: 'general', description: 'x' }), { created: false, error: noNumber });
   const unknownOrder = createCrm({ salesforce: fakeSalesforce(), businessHours: open });
-  assert.deepEqual(await unknownOrder.createServiceCase({ issueType: 'general', description: 'x', erpOrderId: 'TD-ORD-9999' }), { created: false, error: 'A mobile number is needed to register the request.' });
+  assert.deepEqual(await unknownOrder.createServiceCase({ issueType: 'general', description: 'x', erpOrderId: 'TD-ORD-9999' }), { created: false, error: noNumber });
   assert.equal(sf.log.creates.length, 0);
 });
 
-test('the order the caller named is linked even when their mobile is not on it, with the caller as the contact', async () => {
-  const sf = fakeSalesforce({ queries: ORG, search: [{ Id: '003C', FirstName: 'Satish', LastName: 'Chaudhary', AccountId: '001C', MobilePhone: '+917845784578' }] });
-  const result = await createCrm({ salesforce: sf, businessHours: open }).createServiceCase({
-    issueType: 'installation', description: 'Customer requested installation.', phone: '+917845784578', erpOrderId: 'TD-ORD-1001',
-  });
-  assert.equal(result.orderVerified, false);
-  assert.equal(result.orderLinked, true);
-  const { fields } = sf.log.creates.find((c) => c.sobject === 'Case');
-  assert.equal(fields.Order__c, '801A');
-  assert.equal(fields.ContactId, '003C', 'the caller, not the customer on the order');
+test('a request for an order is registered only once a number on the order\'s record confirms it', async () => {
+  const sf = fakeSalesforce({ queries: ORG });
+  const crm = createCrm({ salesforce: sf, businessHours: open });
+  const input = { issueType: 'installation', description: 'Install', phone: '+917845784578', customerName: 'Ravi Kumar', erpOrderId: 'TD-ORD-1001' };
 
-  const noMobile = createCrm({ salesforce: fakeSalesforce({ queries: ORG }), businessHours: open });
-  const linked = await noMobile.createServiceCase({ issueType: 'general', description: 'x', erpOrderId: 'TD-ORD-1001', invoiceNumber: 'INV-9' });
-  assert.equal(linked.created, true, 'without a mobile the customer on the order is used');
+  for (const extra of [{}, { orderPhone: '+919000000000' }]) {
+    const refused = await crm.createServiceCase({ ...input, ...extra });
+    assert.equal(refused.created, false);
+    assert.equal(refused.numberNeeded, true);
+    assert.match(refused.error, /^Nothing was registered, because the order is not confirmed as the customer's yet\. Ask which mobile number the order was placed with, call tool:find_order with the order reference and that number as order_phone, then call this tool again\.$/);
+  }
+  assert.equal(sf.log.creates.length, 0);
+  assert.equal((await crm.createServiceCase({ ...input, orderPhone: '98100 00001' })).created, true, 'the number the order was placed with');
+  assert.equal((await crm.createServiceCase({ ...input, phone: undefined, useDetailsOnFile: true, callerPhone: '+919810000001' })).created, true, 'the number of the call');
+
+  // A call back or a question still goes, without the order it cannot confirm.
+  const general = await crm.createServiceCase({ ...input, issueType: 'escalation' });
+  assert.equal(general.orderLinked, false);
+  const { fields } = sf.log.creates.at(-1);
+  assert.equal('Order__c' in fields, false);
+  assert.match(fields.Description, /Order id given: TD-ORD-1001\nThe order given is not linked: no number given in the call is on its customer record\./);
+
+  // No number on record for the order: nothing can confirm it.
+  const bare = fakeSalesforce({ queries: { 'FROM Order ': ORG['FROM Order '] } });
+  const none = await createCrm({ salesforce: bare, businessHours: open }).createServiceCase({ ...input, orderPhone: '+919810000001' });
+  assert.match(none.error, /^Nothing was registered: no mobile number is on record for this order, .* Offer the WhatsApp link to upload the invoice\.$/);
 });
 
-test('a verified order alone is enough to register without a mobile', async () => {
+test('a caller on another number registers for the order\'s customer, with their own name and number on the request', async () => {
   const sf = fakeSalesforce({ queries: ORG });
-  const result = await createCrm({ salesforce: sf, businessHours: open }).createServiceCase({ issueType: 'replacement', description: 'Need a new shelf', erpOrderId: 'TD-ORD-1001', invoiceNumber: 'INV-2001' });
+  const crm = createCrm({ salesforce: sf, businessHours: open });
+  // The caller confirmed the number the order was placed with, and wants to be reached on their own.
+  const input = { issueType: 'installation', description: 'Customer requested installation.', phone: '+917845784578', orderPhone: '+919810000001', erpOrderId: 'TD-ORD-1001' };
+
+  // Nobody on record for the number: the name of the person to ask for is needed, and nothing is made up.
+  for (const customerName of [undefined, 'Ravi', 'Mr Ravi', 'Unknown Customer']) {
+    const refused = await crm.createServiceCase({ ...input, customerName });
+    assert.equal(refused.created, false, String(customerName));
+    assert.match(refused.error, /^This mobile number is not on the customer's record for the order, so the full name, first and last, .* as customer_name\.$/);
+  }
+  assert.equal(sf.log.creates.length, 0);
+
+  const result = await crm.createServiceCase({ ...input, customerName: ' ravi  kumar ji ' });
+  assert.equal(result.orderLinked, true);
+  assert.equal(result.orderVerified, true);
+  assert.deepEqual(sf.log.creates.map((c) => c.sobject), ['Case'], 'no new customer for the other number');
+  const { fields } = sf.log.creates[0];
+  assert.deepEqual([fields.Order__c, fields.Invoice_Number__c, fields.AccountId, fields.ContactId], ['801A', 'INV-2001', '001A', '003A']);
+  assert.equal(fields.Customer_Mobile__c, '+917845784578');
+  assert.match(fields.Description, /\nContact for this request: ravi kumar, on \+917845784578, a number that is not on the customer's record\.\n/);
+
+  // A number on record for someone else names them without asking; a name in Hindi script counts as a full name.
+  const known = fakeSalesforce({ queries: ORG, search: [{ Id: '003C', FirstName: 'Satish', LastName: 'Chaudhary', AccountId: '001C', MobilePhone: '+917845784578' }] });
+  await createCrm({ salesforce: known, businessHours: open }).createServiceCase(input);
+  assert.match(known.log.creates[0].fields.Description, /Contact for this request: Satish Chaudhary, on \+917845784578/);
+  assert.equal(known.log.creates[0].fields.ContactId, '003A', 'the order\'s customer, not the caller');
+  const hindi = fakeSalesforce({ queries: ORG });
+  await createCrm({ salesforce: hindi, businessHours: open }).createServiceCase({ ...input, customerName: 'रवि चौधरी' });
+  assert.match(hindi.log.creates[0].fields.Description, /Contact for this request: रवि चौधरी, on/);
+});
+
+test('without a mobile given, the order\'s customer is reached on the number on file', async () => {
+  const sf = fakeSalesforce({ queries: ORG });
+  const input = { issueType: 'replacement', description: 'Need a new shelf', erpOrderId: 'TD-ORD-1001', invoiceNumber: 'INV-2001' };
+  const crm = createCrm({ salesforce: sf, businessHours: open });
+  assert.equal((await crm.createServiceCase(input)).numberNeeded, true, 'the invoice number alone does not confirm the order');
+  const result = await crm.createServiceCase({ ...input, callerPhone: '+919810000001' });
   assert.equal(result.created, true);
-  assert.equal(sf.log.creates[0].fields.RecordTypeId, '012RT-REP');
-  assert.equal(sf.log.creates[0].fields.ContactId, '003Z');
+  assert.equal(result.orderVerified, true);
+  const { fields } = sf.log.creates[0];
+  assert.equal(fields.RecordTypeId, '012RT-REP');
+  assert.deepEqual([fields.ContactId, fields.Customer_Mobile__c], ['003A', '+919810000001']);
+  assert.doesNotMatch(fields.Description, /Contact for this request/, 'the customer\'s own number needs no other name');
+});
+
+test('a new caller is saved only under a full name, and a record saved without one takes the name given', async () => {
+  const sf = fakeSalesforce({ queries: ORG });
+  const crm = createCrm({ salesforce: sf, businessHours: open });
+  for (const customerName of [undefined, '', 'Ravi', 'Customer', 'Unknown Customer']) {
+    const refused = await crm.createServiceCase({ issueType: 'escalation', description: 'Call me', phone: '+919000000001', customerName });
+    assert.match(refused.error, /^No customer with a name is on record for this mobile number, so the full name, first and last, is needed\./, String(customerName));
+  }
+  assert.equal(sf.log.creates.length, 0, 'no Unknown Customer is ever created');
+
+  const placeholder = { Id: '003U', FirstName: 'Unknown', LastName: 'Customer', AccountId: '001U', MobilePhone: '+919000000001' };
+  const old = fakeSalesforce({ queries: { ...ORG, "SELECT Name FROM Account WHERE Id = '001U'": () => [{ Name: 'Unknown Customer' }] }, search: [placeholder] });
+  const oldCrm = createCrm({ salesforce: old, businessHours: open });
+  const found = await oldCrm.findContactByPhone('+919000000001');
+  assert.deepEqual([found.name, found.firstName], [null, null], 'a placeholder is no name to greet');
+  assert.equal((await oldCrm.createServiceCase({ issueType: 'general', description: 'x', phone: '+919000000001' })).created, false);
+
+  await oldCrm.createServiceCase({ issueType: 'general', description: 'x', phone: '+919000000001', customerName: 'Ravi Chaudhary' });
+  assert.deepEqual(old.log.updates, [
+    { sobject: 'Contact', id: '003U', fields: { FirstName: 'Ravi', LastName: 'Chaudhary' } },
+    { sobject: 'Account', id: '001U', fields: { Name: 'Ravi Chaudhary' } },
+  ]);
+  assert.deepEqual(old.log.creates.map((c) => c.sobject), ['Case']);
+  assert.equal(old.log.creates[0].fields.ContactId, '003U');
 });
 
 test('a Salesforce error while saving is not hidden', async () => {
-  const sf = fakeSalesforce({ queries: ORG, search: [{ Id: '003A', AccountId: '001A', MobilePhone: '+919810000001' }] });
+  const sf = fakeSalesforce({ queries: ORG, search: [KNOWN_AARAV] });
   sf.create = async () => { throw new Error('Salesforce request failed (400): FIELD_CUSTOM_VALIDATION_EXCEPTION'); };
   await assert.rejects(
     createCrm({ salesforce: sf, businessHours: open }).createServiceCase({ issueType: 'general', description: 'x', phone: '+919810000001' }),
@@ -535,6 +651,13 @@ test('a new caller gets an account with the billing address and a contact before
   assert.equal(sf.log.creates[2].fields.AccountId, 'Account-1');
   assert.equal(sf.log.creates[2].fields.CustomerAuthorizedById, 'Contact-2');
   assert.doesNotMatch(sf.log.creates[2].fields.Description, /gave the name/);
+});
+
+test('an order for a new caller is not placed without a full name', async () => {
+  const sf = orderOrg();
+  const result = await createCrm({ salesforce: sf, businessHours: open, now: lateEvening }).createOrder({ ...ORDER_INPUT, customerName: 'Ravi', phone: '+919000000001' });
+  assert.deepEqual(result, { created: false, error: "The customer's full name, first and last, is needed to place the order. Ask for it." });
+  assert.equal(sf.log.creates.length, 0);
 });
 
 test('a different name on a known mobile is noted for the sales team', async () => {
@@ -842,7 +965,9 @@ test('saveCustomerDetails refuses incomplete details before saving anything', as
   assert.deepEqual(await crm.saveCustomerDetails({ ...base, email: 'ravi at example' }), { saved: false, error: 'The email address does not look complete. Ask the customer to spell it again.' });
   assert.deepEqual(await crm.saveCustomerDetails({ ...base, alternatePhone: '12345' }), { saved: false, error: 'The other phone number is not valid. Ask for it again.' });
   assert.deepEqual(await crm.saveCustomerDetails({ ...base, postalCode: '1220' }), { saved: false, error: 'A valid six digit PIN code is needed.' });
-  assert.deepEqual(await crm.saveCustomerDetails({ phone: '+919000000001' }), { saved: false, error: "The customer's name is needed to save a new customer." });
+  const needsName = { saved: false, error: "The customer's full name, first and last, is needed to save a new customer." };
+  assert.deepEqual(await crm.saveCustomerDetails({ phone: '+919000000001' }), needsName);
+  assert.deepEqual(await crm.saveCustomerDetails(base), needsName, 'a first name alone is not saved as a new customer');
 
   const known = orderOrg({ search: [AARAV] });
   assert.deepEqual(await createCrm({ salesforce: known, businessHours: open }).saveCustomerDetails({ phone: '+919810000001' }), {

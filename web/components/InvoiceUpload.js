@@ -7,7 +7,7 @@ const ENDPOINT = '/api/invoice';
 const MAX_BYTES = 4 * 1024 * 1024;
 const MAX_SIDE = 2000;
 const SENT_AS_IS = ['image/jpeg', 'image/png', 'image/webp'];
-const DONE_TITLES = { matched: 'Invoice received and matched', received: 'Invoice received', not_found: 'Order not found' };
+const DONE_TITLES = { matched: 'Invoice received and matched', created: 'Invoice received and order added', received: 'Invoice received', not_found: 'Order not found' };
 
 // Phone photos are large: an image is scaled down and sent as JPEG, which keeps the text readable and the upload small.
 async function prepare(file) {

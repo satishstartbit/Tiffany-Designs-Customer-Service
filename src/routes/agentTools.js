@@ -5,6 +5,7 @@ const { resolveDate, todayInIst, MAX_DAYS_AHEAD } = require('../dates');
 const { checkInstallationDay, checkInstallationSlot, INSTALLATION_HOURS } = require('../installationSlots');
 const { formatRupees } = require('../crm/orderItems');
 const { guideMessage, assemblyStepCount } = require('../crm/productGuides');
+const { findOrderFromReferences } = require('../crm/crm');
 
 const MAX_PRODUCTS_SPOKEN = 5;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -177,7 +178,8 @@ module.exports = function agentToolsRouter({ crm, invoiceLinks, productGuides, n
       if (contact) {
         firstName = contact.firstName || String(contact.name || '').trim().split(/\s+/)[0] || null;
         const { orderLine, requestLine } = await recordsOf(contact);
-        details = `${number} is registered to ${contact.name}. ${orderLine}${requestLine}`;
+        const owner = contact.name ? `is registered to ${contact.name}` : 'is on record with no name saved, so ask for the full name before registering anything';
+        details = `${number} ${owner}. ${orderLine}${requestLine}`;
       }
     } catch (err) {
       logger.error(`Looking up the caller at call start failed: ${err.message}`);
@@ -230,6 +232,7 @@ module.exports = function agentToolsRouter({ crm, invoiceLinks, productGuides, n
       phone: normalizePhone(body.phone),
       customerName: body.customer_name,
       erpOrderId: body.order_id,
+      orderNumber: body.order_number,
       verification: body.verification,
       invoiceNumber: body.invoice_number,
       orderSource: body.order_source,
@@ -243,6 +246,9 @@ module.exports = function agentToolsRouter({ crm, invoiceLinks, productGuides, n
       postalCode: body.postal_code,
       preferredDate: body.preferred_date,
       preferredTime: body.preferred_time,
+      // The number the caller confirmed the order with in find_order, and the number of the call (agent variables).
+      orderPhone: normalizePhone(body.order_phone),
+      callerPhone: normalizePhone(body.caller_phone),
       useDetailsOnFile: body.use_details_on_file === true || body.use_details_on_file === 'true',
       newRequest: body.new_request === true || body.new_request === 'true',
       atDeliveryAddress: body.at_delivery_address === true || body.at_delivery_address === 'true',
@@ -301,16 +307,50 @@ module.exports = function agentToolsRouter({ crm, invoiceLinks, productGuides, n
       recent_orders: named.map((o) => `${o.erpOrderId} (${o.deliveryStatus || 'status unknown'})`).join(', '),
       latest_order_id: named[0]?.erpOrderId || null,
       open_requests: requests.length,
-      message: phone
-        ? `Customer ${contact.name} found; first name ${firstName}. ${orderLine}${requestLine}`
-        : `Customer ${contact.name} found by name and PIN code. ${orderLine}${requestLine}`,
+      message: !contact.name
+        ? `A customer record with no name saved is on this number; ask for the full name before registering anything. ${orderLine}${requestLine}`
+        : phone
+          ? `Customer ${contact.name} found; first name ${firstName}. ${orderLine}${requestLine}`
+          : `Customer ${contact.name} found by name and PIN code. ${orderLine}${requestLine}`,
     });
   });
 
+  // The numbers a caller has given for an order: the mobile number passed to the tool, the number the caller said the
+  // order was placed with (order_phone, which find_order saves to the agent variable of that name), and the number of
+  // the call (caller_phone, from customer_phone).
+  const numbersGiven = (body) => [body.phone, body.order_phone, body.caller_phone];
+
+  // What the agent hears about an order it may not share yet: an order matches, and how to confirm it as the caller's.
+  function unconfirmed(check, body) {
+    if (!check.onRecord) {
+      return "An order matches, but no mobile number is on record for it, so it cannot be confirmed as the customer's and nothing "
+        + 'about it can be shared. Offer to send the WhatsApp link to upload the invoice: the order is completed from it, and the '
+        + 'customer can call again after uploading it.';
+    }
+    if (normalizePhone(body.order_phone)) {
+      return 'The number the customer gave is not the mobile number this order was placed with, so nothing about the order can be '
+        + 'shared. Ask the customer to check the number and say it once more, and call this tool again with it as order_phone. When it '
+        + 'does not match again, say the order details can be shared only with the number it was placed with, and offer a call back '
+        + 'from the service team.';
+    }
+    return `An order matches${numbersGiven(body).some((p) => normalizePhone(p)) ? ', but not with the number for this call' : ''}. `
+      + 'Before saying anything about the order, ask the customer which mobile number the order was placed with. Then call '
+      + 'tool:find_order again with the same order reference and that number as order_phone.';
+  }
+
+  // Lookups that give what is on file for an order give it only for a confirmed order, like find_order.
+  function notConfirmed(check) {
+    return check.onRecord
+      ? "This order is not confirmed as the customer's yet, so nothing on file for it can be shared. Ask which mobile number the "
+        + 'order was placed with and call tool:find_order with the order reference and that number as order_phone; once it is '
+        + 'confirmed, call this tool again.'
+      : "No mobile number is on record for this order, so it cannot be confirmed as the customer's. Offer the WhatsApp link to upload the invoice.";
+  }
+
   // An order the service team can act on has its customer's mobile number and a delivery address it can visit (a
   // street, and a city or PIN code). When either is missing, the agent offers the invoice upload link, whose upload
-  // fills them in on the order (src/crm/invoiceUploads.js).
-  async function orderAnswer(order, lead = '') {
+  // fills them in on the order (src/crm/invoiceUploads.js). `confirmedPhone` is the number that confirmed the order.
+  async function orderAnswer(order, confirmedPhone, lead = '') {
     const spokenId = order.erpOrderId || spokenCaseNumber(order.orderNumber);
     const [openRequests, details] = await Promise.all([crm.getOpenRequests(order.id), crm.getDetailsOnFile({ order })]);
     const hasMobile = Boolean(details.mobile);
@@ -318,6 +358,8 @@ module.exports = function agentToolsRouter({ crm, invoiceLinks, productGuides, n
     const missing = [!hasMobile && 'mobile number', !hasAddress && 'delivery address'].filter(Boolean);
     return {
       found: true,
+      number_confirmed: true,
+      order_phone: confirmedPhone,
       order_id: order.erpOrderId || null,
       order_number: order.orderNumber || null,
       customer_name: order.accountName,
@@ -339,62 +381,61 @@ module.exports = function agentToolsRouter({ crm, invoiceLinks, productGuides, n
   }
 
   // The order a caller means by an order id, the Salesforce order number of a phone order, or an invoice number.
-  // Returns { order }, { problem } to say, or {} when no reference was given.
-  async function orderFromReferences(body) {
-    const text = (value) => String(value ?? '').trim();
-    const phone = normalizePhone(body.phone);
-    let invoiceNumber = text(body.invoice_number);
-    let references = [text(body.order_id), text(body.order_number)].filter(Boolean);
-    // An invoice number said where the order id was expected.
-    if (!invoiceNumber) invoiceNumber = references.find((r) => /^inv/i.test(r)) || '';
-    references = references.filter((r) => r !== invoiceNumber);
-    if (!references.length && !invoiceNumber) return {};
-
-    // A short number can match several orders, and one invoice number can be on several: the caller's mobile picks
-    // theirs, otherwise more is needed.
-    const narrow = async (matches) => {
-      if (matches.length > 1 && phone) {
-        const contact = await crm.findContactByPhone(phone);
-        const own = matches.filter((o) => contact?.accountId && o.accountId === contact.accountId);
-        if (own.length) return own;
-      }
-      return matches;
-    };
-    const chosen = async (matches) => ({ order: await crm.getOrderById(matches[0].id) || matches[0] });
-
-    // The order id or order number, said in full or as the number at its end ("1009" for TD-ORD-1009).
-    for (const reference of references) {
-      const matches = await narrow(await crm.findOrdersByReference(reference));
-      if (matches.length === 1) return chosen(matches);
-      if (matches.length > 1) return { problem: 'More than one order ends in these digits. Ask for the full order id or the invoice number.' };
-    }
-    // The invoice number, in full or as its digits ("009" for INV-009). Digits that named no order are tried as an
-    // invoice number too, since callers often say only the number.
-    for (const reference of [invoiceNumber, ...references.filter((r) => !/[a-z]/i.test(r))].filter(Boolean)) {
-      const matches = await narrow(await crm.findOrdersByInvoice(reference));
-      if (matches.length === 1) return chosen(matches);
-      if (matches.length > 1) return { problem: 'More than one order has this invoice number. Ask for the order id or the order number.' };
-    }
-    return { problem: 'No order matches that number. Ask the customer to read the order id, order number or invoice number again.' };
+  // Returns { order }, { problem } to say, or {} when no reference was given. The request tools find it the same way.
+  function orderFromReferences(body) {
+    return findOrderFromReferences(crm, {
+      orderId: body.order_id, orderNumber: body.order_number, invoiceNumber: body.invoice_number, phone: normalizePhone(body.phone),
+    });
   }
 
-  // Any one reference finds the order and its details are given at once (the business chose no ownership check):
-  // the order id, the Salesforce order number of a phone order, or the invoice number. Addresses and phone numbers
-  // on the order are never returned here; get_details_on_file gives only the parts needed to confirm them.
+  // Any one reference finds the order: the order id, the Salesforce order number of a phone order, or the invoice
+  // number. Its details are given only once a number the caller gives (the number of the call, or the number the
+  // caller says the order was placed with, as order_phone) is a mobile on the order's customer record; until then the
+  // agent hears only that an order matches and asks for that number. The confirmed number comes back as order_phone,
+  // which the agent saves for the other tools. Addresses and phone numbers on the order are never returned here;
+  // get_details_on_file gives only the parts needed to confirm them.
   router.post('/order-lookup', async (req, res) => {
     const body = req.body || {};
     const phone = normalizePhone(body.phone);
-    const { order, problem } = await orderFromReferences(body);
-    if (problem) return res.json({ found: false, message: problem });
-    if (order) return res.json(await orderAnswer(order));
+    const { order, problem, notFound } = await orderFromReferences(body);
+    if (problem) {
+      return res.json({
+        found: false,
+        message: notFound
+          ? `${problem} When it finds nothing again, tell the customer the order could not be found and offer to send a link on WhatsApp `
+            + 'to upload a photo, screenshot or PDF of the invoice.'
+          : problem,
+      });
+    }
+    if (order) {
+      const check = await crm.confirmOrderNumber(order, numbersGiven(body));
+      if (check.confirmed) return res.json(await orderAnswer(order, check.phone));
+      // No order_phone, so a number the caller confirmed for another order in this call stays saved.
+      return res.json({
+        found: true,
+        number_confirmed: false,
+        mobile_on_order: check.onRecord,
+        address_on_order: null,
+        details_missing: !check.onRecord,
+        message: unconfirmed(check, body),
+      });
+    }
 
     if (!phone) {
       return res.json({ found: false, message: 'An order id, order number or invoice number, or the registered mobile number, is needed.' });
     }
+    // The latest order of the customer this number belongs to, so the number confirms it.
     const contact = await crm.findContactByPhone(phone);
     const [latest] = contact?.accountId ? await crm.findRecentOrdersForAccount(contact.accountId, 1) : [];
-    if (!latest) return res.json({ found: false, message: 'No order is linked to this phone number. Ask for the order id, order number or invoice number.' });
-    return res.json(await orderAnswer(await crm.getOrderById(latest.id), 'The latest order on this number: '));
+    if (!latest) {
+      return res.json({
+        found: false,
+        message: 'No order is linked to this phone number. Ask for the order id, order number or invoice number. When the customer has '
+          + 'none of them, or they find nothing either, tell the customer the order could not be found and offer to send a link on '
+          + 'WhatsApp to upload a photo, screenshot or PDF of the invoice.',
+      });
+    }
+    return res.json(await orderAnswer(await crm.getOrderById(latest.id), phone, 'The latest order on this number: '));
   });
 
   // The mobile number and address on file for an order (its customer and delivery address) or for a caller's own
@@ -408,6 +449,8 @@ module.exports = function agentToolsRouter({ crm, invoiceLinks, productGuides, n
 
     let details;
     if (order) {
+      const check = await crm.confirmOrderNumber(order, numbersGiven(body));
+      if (!check.confirmed) return res.json({ found: false, message: notConfirmed(check) });
       details = await crm.getDetailsOnFile({ order });
     } else {
       const phone = normalizePhone(body.phone);
@@ -449,11 +492,14 @@ module.exports = function agentToolsRouter({ crm, invoiceLinks, productGuides, n
   // confirm after that. As with get_details_on_file, only the city, state, PIN code and the mobile's last four digits
   // are given; book_installation fills in the full address when the caller chooses it (at_delivery_address).
   router.post('/installation-address', async (req, res) => {
-    const { order, problem } = await orderFromReferences(req.body || {});
+    const body = req.body || {};
+    const { order, problem } = await orderFromReferences(body);
     if (problem) return res.json({ found: false, message: problem });
     if (!order) {
       return res.json({ found: false, message: 'The order id, order number or invoice number is needed to find where the order was delivered.' });
     }
+    const check = await crm.confirmOrderNumber(order, numbersGiven(body));
+    if (!check.confirmed) return res.json({ found: false, message: notConfirmed(check) });
 
     const details = await crm.getDetailsOnFile({ order });
     const source = order.city || order.postalCode ? 'delivery' : details.city || details.postalCode ? 'customer' : null;
@@ -484,7 +530,8 @@ module.exports = function agentToolsRouter({ crm, invoiceLinks, productGuides, n
   });
 
   // When no order can be found for a caller, the agent offers a link to upload a photo or screenshot of the invoice,
-  // sent on WhatsApp. The upload page reads the invoice, finds the order and links the caller's requests to it.
+  // sent on WhatsApp. The upload page checks the invoice is Tiffany Designs', finds the order or adds it from the
+  // invoice, and links the caller's requests to it.
   router.post('/invoice-upload-link', async (req, res) => {
     const body = req.body || {};
 
@@ -500,15 +547,16 @@ module.exports = function agentToolsRouter({ crm, invoiceLinks, productGuides, n
       return res.json({
         sent: true,
         message: `The upload link is sent on WhatsApp to the number ending ${spokenDigits(result.ending)}. Tell the customer to open it and upload `
-          + 'a clear photo, screenshot or PDF of the invoice; the service system then finds the order and completes it with the details on the '
-          + 'invoice. Ask the customer to call again once it is uploaded, so the concern can be resolved.',
+          + 'a clear photo, screenshot or PDF of the Tiffany Designs invoice; the service system then finds the order, or adds it when it is '
+          + 'not on record, with the details on the invoice. Ask the customer to call again once it is uploaded, so the concern can be resolved.',
       });
     }
     return res.json({
       sent: false,
       message: result.reason === 'limited'
-        ? 'Links were already sent to this number today. Ask the customer to use the link already on WhatsApp, and carry on without the order.'
-        : 'The WhatsApp link cannot be sent right now. Carry on without the order, and note the order id, invoice number and product as the customer gives them.',
+        ? 'Links were already sent to this number today. Ask the customer to use the link already on WhatsApp and to call again once the invoice is uploaded.'
+        : 'The WhatsApp link cannot be sent right now. Register no installation, damage or replacement request without the order: offer a call back '
+          + 'from the service team instead, with the order id, invoice number and product the customer gave in the reason.',
     });
   });
 
