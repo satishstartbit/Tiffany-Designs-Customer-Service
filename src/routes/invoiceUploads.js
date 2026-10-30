@@ -26,7 +26,7 @@ module.exports = function invoiceUploadsRouter({ reader, records, limiter, logge
     }
     if (!reader.configured) {
       // The visitor sees a plain message; the log says what is missing.
-      logger.error('Invoice reading is off: set OPENAI_API_KEY.');
+      logger.error('Invoice reading is off: set GROQ_API_KEY.');
       return res.status(503).json({ error: 'not_configured', message: 'Invoice upload is not available right now. Please try again later.' });
     }
 
@@ -43,8 +43,15 @@ module.exports = function invoiceUploadsRouter({ reader, records, limiter, logge
       invoice = await reader.read({ data: req.body, contentType });
     } catch (err) {
       if (err.setup) {
-        logger.error(`Invoice reading is off until the OpenAI account or OPENAI_API_KEY / OPENAI_OCR_MODEL is fixed: ${err.message}`);
+        logger.error(`Invoice reading is off until the Groq account or GROQ_API_KEY / GROQ_OCR_MODEL is fixed: ${err.message}`);
         return res.status(503).json({ error: 'not_configured', message: 'Invoice upload is not available right now. Please try again later, or call Tiffany Designs customer care.' });
+      }
+      if (err.unreadable) {
+        logger.warn(`An uploaded PDF was refused: ${err.message}`);
+        return res.status(422).json({
+          error: 'unreadable_pdf',
+          message: 'We could not open this PDF. It may be locked with a password or damaged. Please upload a photo or screenshot of the invoice instead.',
+        });
       }
       logger.error(`Reading an uploaded invoice failed: ${err.message}`);
       return res.status(502).json({ error: 'read_failed', message: 'We could not read the invoice just now. Please try again in a minute.' });

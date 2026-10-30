@@ -7,7 +7,7 @@ const { lastTenDigits } = require('./rules');
 function createInvoiceLinkSender({ whatsapp, reader, records, limiter, logger = console }) {
   async function send({ phone, customerName, reference }) {
     if (!whatsapp.configured || !reader.configured) {
-      logger.error('Invoice upload links are off: set WHATSAPP_API_KEY and OPENAI_API_KEY.');
+      logger.error('Invoice upload links are off: set WHATSAPP_API_KEY and GROQ_API_KEY.');
       return { sent: false, reason: 'unavailable' };
     }
     const verdict = await limiter.check({ phone });

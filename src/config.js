@@ -80,11 +80,11 @@ module.exports = {
     apiKey: env.WHATSAPP_API_KEY || '',
   },
 
-  // Reads uploaded invoices (a vision model with structured output).
-  openai: {
-    apiKey: env.OPENAI_API_KEY || '',
-    model: env.OPENAI_OCR_MODEL || 'gpt-4.1-mini',
-    baseUrl: (env.OPENAI_BASE_URL || 'https://api.openai.com/v1').replace(/\/+$/, ''),
+  // Reads uploaded invoices (a Groq vision model with structured output).
+  groq: {
+    apiKey: env.GROQ_API_KEY || '',
+    model: env.GROQ_OCR_MODEL || 'qwen/qwen3.8-27b',
+    baseUrl: (env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1').replace(/\/+$/, ''),
   },
 
   followUpDelayMinutes: int(env.FOLLOWUP_DELAY_MINUTES, 60),

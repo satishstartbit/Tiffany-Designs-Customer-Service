@@ -321,7 +321,7 @@ test('the invoice upload page has one public address, asks only for the file, re
   const lib = read('lib', 'invoiceUpload.js');
   const widget = read('components', 'InvoiceUpload.js');
   for (const source of [route, lib, widget]) {
-    assert.doesNotMatch(source, /NODE_API_KEY|lib\/api|lib\/session|SARVAM_API_KEY|OPENAI/, 'no key is involved');
+    assert.doesNotMatch(source, /NODE_API_KEY|lib\/api|lib\/session|SARVAM_API_KEY|OPENAI|GROQ/, 'no key is involved');
   }
   assert.match(widget, /^'use client';/);
   assert.equal((widget.match(/<input /g) || []).length, 1, 'the only field is the file');

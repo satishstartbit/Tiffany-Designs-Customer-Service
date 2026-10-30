@@ -1,5 +1,5 @@
 // When the agent cannot find a caller's order it sends, on WhatsApp, the one public page where invoices are uploaded.
-// The page takes only the file: the invoice is read by an OpenAI model, matched to an order by invoice number, order
+// The page takes only the file: the invoice is read by a Groq vision model, matched to an order by invoice number, order
 // id or the phone on it, tied to the caller's request through the link sent to that phone or the order's customer,
 // and the order gets the missing details.
 const test = require('node:test');
@@ -7,6 +7,7 @@ const assert = require('node:assert/strict');
 const { createInvoiceLinkSender } = require('../src/invoiceLinks');
 const { createWhatsApp } = require('../src/whatsapp');
 const { createInvoiceReader, normalizeInvoice, INVOICE_SCHEMA } = require('../src/invoiceReader');
+const { pdfPages } = require('../src/pdfPages');
 const { createInvoiceUploads, productFor, LINK_SUBJECT } = require('../src/crm/invoiceUploads');
 const { createInvoiceLinkLimiter, createInvoiceUploadLimiter } = require('../src/rateLimit');
 const { createCrm } = require('../src/crm/crm');
@@ -261,12 +262,12 @@ test('an invoice that matches no order is answered as added', async (t) => {
 
 test('each visitor gets 10 uploads an hour, and a failed reading says to try again', async (t) => {
   let fail = false;
-  const { srv, calls, upload } = await uploadServer({ reader: () => { if (fail) throw new Error('OpenAI request failed (500): boom'); return INVOICE; } });
+  const { srv, calls, upload } = await uploadServer({ reader: () => { if (fail) throw new Error('Groq request failed (500): boom'); return INVOICE; } });
   t.after(srv.close);
   fail = true;
   const failed = await upload(Buffer.from('a'));
   assert.equal(failed.status, 502);
-  assert.doesNotMatch(failed.body.message, /OpenAI|boom/, 'the visitor never sees the technical reason');
+  assert.doesNotMatch(failed.body.message, /Groq|boom/, 'the visitor never sees the technical reason');
   fail = false;
   for (let i = 0; i < 9; i += 1) assert.equal((await upload(Buffer.from('a'))).status, 200);
   const limited = await upload(Buffer.from('a'));
@@ -275,17 +276,30 @@ test('each visitor gets 10 uploads an hour, and a failed reading says to try aga
   assert.equal(calls.read.length, 10, 'the 11th upload is not read');
 });
 
-test('an OpenAI account without credits says uploads are not available, not "try again in a minute"', async (t) => {
-  const noCredits = Object.assign(new Error('OpenAI request failed (429): You have no credits remaining.'), { setup: true });
-  const { srv, upload } = await uploadServer({ reader: () => { throw noCredits; } });
+test('a Groq account that cannot be used says uploads are not available, not "try again in a minute"', async (t) => {
+  const blocked = Object.assign(new Error('Groq request failed (403): Organization has been restricted.'), { setup: true });
+  const { srv, upload } = await uploadServer({ reader: () => { throw blocked; } });
   t.after(srv.close);
   const res = await upload(Buffer.from('a'));
   assert.equal(res.status, 503);
   assert.equal(res.body.error, 'not_configured');
-  assert.doesNotMatch(res.body.message, /credits|OpenAI|try again in a minute/);
+  assert.doesNotMatch(res.body.message, /restricted|Groq|try again in a minute/);
 });
 
-test('without an OpenAI key the page says uploads are not available', async (t) => {
+test('a PDF that cannot be opened asks for a photo instead, and reaches nothing else', async (t) => {
+  const locked = Object.assign(new Error('The PDF cannot be opened: No password given'), { unreadable: true });
+  const { srv, calls, upload } = await uploadServer({ reader: () => { throw locked; } });
+  t.after(srv.close);
+  const res = await upload(Buffer.from('%PDF-1.7'), 'application/pdf');
+  assert.equal(res.status, 422);
+  assert.deepEqual(res.body, {
+    error: 'unreadable_pdf',
+    message: 'We could not open this PDF. It may be locked with a password or damaged. Please upload a photo or screenshot of the invoice instead.',
+  });
+  assert.equal(calls.record.length, 0);
+});
+
+test('without a Groq key the page says uploads are not available', async (t) => {
   const { srv, calls, upload } = await uploadServer({ readerConfigured: false });
   t.after(srv.close);
   assert.deepEqual((await srv.call('GET', '/api/invoice-uploads')).body, { available: false });
@@ -296,7 +310,7 @@ test('without an OpenAI key the page says uploads are not available', async (t) 
 
 // ---------- Reading the invoice ----------
 
-function fakeOpenAi(content, status = 200, error = { message: 'Incorrect API key provided', code: 'invalid_api_key' }) {
+function fakeGroq(content, status = 200, error = { message: 'Invalid API Key', type: 'invalid_request_error', code: 'invalid_api_key' }) {
   const requests = [];
   const fetchImpl = async (url, options) => {
     requests.push({ url, auth: options.headers.Authorization, body: JSON.parse(options.body) });
@@ -324,17 +338,18 @@ const READ = {
   total_amount: 8999,
 };
 
-test('an image goes to the vision model with a strict schema, and the answer is checked', async () => {
-  const api = fakeOpenAi(READ);
-  const reader = createInvoiceReader({ apiKey: 'sk-test', model: 'gpt-4.1-mini', fetchImpl: api.fetchImpl });
+test('an image goes to the Groq vision model with a strict schema, and the answer is checked', async () => {
+  const api = fakeGroq(READ);
+  const reader = createInvoiceReader({ apiKey: 'gsk_test', model: 'qwen/qwen3.8-27b', fetchImpl: api.fetchImpl });
   const invoice = await reader.read({ data: Buffer.from('jpeg'), contentType: 'image/jpeg' });
 
   const [request] = api.requests;
-  assert.equal(request.url, 'https://api.openai.com/v1/chat/completions');
-  assert.equal(request.auth, 'Bearer sk-test');
-  assert.equal(request.body.model, 'gpt-4.1-mini');
-  assert.deepEqual(request.body.messages[1].content[1], { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${Buffer.from('jpeg').toString('base64')}`, detail: 'high' } });
+  assert.equal(request.url, 'https://api.groq.com/openai/v1/chat/completions');
+  assert.equal(request.auth, 'Bearer gsk_test');
+  assert.equal(request.body.model, 'qwen/qwen3.8-27b');
+  assert.deepEqual(request.body.messages[1].content[1], { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${Buffer.from('jpeg').toString('base64')}` } });
   assert.equal(request.body.response_format.json_schema.strict, true);
+  assert.equal(request.body.reasoning_effort, 'none');
 
   assert.equal(invoice.invoiceNumber, 'INV-2010');
   assert.equal(invoice.soldBy, 'Tiffany Designs Private Limited');
@@ -348,27 +363,100 @@ test('an image goes to the vision model with a strict schema, and the answer is 
   assert.deepEqual(invoice.items, [{ name: 'Study Table', quantity: 1, sku: null, amount: 8999 }]);
 });
 
-test('a PDF is sent as a file, and a refused key or another file type is an error', async () => {
-  const api = fakeOpenAi(READ);
-  await createInvoiceReader({ apiKey: 'k', model: 'm', fetchImpl: api.fetchImpl }).read({ data: Buffer.from('%PDF'), contentType: 'application/pdf' });
-  assert.deepEqual(api.requests[0].body.messages[1].content[1], { type: 'file', file: { filename: 'invoice.pdf', file_data: `data:application/pdf;base64,${Buffer.from('%PDF').toString('base64')}` } });
+// A text-only PDF with one page per list of lines, written by hand so the test needs no file.
+function textPdf(pages) {
+  const objects = ['<< /Type /Catalog /Pages 2 0 R >>', null, '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>'];
+  const kids = pages.map((lines) => {
+    const stream = lines.map((line, i) => `BT /F1 12 Tf 50 ${780 - i * 20} Td (${line}) Tj ET`).join('\n');
+    objects.push(`<< /Length ${Buffer.byteLength(stream)} >>\nstream\n${stream}\nendstream`);
+    objects.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents ${objects.length} 0 R >>`);
+    return `${objects.length} 0 R`;
+  });
+  objects[1] = `<< /Type /Pages /Kids [${kids.join(' ')}] /Count ${pages.length} >>`;
+  let pdf = '%PDF-1.4\n';
+  const offsets = objects.map((body, i) => {
+    const at = Buffer.byteLength(pdf);
+    pdf += `${i + 1} 0 obj\n${body}\nendobj\n`;
+    return at;
+  });
+  const xref = Buffer.byteLength(pdf);
+  pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n${offsets.map((o) => `${String(o).padStart(10, '0')} 00000 n \n`).join('')}`;
+  return Buffer.from(`${pdf}trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`);
+}
 
-  const refused = createInvoiceReader({ apiKey: 'k', model: 'm', fetchImpl: fakeOpenAi(READ, 401).fetchImpl });
-  await assert.rejects(refused.read({ data: Buffer.from('a'), contentType: 'image/png' }), /OpenAI request failed \(401\): Incorrect API key/);
+test('a PDF goes as an image of page one with the text printed on every page', async () => {
+  const api = fakeGroq(READ);
+  const pdf = textPdf([['Sold By : Tiffany Designs Private Limited', 'Invoice Number : INV-2010'], ['Page two'], ['Terms']]);
+  await createInvoiceReader({ apiKey: 'k', model: 'm', fetchImpl: api.fetchImpl }).read({ data: pdf, contentType: 'application/pdf' });
+
+  const [text, ...images] = api.requests[0].body.messages[1].content;
+  assert.equal(images.length, 1, 'each image costs a share of the per-minute allowance');
+  assert.match(images[0].image_url.url, /^data:image\/jpeg;base64,\/9j\//, 'the page is a JPEG');
+  assert.match(text.text, /the image is page 1 of its 3 pages/);
+  assert.match(text.text, /Sold By : Tiffany Designs Private Limited\s+Invoice Number : INV-2010/);
+  assert.match(text.text, /Terms/, 'the text of every page goes along');
+
+  const pages = await pdfPages(pdf, { maxPages: 3 });
+  assert.equal(pages.images.length, 3);
+});
+
+test('a scanned PDF goes without text; a broken PDF is unreadable, not a failure to retry', async () => {
+  const api = fakeGroq(READ);
+  const scanned = async () => ({ pageCount: 1, images: [Buffer.from('page')], text: '' });
+  await createInvoiceReader({ apiKey: 'k', model: 'm', fetchImpl: api.fetchImpl, readPdf: scanned }).read({ data: Buffer.from('%PDF'), contentType: 'application/pdf' });
+  const [text, image] = api.requests[0].body.messages[1].content;
+  assert.equal(text.text, 'Read this invoice. It is a PDF: the image is its page. It has no printed text, so read the image.');
+  assert.equal(image.image_url.url, `data:image/jpeg;base64,${Buffer.from('page').toString('base64')}`);
+
+  const broken = await pdfPages(Buffer.from('%PDF-1.7 not really')).then(() => null, (err) => err);
+  assert.equal(broken.unreadable, true);
+  const reader = createInvoiceReader({ apiKey: 'k', model: 'm', fetchImpl: fakeGroq(READ).fetchImpl });
+  await assert.rejects(reader.read({ data: Buffer.from('%PDF-1.7 not really'), contentType: 'application/pdf' }), (err) => err.unreadable === true);
+});
+
+test('a used-up minute allowance is waited out once when Groq names a short wait', async () => {
+  const limited = (retryAfter) => {
+    const answers = [
+      { ok: false, status: 429, headers: new Headers({ 'retry-after': retryAfter }), json: async () => ({ error: { message: 'Rate limit reached', code: 'rate_limit_exceeded' } }) },
+      { ok: true, status: 200, headers: new Headers(), json: async () => ({ choices: [{ message: { content: JSON.stringify(READ) } }] }) },
+    ];
+    const calls = [];
+    return { calls, fetchImpl: async (url) => { calls.push(url); return answers[calls.length - 1]; } };
+  };
+  const waits = [];
+  const sleep = async (ms) => { waits.push(ms); };
+
+  const short = limited('4');
+  const invoice = await createInvoiceReader({ apiKey: 'k', model: 'm', fetchImpl: short.fetchImpl, sleep }).read({ data: Buffer.from('a'), contentType: 'image/png' });
+  assert.equal(invoice.invoiceNumber, 'INV-2010');
+  assert.deepEqual(waits, [4000]);
+  assert.equal(short.calls.length, 2);
+
+  const long = limited('45');
+  const err = await createInvoiceReader({ apiKey: 'k', model: 'm', fetchImpl: long.fetchImpl, sleep }).read({ data: Buffer.from('a'), contentType: 'image/png' }).then(() => null, (e) => e);
+  assert.match(err.message, /Groq request failed \(429\)/);
+  assert.equal(err.setup, false);
+  assert.equal(long.calls.length, 1, 'a long wait is left to the customer');
+});
+
+test('a refused key or another file type is an error', async () => {
+  const refused = createInvoiceReader({ apiKey: 'k', model: 'm', fetchImpl: fakeGroq(READ, 401).fetchImpl });
+  await assert.rejects(refused.read({ data: Buffer.from('a'), contentType: 'image/png' }), /Groq request failed \(401\): Invalid API Key/);
   await assert.rejects(refused.read({ data: Buffer.from('a'), contentType: 'image/gif' }), /Unsupported invoice file type/);
   assert.equal(createInvoiceReader({ apiKey: '', model: 'm' }).configured, false);
 });
 
-test('a refused key, no credits or an unknown model is a setup problem; a rate limit or an outage is not', async () => {
+test('a refused key, a blocked account or an unknown model is a setup problem; a rate limit or an outage is not', async () => {
   const failure = async (status, error) => {
-    const reader = createInvoiceReader({ apiKey: 'k', model: 'm', fetchImpl: fakeOpenAi(READ, status, error).fetchImpl });
+    const reader = createInvoiceReader({ apiKey: 'k', model: 'm', fetchImpl: fakeGroq(READ, status, error).fetchImpl });
     return reader.read({ data: Buffer.from('a'), contentType: 'image/png' }).then(() => null, (err) => err);
   };
-  const noCredits = await failure(429, { message: 'You have no credits remaining.', type: 'insufficient_quota', code: 'insufficient_quota' });
-  assert.match(noCredits.message, /OpenAI request failed \(429\): You have no credits remaining\./);
-  assert.equal(noCredits.setup, true);
-  assert.equal((await failure(401, { message: 'Incorrect API key provided', code: 'invalid_api_key' })).setup, true);
-  assert.equal((await failure(404, { message: 'The model does not exist', code: 'model_not_found' })).setup, true);
+  const blocked = await failure(403, { message: 'Organization has been restricted.', type: 'invalid_request_error', code: 'organization_restricted' });
+  assert.match(blocked.message, /Groq request failed \(403\): Organization has been restricted\./);
+  assert.equal(blocked.setup, true);
+  assert.equal((await failure(401, { message: 'Invalid API Key', code: 'invalid_api_key' })).setup, true);
+  assert.equal((await failure(404, { message: 'The model does not exist or you do not have access to it.', code: 'model_not_found' })).setup, true);
+  assert.equal((await failure(400, { message: 'The model has been decommissioned.', code: 'model_decommissioned' })).setup, true);
   assert.equal((await failure(429, { message: 'Rate limit reached', type: 'requests', code: 'rate_limit_exceeded' })).setup, false);
   assert.equal((await failure(500, { message: 'The server had an error' })).setup, false);
 });

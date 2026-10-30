@@ -27,6 +27,7 @@
   "homepage": "https://github.com/satishstartbit/Tiffany-Designs-Customer-Service#readme",
   "dependencies": {
     "dotenv": "^18.0.7",
-    "express": "^5.3.0"
+    "express": "^5.3.0",
+    "pdfjs-dist": "^6.4.299"
   }
 }
