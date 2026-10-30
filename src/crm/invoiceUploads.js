@@ -2,6 +2,7 @@ const { escapeSoql, escapeSoqlLike, soqlDateTime } = require('./crm');
 const { formatRupees } = require('./orderItems');
 const { normalizePhone, lastTenDigits, namesMatch, sameReference, fullName } = require('../rules');
 const { todayInIst } = require('../dates');
+const { soldByTiffany } = require('../invoiceReader');
 
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
@@ -125,13 +126,23 @@ const section = (title, lines) => (lines.length ? [title, ...lines] : []);
 // "142" and "00000142" are the same Salesforce order number.
 const sameOrderNumber = (a, b) => String(a || '').replace(/\D/g, '').replace(/^0+/, '') === String(b || '').replace(/\D/g, '').replace(/^0+/, '');
 
+// Why an invoice was refused, for the service team (the page tells the customer in its own words).
+const REFUSALS = {
+  not_tiffany_invoice: () => 'it is not sold by Tiffany Designs Private Limited',
+  invoice_number_missing: () => 'no invoice number could be read on it',
+  no_products: () => 'no products could be read on it',
+  product_not_available: (r) => `${r.products.map((p) => `"${p}"`).join(', ')} ${r.products.length > 1 ? 'are' : 'is'} not in the product catalog`,
+};
+
 // What happens to an invoice a customer uploads on the website's /invoice page (the route has already checked that
 // Tiffany Designs sold it): the order it belongs to is looked up by the invoice number, else the phone on the invoice,
 // else the order number, else the order id. A matched order is brought in line with the invoice: its details, its
 // customer and its products (every change is noted, old value and new), it gets the file, and the caller's requests
 // that were registered without an order. No order is ever added for an invoice that matches one. An invoice that
-// matches no order becomes a new Draft order with its customer, its details and its products; only when no customer
-// can be saved for it (no phone, or no full name) does it go to the service team on a request instead.
+// matches no order becomes a new Draft order with its customer, its details and its products, but only when Sold By is
+// Tiffany Designs Private Limited, the invoice number is printed and every product is in the catalog; otherwise the
+// upload is refused and nothing is saved. When its invoice number, order number or order id is already on more than
+// one order, or no customer can be saved for it (no phone, or no full name), it goes to the service team on a request.
 // The upload page asks for nothing but the file, so the WhatsApp link an upload answers is found from the invoice:
 // a link sent in the last `linkDays` to the phone on the invoice or to the customer of the matched order.
 function createInvoiceUploads({ salesforce, crm, linkDays = 7, productCodePrefix = 'TD-', now = () => Date.now(), logger = console }) {
@@ -179,10 +190,11 @@ function createInvoiceUploads({ salesforce, crm, linkDays = 7, productCodePrefix
     };
   }
 
-  async function closeLink(link, outcome) {
+  // Notes on the link task what the upload came to; an upload that was refused leaves the task open.
+  async function closeLink(link, outcome, status = 'Completed') {
     const note = `Invoice uploaded on ${longDate(now())}: ${outcome}`;
-    await salesforce.update('Task', link.id, { Status: 'Completed', Description: `${link.details}\n${note}`.slice(0, DESCRIPTION_MAX) })
-      .catch((err) => logger.error(`Completing the invoice upload link task ${link.id} failed: ${err.message}`));
+    await salesforce.update('Task', link.id, { Status: status, Description: `${link.details}\n${note}`.slice(0, DESCRIPTION_MAX) })
+      .catch((err) => logger.error(`Noting the upload on the invoice upload link task ${link.id} failed: ${err.message}`));
   }
 
   // The customers the invoice's phone number and the caller's WhatsApp number belong to.
@@ -203,10 +215,15 @@ function createInvoiceUploads({ salesforce, crm, linkDays = 7, productCodePrefix
       return matches.length > 1 && own.length ? own : matches;
     };
     const notes = [];
+    // References already on more than one order: no order is added for them, or the order would be in twice.
+    const taken = [];
     if (invoice.invoiceNumber) {
       const matches = narrow(await crm.findOrdersByInvoice(invoice.invoiceNumber));
       if (matches.length === 1) return { order: matches[0], matchedBy: 'invoice number' };
-      if (matches.length > 1) notes.push(`${matches.length} orders have invoice number ${invoice.invoiceNumber}.`);
+      if (matches.length > 1) {
+        notes.push(`${matches.length} orders have invoice number ${invoice.invoiceNumber}.`);
+        taken.push(`invoice number ${invoice.invoiceNumber}`);
+      }
     }
     // By mobile only when the customer has exactly one recent order that carries no other invoice number, order id
     // or order number than the invoice's.
@@ -222,10 +239,13 @@ function createInvoiceUploads({ salesforce, crm, linkDays = 7, productCodePrefix
       if (!reference) continue;
       const matches = narrow(await crm.findOrdersByReference(reference));
       if (matches.length === 1) return { order: matches[0], matchedBy: label };
-      if (matches.length > 1) notes.push(`${matches.length} orders match ${label} ${reference}.`);
+      if (matches.length > 1) {
+        notes.push(`${matches.length} orders match ${label} ${reference}.`);
+        taken.push(`${label} ${reference}`);
+      }
     }
     if (!notes.length) notes.push('No order has this invoice number, order number or order id, and no single order is on the mobile number.');
-    return { order: null, notes };
+    return { order: null, notes, taken };
   }
 
   // Requests the caller registered without an order since the link was sent (or just before): the voice agent sends
@@ -360,22 +380,26 @@ function createInvoiceUploads({ salesforce, crm, linkDays = 7, productCodePrefix
     return { contactId: contact.Id, changes, problems, linkContact: row.CustomerAuthorizedById ? null : contact.Id };
   }
 
+  // The products that can be ordered from a price book: active, with an active price, and Tiffany's own (the price
+  // book also holds the org's sample products).
+  function catalog(pricebookId) {
+    const ownProducts = productCodePrefix ? ` AND Product2.ProductCode LIKE '${escapeSoqlLike(productCodePrefix)}%'` : '';
+    return salesforce.query(
+      'SELECT Id, UnitPrice, Product2Id, Product2.Name, Product2.ProductCode FROM PricebookEntry '
+      + `WHERE Pricebook2Id = '${escapeSoql(pricebookId)}' AND IsActive = true AND Product2.IsActive = true${ownProducts} LIMIT 500`,
+    );
+  }
+
   // Brings the order's products in line with the invoice: quantities and prices of the products on both, and the
   // invoice's other products added. Salesforce changes products only on a Draft order, so an activated order is made
   // Draft for the change and activated again (the purchase recommendation flow has already run for it and sends
   // nothing twice). Products not in the catalog, and products only on the order, are left for the team.
-  async function updateProducts(row, invoice) {
+  // `entries` is the catalog when it has already been read.
+  async function updateProducts(row, invoice, entries = null) {
     const result = { changes: [], problems: [] };
     if (!invoice.items.length) return result;
-    // Only Tiffany's own products: the price book also holds the org's sample products.
-    const ownProducts = productCodePrefix ? ` AND Product2.ProductCode LIKE '${escapeSoqlLike(productCodePrefix)}%'` : '';
-    const [entries, items] = await Promise.all([
-      salesforce.query(
-        'SELECT Id, UnitPrice, Product2Id, Product2.Name, Product2.ProductCode FROM PricebookEntry '
-        + `WHERE Pricebook2Id = '${escapeSoql(row.Pricebook2Id)}' AND IsActive = true${ownProducts} LIMIT 500`,
-      ),
-      salesforce.query(`SELECT Id, Product2Id, Product2.Name, Quantity, UnitPrice FROM OrderItem WHERE OrderId = '${escapeSoql(row.Id)}'`),
-    ]);
+    const items = await salesforce.query(`SELECT Id, Product2Id, Product2.Name, Quantity, UnitPrice FROM OrderItem WHERE OrderId = '${escapeSoql(row.Id)}'`);
+    entries ||= await catalog(row.Pricebook2Id);
     const onOrder = new Set(items.map((i) => i.Product2Id));
     const used = new Set();
     const updates = [];
@@ -496,9 +520,25 @@ function createInvoiceUploads({ salesforce, crm, linkDays = 7, productCodePrefix
   // An invoice that matches no order becomes a Draft order, for the service team to check against the invoice and
   // activate. Its customer is the one the phone on the invoice (else the caller's WhatsApp number) belongs to, else a
   // new customer under the full name on the invoice or given on the call, with the invoice's email and address. The
-  // order takes every detail the invoice shows and the products it can match in the catalog.
-  // Returns { added } or { reason } when no customer can be saved for it.
-  async function addOrder(invoice, link) {
+  // order takes every detail the invoice shows and its products.
+  // The invoice is checked before anything is saved. Returns { added }; { refused: { reason, products } } when the
+  // customer has to upload another invoice (not sold by Tiffany Designs, no invoice number, no products, or a product
+  // not in the catalog); or { reason } when the service team has to look at it (its invoice number, order number or
+  // order id already on several orders, or no customer can be saved for it).
+  async function addOrder(invoice, link, found) {
+    // The route has already refused other sellers; checked again so that no order is ever added for one.
+    if (!soldByTiffany(invoice)) return { refused: { reason: 'not_tiffany_invoice' } };
+    if (found.taken.length) {
+      return { reason: `No order was added from it, because ${found.taken.join(' and ')} ${found.taken.length > 1 ? 'are' : 'is'} already on more than one order; another would enter it twice.` };
+    }
+    if (!invoice.invoiceNumber) return { refused: { reason: 'invoice_number_missing' } };
+    if (!invoice.items.length) return { refused: { reason: 'no_products' } };
+    const [pricebook] = await salesforce.query('SELECT Id FROM Pricebook2 WHERE IsStandard = true LIMIT 1');
+    if (!pricebook) throw new Error('Salesforce has no standard price book, so no order can be added from an invoice.');
+    const entries = await catalog(pricebook.Id);
+    const missing = invoice.items.filter((item) => !productFor(item, entries, new Set())).map((item) => item.name);
+    if (missing.length) return { refused: { reason: 'product_not_available', products: missing } };
+
     const phone = normalizePhone(invoice.phone) || link?.phone || null;
     if (!phone) return { reason: 'No order was added from it, because it shows no phone number for the customer.' };
     const billed = hasAddress(invoice.billingAddress) ? invoice.billingAddress : invoice.address;
@@ -515,14 +555,13 @@ function createInvoiceUploads({ salesforce, crm, linkDays = 7, productCodePrefix
     if (invoice.customerName && customer.name && !namesMatch(invoice.customerName, customer.name)) {
       problems.push(`The invoice names ${invoice.customerName}; the mobile number ${phone} belongs to ${customer.name}, so the order is on that customer.`);
     }
-    const [pricebook] = await salesforce.query('SELECT Id FROM Pricebook2 WHERE IsStandard = true LIMIT 1');
-    const marker = `(invoice ${invoice.invoiceNumber || invoice.orderId || today()})`;
+    const marker = `(invoice ${invoice.invoiceNumber})`;
     const essentials = compact({
       AccountId: customer.accountId,
       CustomerAuthorizedById: customer.id,
       Status: 'Draft',
       EffectiveDate: invoice.orderDate || invoice.invoiceDate || today(),
-      Pricebook2Id: pricebook?.Id,
+      Pricebook2Id: pricebook.Id,
       Description: [
         `Added from the invoice the customer uploaded on ${longDate(now())} ${marker}, because no order matched it. Check it against the attached invoice and activate it.`,
         ...invoiceLines(invoice),
@@ -545,11 +584,13 @@ function createInvoiceUploads({ salesforce, crm, linkDays = 7, productCodePrefix
       created = await salesforce.create('Order', essentials);
     }
 
-    const products = pricebook?.Id
-      ? await updateProducts({ Id: created.id, Pricebook2Id: pricebook.Id, Status: 'Draft' }, invoice)
-      : { changes: [], problems: invoice.items.length ? ['No standard price book was found, so no products were added.'] : [] };
+    const products = await updateProducts({ Id: created.id, Pricebook2Id: pricebook.Id, Status: 'Draft' }, invoice, entries);
     problems.push(...products.problems);
     const [saved] = await salesforce.query(`SELECT OrderNumber FROM Order WHERE Id = '${escapeSoql(created.id)}' LIMIT 1`);
+    // Salesforce numbers a new order itself, so an order number printed on the invoice cannot be given to it.
+    if (invoice.orderNumber && saved?.OrderNumber && !sameOrderNumber(invoice.orderNumber, saved.OrderNumber)) {
+      problems.push(`The invoice shows order number ${invoice.orderNumber}, which no order has; this order's number is ${saved.OrderNumber}.`);
+    }
     return {
       added: {
         id: created.id,
@@ -586,7 +627,8 @@ function createInvoiceUploads({ salesforce, crm, linkDays = 7, productCodePrefix
   // An uploaded invoice (`file` is { data, contentType }). The page sends nothing else, so the customer is found from
   // the invoice: the phone printed on it, and the WhatsApp link sent to that phone or to the matched order's customer.
   // Returns { matched, created, recorded, ... }: matched for an order found, created for an order added from the
-  // invoice; an invoice with no order and no phone to reach anyone on is not recorded.
+  // invoice, refused ({ reason, products }) for an invoice no order may be added from; an invoice with no order and no
+  // phone to reach anyone on is not recorded.
   async function record({ invoice, file }) {
     const invoicePhone = normalizePhone(invoice.phone);
     const contacts = await contactsFor([invoicePhone].filter(Boolean));
@@ -633,7 +675,13 @@ function createInvoiceUploads({ salesforce, crm, linkDays = 7, productCodePrefix
       return { matched: true, recorded: true, matchedBy: found.matchedBy, orderId: order.id, orderName: order.name, linkedCases: linked, changed };
     }
 
-    const { added, reason } = await addOrder(invoice, link);
+    const { added, reason, refused } = await addOrder(invoice, link, found);
+    if (refused) {
+      logger.warn(`No order was added from an uploaded invoice: ${REFUSALS[refused.reason](refused)}.`);
+      // The link stays open: the customer was asked for another invoice and may still upload it.
+      if (link) await closeLink(link, `refused and nothing was saved, because ${REFUSALS[refused.reason](refused)}. The customer was asked to upload the right invoice or call customer care.`, 'Not Started');
+      return { matched: false, created: false, recorded: false, refused };
+    }
     if (added) {
       const linked = await linkCases(waiting, added);
       const fileId = await attach(file, added.id);

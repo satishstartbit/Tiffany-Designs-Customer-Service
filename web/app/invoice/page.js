@@ -11,7 +11,7 @@ export const metadata = {
 };
 
 const TIPS = [
-  'Show the whole invoice, with the invoice number, the order id, your name, your phone number and your address.',
+  'Show the whole invoice, with the invoice number, the order id, your name, your phone number, your address and the product list.',
   'It must be a Tiffany Designs invoice, where Sold By shows Tiffany Designs Private Limited. An invoice from our website, a showroom bill, or an Amazon, Flipkart or FirstCry invoice works when it shows this.',
 ];
 

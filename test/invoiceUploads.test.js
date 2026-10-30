@@ -260,6 +260,30 @@ test('an invoice that matches no order is answered as added', async (t) => {
   });
 });
 
+test('an invoice no order may be added from is refused with what to fix, naming only the invoice\'s own products', async (t) => {
+  const refusals = {
+    lamp: { reason: 'product_not_available', products: ['Mystery Lamp'] },
+    many: { reason: 'product_not_available', products: ['Lamp', 'Swing', 'Rug', `Very Long ${'Name '.repeat(20)}`] },
+    number: { reason: 'invoice_number_missing' },
+    empty: { reason: 'no_products' },
+    seller: { reason: 'not_tiffany_invoice' },
+  };
+  const { srv, upload } = await uploadServer({ records: ({ file }) => ({ matched: false, created: false, recorded: false, refused: refusals[file.data.toString()] }) });
+  t.after(srv.close);
+  const answer = async (name) => {
+    const res = await upload(Buffer.from(name));
+    assert.equal(res.status, 422, name);
+    assert.equal(res.body.error, refusals[name].reason);
+    return res.body.message;
+  };
+  assert.equal(await answer('lamp'), 'This product on your invoice is not available in our product list: "Mystery Lamp". We could not add your order from this invoice. '
+    + 'Please check that you uploaded your Tiffany Designs invoice, or call Tiffany Designs customer care.');
+  assert.match(await answer('many'), /^These products on your invoice are not available in our product list: "Lamp", "Swing", "Rug" and 1 more\./);
+  assert.match(await answer('number'), /could not read the invoice number on this invoice.*with the invoice number showing\.$/);
+  assert.match(await answer('empty'), /could not read the products on this invoice.*with the product list showing\.$/);
+  assert.match(await answer('seller'), /^This invoice does not show Tiffany Designs Private Limited as the seller\./);
+});
+
 test('each visitor gets 10 uploads an hour, and a failed reading says to try again', async (t) => {
   let fail = false;
   const { srv, calls, upload } = await uploadServer({ reader: () => { if (fail) throw new Error('Groq request failed (500): boom'); return INVOICE; } });
@@ -681,7 +705,7 @@ test('an order without a customer gets a new contact from the invoice, and the c
   assert.equal(order.CustomerAuthorizedById, 'Contact-1');
   assert.equal(order.Invoice_Number__c, 'INV-2010');
   assert.deepEqual(org.log.many[0].records, [{ OrderId: '801Z', PricebookEntryId: '01uTBL', Quantity: 1, UnitPrice: 8999 }], 'matched by product code');
-  assert.match(org.log.queries.find((q) => q.includes('FROM PricebookEntry')), /WHERE Pricebook2Id = '01sSTD' AND IsActive = true AND Product2\.ProductCode LIKE 'TD-%'/, 'only Tiffany products');
+  assert.match(org.log.queries.find((q) => q.includes('FROM PricebookEntry')), /WHERE Pricebook2Id = '01sSTD' AND IsActive = true AND Product2\.IsActive = true AND Product2\.ProductCode LIKE 'TD-%'/, 'only Tiffany\'s active products');
   assert.equal(updatesOf(org.log, 'Order').length, 1, 'a Draft order needs no switch to change its products');
 
   assert.deepEqual(updatesOf(org.log, 'Case')[0], { sobject: 'Case', id: '500W', fields: { Order__c: '801Z', Invoice_Number__c: 'INV-2010', Order_Source__c: 'Website' } });
@@ -773,7 +797,7 @@ test('an order is looked up by the invoice number, else the phone, else the orde
 test('an invoice that matches no order becomes a Draft order with its customer, its details and its products', async () => {
   const org = fakeOrg({ links: [LINK_TO_INVOICE_PHONE], waiting: [{ Id: '500W', CaseNumber: '00001290', ContactId: '003W', Invoice_Number__c: null, Order_Source__c: null }] });
   const { uploads, crm } = uploadsWith({ org });
-  const invoice = { ...INVOICE, items: [...INVOICE.items, { name: 'Mystery Lamp', quantity: 1, sku: null, amount: 999 }] };
+  const invoice = { ...INVOICE, orderNumber: '00000999' };
   const result = await uploads.record({ invoice, file: FILE });
   assert.deepEqual(result, { matched: false, created: true, recorded: true, orderId: 'Order-1', orderName: 'TD-ORD-2010', linkedCases: ['00001290'] });
 
@@ -794,7 +818,7 @@ test('an invoice that matches no order becomes a Draft order with its customer, 
   const [task] = created(org.log, 'Task');
   assert.deepEqual([task.WhatId, task.WhoId, task.Subject, task.Status], ['Order-1', '003N', 'Order added from the uploaded invoice', 'Not Started']);
   assert.match(task.Description, /\nCustomer: Asha Sharma \(new customer\), mobile \+919876500000\.\nProducts:\n- Demo Study Table: added, quantity 1 at 8,999 rupees\n/);
-  assert.match(task.Description, /\nCheck these:\n- "Mystery Lamp" on the invoice is not in the product catalog, so it was not added\.\n/);
+  assert.match(task.Description, /\nCheck these:\n- The invoice shows order number 00000999, which no order has; this order's number is 00000130\.\n/);
   assert.match(updatesOf(org.log, 'Task')[0].fields.Description, /Invoice uploaded on 14 October 2026: no order matched; order TD-ORD-2010 was added from it\.$/);
   assert.equal(crm.cases.length, 0, 'no request is opened for it');
 
@@ -817,6 +841,52 @@ test('an invoice that matches no order becomes a Draft order with its customer, 
   assert.equal(saved.created, true);
   assert.equal(created(strict.log, 'Order')[0].ERP_Order_Id__c, undefined);
   assert.match(created(strict.log, 'Task')[0].Description, /- The order was saved without its invoice number, order id, channel and addresses, because Salesforce refused them: duplicate value found: ERP_Order_Id__c\n/);
+});
+
+test('no order is added from an invoice with a product not in the catalog, without its invoice number or products, or not sold by Tiffany Designs; nothing is saved', async () => {
+  const lamp = { name: 'Mystery Lamp', quantity: 1, sku: 'XY-LAMP', amount: 999 };
+  const org = fakeOrg({ links: [LINK_TO_INVOICE_PHONE], waiting: [{ Id: '500W', CaseNumber: '00001290', ContactId: '003W' }] });
+  const { uploads, crm } = uploadsWith({ org });
+  const result = await uploads.record({ invoice: { ...INVOICE, items: [...INVOICE.items, lamp] }, file: FILE });
+  assert.deepEqual(result, { matched: false, created: false, recorded: false, refused: { reason: 'product_not_available', products: ['Mystery Lamp'] } });
+  assert.deepEqual(org.log.creates, [], 'no customer, order, file or note');
+  assert.deepEqual([org.log.many, crm.customers, crm.cases, updatesOf(org.log, 'Case')], [[], [], [], []]);
+  assert.match(org.log.queries.find((q) => q.includes('FROM PricebookEntry')), /Product2\.IsActive = true/, 'an inactive product is not available');
+  assert.deepEqual(updatesOf(org.log, 'Task'), [{
+    sobject: 'Task',
+    id: 'lnk1',
+    fields: {
+      Status: 'Not Started',
+      Description: `${LINK_TO_INVOICE_PHONE.Description}\nInvoice uploaded on 14 October 2026: refused and nothing was saved, because "Mystery Lamp" is not in the product catalog. `
+        + 'The customer was asked to upload the right invoice or call customer care.',
+    },
+  }], 'the link stays open for the right invoice');
+
+  const refusal = async (invoice) => {
+    const run = uploadsWith();
+    const answer = await run.uploads.record({ invoice, file: FILE });
+    assert.deepEqual([run.org.log.creates, run.crm.cases], [[], []]);
+    return answer.refused;
+  };
+  assert.deepEqual(await refusal({ ...INVOICE, invoiceNumber: null }), { reason: 'invoice_number_missing' });
+  assert.deepEqual(await refusal({ ...INVOICE, items: [] }), { reason: 'no_products' });
+  assert.deepEqual(await refusal({ ...INVOICE, soldBy: 'Comfort Furniture Traders' }), { reason: 'not_tiffany_invoice' });
+  assert.deepEqual(await refusal({ ...INVOICE, items: [lamp, { ...lamp, name: 'Garden Swing', sku: null }] }), { reason: 'product_not_available', products: ['Mystery Lamp', 'Garden Swing'] });
+});
+
+test('no order is added when its invoice number, order number or order id is already on more than one order: the service team gets it', async () => {
+  const other = { ...ORDER, id: '801Q', accountId: '001Q', invoiceNumber: 'INV-2010' };
+  const { org, uploads, crm } = uploadsWith({ crm: fakeCrm({ byInvoice: [{ ...ORDER, invoiceNumber: 'INV-2010' }, other] }) });
+  const result = await uploads.record({ invoice: INVOICE, file: FILE });
+  assert.deepEqual(result, { matched: false, recorded: true, caseNumber: '00001300' });
+  assert.equal(created(org.log, 'Order').length, 0);
+  assert.deepEqual(crm.customers, []);
+  assert.match(crm.cases[0].description, /\n2 orders have invoice number INV-2010\.\nNo order was added from it, because invoice number INV-2010 is already on more than one order; another would enter it twice\.\n/);
+
+  const twoIds = uploadsWith({ crm: fakeCrm({ byReference: (ref) => (ref === 'TD-ORD-2010' ? [ORDER, other] : []) }) });
+  await twoIds.uploads.record({ invoice: INVOICE, file: FILE });
+  assert.equal(created(twoIds.org.log, 'Order').length, 0);
+  assert.match(twoIds.crm.cases[0].description, /because order id TD-ORD-2010 is already on more than one order/);
 });
 
 test('without a full name or a phone, no order is added: the invoice goes on the caller\'s waiting request, else a new web request, else nowhere', async () => {
