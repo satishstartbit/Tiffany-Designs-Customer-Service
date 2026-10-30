@@ -131,6 +131,14 @@ test('the link needs a valid Indian mobile, goes to one number at most 3 times a
   assert.equal(api.sent.at(-1).body.customer_name, 'Customer', 'a caller who gave no name is greeted as Customer');
   assert.equal((await send({ phone: '9123456780' })).body.sent, true, 'another number is not affected');
 
+  // The number of this call, when the customer asks for it, is the one the call came from, whatever digits the agent sent.
+  const own = await send({ use_calling_number: true, phone: '9123456780', caller_phone: '+919000000555' });
+  assert.match(own.body.message, /^The upload link is sent on WhatsApp to the number ending 0 5 5 5\./);
+  assert.equal(api.sent.at(-1).body.phone_number, '+919000000555');
+  const unknown = await send({ use_calling_number: true, phone: '9123456780' });
+  assert.equal(unknown.body.sent, false);
+  assert.match(unknown.body.message, /^The number of this call is not known\. Ask for the 10 digit WhatsApp number/);
+
   assert.equal((await srv.call('POST', '/api/agent/invoice-upload-link', { body: { phone: '9876543210' } })).status, 401, 'the agent secret is needed');
 });
 
@@ -157,6 +165,56 @@ test('when WhatsApp refuses, the note is removed; when nothing is set up, nothin
   const answer = await none.call('POST', '/api/agent/invoice-upload-link', { headers: none.agent, body: { phone: '9876543210' } });
   assert.equal(answer.body.sent, false);
   assert.equal((await none.call('GET', '/api/invoice-uploads')).status, 404, 'no upload routes without the invoice services');
+});
+
+test('check_invoice_upload tells the agent, once the caller says the invoice is uploaded, which order to look up or what to say', async (t) => {
+  let status = { sent: false };
+  const asked = [];
+  const srv = await startTestServer({
+    invoices: ({ now }) => ({
+      sender: null,
+      reader: { configured: true, read: async () => INVOICE },
+      records: { async uploadStatus(phones) { asked.push(phones); return typeof status === 'function' ? status() : status; } },
+      uploadLimiter: createInvoiceUploadLimiter({ perHour: 30, perDay: 150, now }),
+    }),
+  });
+  t.after(srv.close);
+  const check = (body = { phone: '98765 00000', caller_phone: '+919000000001' }) => srv.call('POST', '/api/agent/invoice-upload-status', { headers: srv.agent, body }).then((r) => r.body);
+
+  const none = await check();
+  assert.deepEqual(asked[0], ['+919876500000', '+919000000001'], 'the WhatsApp number and the number of the call');
+  assert.equal(none.link_sent, false);
+  assert.match(none.message, /^No upload link was sent to this number recently\. Ask which WhatsApp number the link came on/);
+
+  status = { sent: true, uploaded: false };
+  assert.match((await check()).message, /^No invoice has been received on the link yet\. .*call this tool again\. When it is still not received after that, ask for the invoice number printed on the invoice and call tool:find_order with it\.$/);
+
+  status = { sent: true, uploaded: true, refused: '"Mystery Lamp" is not in the product catalog' };
+  const refused = await check();
+  assert.equal(refused.accepted, false);
+  assert.match(refused.message, /^The invoice the customer uploaded was not accepted, because "Mystery Lamp" is not in the product catalog, and nothing was saved/);
+
+  status = { sent: true, uploaded: true, order: { id: '801Z', orderNumber: '00000130', erpOrderId: null, invoiceNumber: 'INV-2010', added: true } };
+  const added = await check();
+  assert.deepEqual({ ...added, message: undefined }, {
+    link_sent: true, uploaded: true, accepted: true, order_found: true, order_added: true, order_id: null, order_number: '00000130', invoice_number: 'INV-2010', message: undefined,
+  });
+  assert.match(added.message, /^The invoice is received, and as no order matched it, an order was added from it\. Call tool:find_order now with order number 00000130 and the WhatsApp number as the mobile number/);
+  assert.doesNotMatch(added.message, /801Z/, 'no record id');
+
+  status = { sent: true, uploaded: true, order: { id: '801Z', orderNumber: '00000130', erpOrderId: 'TD-ORD-2010', invoiceNumber: 'INV-2010', added: false } };
+  assert.match((await check()).message, /matched to its order, which was updated from it\. Call tool:find_order now with order id TD-ORD-2010 /);
+
+  status = { sent: true, uploaded: true, caseNumber: '00001290' };
+  const team = await check();
+  assert.equal(team.spoken_case_number, '1290');
+  assert.match(team.message, /with the service team on request 1290\. .*Register no installation, damage, part, replacement or return request for it on this call\.$/);
+
+  assert.equal((await check({ phone: '12345' })).uploaded, null, 'a number is needed');
+  status = () => { throw new Error('Salesforce is down'); };
+  const down = await check();
+  assert.equal(down.error, 'unavailable');
+  assert.match(down.message, /When it fails again, ask for the invoice number printed on the invoice and call tool:find_order with it\.$/);
 });
 
 // ---------- The public upload page's API ----------
@@ -194,7 +252,8 @@ test('an uploaded invoice is read and recorded with nothing else asked, and the 
     status: 'matched',
     invoice_number: 'INV-2010',
     order_id: 'TD-ORD-2010',
-    message: 'Thank you. We found your order and added your invoice to it. Our service team will take it from here.',
+    message: 'Thank you. We found your order and added your invoice to it. If you are still on the call with our assistant, tell it that the '
+      + 'invoice is uploaded; otherwise our service team will take it from here.',
   });
   assert.equal(calls.read[0].contentType, 'image/jpeg');
   assert.equal(calls.read[0].data.toString(), 'fake jpeg bytes');
@@ -256,7 +315,8 @@ test('an invoice that matches no order is answered as added', async (t) => {
     status: 'created',
     invoice_number: 'INV-2010',
     order_id: 'TD-ORD-2010',
-    message: 'Thank you. Your order was not in our records, so we have added it from your invoice. Our service team will check it. Please call us again to continue with your request.',
+    message: 'Thank you. Your order was not in our records, so we have added it from your invoice. Our service team will check it. '
+      + 'If you are still on the call with our assistant, tell it that the invoice is uploaded; otherwise please call us again to continue with your request.',
   });
 });
 
@@ -624,6 +684,7 @@ test('a link sent is an open task named with the number; an invoice without a ph
   const link = await uploads.findLink(['+919876543210', null]);
   assert.deepEqual({ ...link, details: undefined }, {
     id: 'Task-1', phone: '+919876543210', customerName: 'Asha Sharma', reference: 'INV 2010', issuedAt: '2026-10-14T06:30:00.000+0000', details: undefined,
+    status: null, recordId: null, recordType: null,
   });
   assert.match(org.log.queries.at(-1), /Subject IN \('Invoice upload link sent on WhatsApp to \+919876543210'\) AND CreatedDate >= 2026-10-07T06:30:00Z/);
   assert.equal(await uploads.findLink(['+919123456780']), null, 'another number has no link');
@@ -637,7 +698,65 @@ test('a link sent is an open task named with the number; an invoice without a ph
   const closed = updatesOf(org.log, 'Task')[0];
   assert.equal(closed.id, 'Task-1');
   assert.equal(closed.fields.Status, 'Completed');
+  assert.equal(closed.fields.WhatId, '801Z', 'the link is related to the order, for the agent to find while the caller is on the call');
   assert.match(closed.fields.Description, /\nInvoice uploaded on 14 October 2026: matched to order TD-ORD-2010 by its invoice number; the order was updated from it\.$/);
+});
+
+test('the link task keeps its outcome even when Salesforce will not relate it to the order', async () => {
+  const org = fakeOrg({ links: [LINK_TO_INVOICE_PHONE], refuse: (sobject, fields) => (sobject === 'Task' && fields.WhatId ? 'Related To: id value of incorrect type' : null) });
+  const { uploads } = uploadsWith({ org, crm: fakeCrm({ byInvoice: [ORDER] }) });
+  await uploads.record({ invoice: INVOICE, file: FILE });
+  const [closed] = updatesOf(org.log, 'Task');
+  assert.equal(closed.fields.Status, 'Completed');
+  assert.equal(closed.fields.WhatId, undefined);
+  assert.match(closed.fields.Description, /matched to order TD-ORD-2010/);
+});
+
+test('what became of the link the agent sent: not yet uploaded, refused, the order found or added, or a request for the team', async () => {
+  const at = (task, records = {}) => {
+    const queries = [];
+    const salesforce = {
+      async query(soql) {
+        queries.push(soql);
+        if (soql.includes('FROM Task WHERE Subject IN')) return task ? [{ Subject: `${LINK_SUBJECT} +919876500000`, CreatedDate: '2026-10-14T06:00:00.000+0000', ...task }] : [];
+        if (soql.includes('FROM Order WHERE Id')) return records.order ? [records.order] : [];
+        if (soql.includes('FROM Case WHERE Id')) return records.request ? [records.request] : [];
+        return [];
+      },
+    };
+    const uploads = createInvoiceUploads({ salesforce, crm: fakeCrm(), now: () => NOW, logger: quiet });
+    return { queries, status: () => uploads.uploadStatus(['+919876500000', '+919000000001']) };
+  };
+  const sent = 'Link sent.\nCustomer name: Asha Sharma';
+
+  const none = at(null);
+  assert.deepEqual(await none.status(), { sent: false });
+  assert.match(none.queries[0], /SELECT Id, Subject, Description, Status, WhatId, What\.Type, CreatedDate FROM Task WHERE Subject IN \('Invoice upload link sent on WhatsApp to \+919876500000', 'Invoice upload link sent on WhatsApp to \+919000000001'\)/);
+  assert.deepEqual(await at({ Id: 'lnk1', Description: sent, Status: 'Not Started' }).status(), { sent: true, uploaded: false });
+
+  const refused = `${sent}\nInvoice uploaded on 14 October 2026: refused and nothing was saved, because "Mystery Lamp" is not in the product catalog. `
+    + 'The customer was asked to upload the right invoice or call customer care.';
+  assert.deepEqual(await at({ Id: 'lnk1', Description: refused, Status: 'Not Started' }).status(),
+    { sent: true, uploaded: true, refused: '"Mystery Lamp" is not in the product catalog' });
+
+  const order = { Id: '801Z', OrderNumber: '00000130', ERP_Order_Id__c: null, Invoice_Number__c: 'INV-2010' };
+  const added = await at({
+    Id: 'lnk1', Status: 'Completed', WhatId: '801Z', What: { Type: 'Order' },
+    Description: `${refused}\nInvoice uploaded on 14 October 2026: no order matched; order order number 00000130 was added from it.`,
+  }, { order }).status();
+  assert.deepEqual(added, { sent: true, uploaded: true, order: { id: '801Z', orderNumber: '00000130', erpOrderId: null, invoiceNumber: 'INV-2010', added: true } },
+    'the latest upload counts, after one that was refused');
+  const matched = await at({
+    Id: 'lnk1', Status: 'Completed', WhatId: '801Z', What: { Type: 'Order' },
+    Description: `${sent}\nInvoice uploaded on 14 October 2026: matched to order TD-ORD-2010 by its invoice number; the order was updated from it.`,
+  }, { order: { ...order, ERP_Order_Id__c: 'TD-ORD-2010' } }).status();
+  assert.equal(matched.order.added, false);
+  assert.equal(matched.order.erpOrderId, 'TD-ORD-2010');
+
+  assert.deepEqual(await at({ Id: 'lnk1', Status: 'Completed', WhatId: '500W', What: { Type: 'Case' }, Description: sent }, { request: { CaseNumber: '00001290' } }).status(),
+    { sent: true, uploaded: true, caseNumber: '00001290' });
+  assert.deepEqual(await at({ Id: 'lnk1', Status: 'Completed', WhatId: null, Description: sent }).status(), { sent: true, uploaded: true },
+    'a link closed without its record still says the invoice came');
 });
 
 test('a matched order is brought in line with the invoice: its details, its customer and its products, every change noted', async () => {
@@ -901,7 +1020,9 @@ test('without a full name or a phone, no order is added: the invoice goes on the
   assert.match(task.Description, /\nNo order was added from it, because it shows no full name, first and last, for the customer\.\n/);
   assert.equal(waiting.crm.cases.length, 0);
   assert.deepEqual(updatesOf(org.log, 'Task')[0], {
-    sobject: 'Task', id: 'lnk1', fields: { Status: 'Completed', Description: 'Link sent.\nInvoice uploaded on 14 October 2026: no order matched; the invoice is on request 00001290.' },
+    sobject: 'Task',
+    id: 'lnk1',
+    fields: { Status: 'Completed', Description: 'Link sent.\nInvoice uploaded on 14 October 2026: no order matched; the invoice is on request 00001290.', WhatId: '500W' },
   });
 
   const fresh = uploadsWith();

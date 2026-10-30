@@ -19,6 +19,8 @@ module.exports = {
   // Narrow key for the website "call me" panel: it can only request a callback.
   siteCallApiKey: env.SITE_CALL_API_KEY || '',
   agentToolSecret: env.AGENT_TOOL_SECRET || '',
+  // How long the caller lookup at call start may take (ms); the agent's greeting waits for it.
+  callStartBudgetMs: int(env.CALL_START_BUDGET_MS, 1000),
   webhookToken: env.SARVAM_WEBHOOK_TOKEN || '',
 
   sarvam: {
@@ -58,10 +60,9 @@ module.exports = {
     productCodePrefix: env.PRODUCT_CODE_PREFIX ?? 'TD-',
   },
 
-  // Delivery check calls placed by /cron/run.
+  // Delivery check calls placed by /cron/run, all of a run's calls at once.
   deliveryCalls: {
-    delayMinutes: int(env.DELIVERY_CALL_DELAY_MINUTES, 60),
-    maxPerRun: int(env.DELIVERY_CALLS_PER_RUN, 5),
+    maxPerRun: int(env.DELIVERY_CALLS_PER_RUN, 20),
     // "true" calls only while the service team is working; otherwise calls go out at any hour.
     serviceHoursOnly: env.DELIVERY_CALLS_SERVICE_HOURS_ONLY === 'true',
   },

@@ -13,6 +13,7 @@ export const metadata = {
 const TIPS = [
   'Show the whole invoice, with the invoice number, the order id, your name, your phone number, your address and the product list.',
   'It must be a Tiffany Designs invoice, where Sold By shows Tiffany Designs Private Limited. An invoice from our website, a showroom bill, or an Amazon, Flipkart or FirstCry invoice works when it shows this.',
+  'If you are on the call with our assistant, stay on the line and tell it once this page says your invoice is received. It then finds your order and carries on with your request.',
 ];
 
 // Public, no sign-in, one address for every customer: the WhatsApp link the voice agent sends when it cannot find a

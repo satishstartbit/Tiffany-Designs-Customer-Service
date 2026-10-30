@@ -144,7 +144,9 @@ const REFUSALS = {
 // upload is refused and nothing is saved. When its invoice number, order number or order id is already on more than
 // one order, or no customer can be saved for it (no phone, or no full name), it goes to the service team on a request.
 // The upload page asks for nothing but the file, so the WhatsApp link an upload answers is found from the invoice:
-// a link sent in the last `linkDays` to the phone on the invoice or to the customer of the matched order.
+// a link sent in the last `linkDays` to the phone on the invoice or to the customer of the matched order. The link's
+// task is then related to the order or request the invoice went to, so the voice agent can carry on with that order
+// while the caller is still on the call (uploadStatus).
 function createInvoiceUploads({ salesforce, crm, linkDays = 7, productCodePrefix = 'TD-', now = () => Date.now(), logger = console }) {
   const today = () => todayInIst(now()).toISOString().slice(0, 10);
 
@@ -175,7 +177,7 @@ function createInvoiceUploads({ salesforce, crm, linkDays = 7, productCodePrefix
     const subjects = [...new Set(phones.filter(Boolean))].map((p) => `'${escapeSoql(`${LINK_SUBJECT} ${p}`)}'`);
     if (!subjects.length) return null;
     const [row] = await salesforce.query(
-      `SELECT Id, Subject, Description, CreatedDate FROM Task WHERE Subject IN (${subjects.join(', ')}) `
+      `SELECT Id, Subject, Description, Status, WhatId, What.Type, CreatedDate FROM Task WHERE Subject IN (${subjects.join(', ')}) `
       + `AND CreatedDate >= ${soqlDateTime(now() - linkDays * DAY_MS)} ORDER BY CreatedDate DESC LIMIT 1`,
     );
     if (!row) return null;
@@ -187,14 +189,58 @@ function createInvoiceUploads({ salesforce, crm, linkDays = 7, productCodePrefix
       reference: line('Order reference given on the call'),
       issuedAt: row.CreatedDate,
       details: row.Description || '',
+      status: row.Status || null,
+      recordId: row.WhatId || null,
+      recordType: row.What?.Type || null,
     };
   }
 
-  // Notes on the link task what the upload came to; an upload that was refused leaves the task open.
-  async function closeLink(link, outcome, status = 'Completed') {
+  // Notes on the link task what the upload came to, and relates it to the order or request the invoice went to
+  // (`recordId`), which is how the voice agent finds that order while the caller is still on the call. An upload that
+  // was refused leaves the task open.
+  async function closeLink(link, outcome, status = 'Completed', recordId = null) {
     const note = `Invoice uploaded on ${longDate(now())}: ${outcome}`;
-    await salesforce.update('Task', link.id, { Status: status, Description: `${link.details}\n${note}`.slice(0, DESCRIPTION_MAX) })
+    const fields = { Status: status, Description: `${link.details}\n${note}`.slice(0, DESCRIPTION_MAX) };
+    const save = (values) => salesforce.update('Task', link.id, values);
+    await save(recordId ? { ...fields, WhatId: recordId } : fields)
+      .catch((err) => (recordId ? save(fields) : Promise.reject(err)))
       .catch((err) => logger.error(`Noting the upload on the invoice upload link task ${link.id} failed: ${err.message}`));
+  }
+
+  // What became of the newest link sent to any of these numbers (+91 form), for the voice agent once the caller says
+  // the invoice is uploaded: { sent: false } when no link was sent; { sent, uploaded: false } while no invoice has
+  // been taken on it; { refused } (the reason, for the service team's words) when the last upload was refused;
+  // { order } for the order it was matched to or added as; { caseNumber } for the request it went to the team on.
+  async function uploadStatus(phones) {
+    const link = await findLink(phones);
+    if (!link) return { sent: false };
+    const last = [...link.details.matchAll(/^Invoice uploaded on [^:\n]+: (.*)$/gm)].map((m) => m[1]).at(-1) || '';
+    if (link.status !== 'Completed') {
+      if (!last.startsWith('refused')) return { sent: true, uploaded: false };
+      return { sent: true, uploaded: true, refused: /because (.*?)\. The customer was asked/.exec(last)?.[1] || null };
+    }
+    const id = escapeSoql(link.recordId || '');
+    if (link.recordType === 'Order' || /^801/.test(id)) {
+      const [order] = await salesforce.query(`SELECT Id, OrderNumber, ERP_Order_Id__c, Invoice_Number__c FROM Order WHERE Id = '${id}' LIMIT 1`);
+      if (order) {
+        return {
+          sent: true,
+          uploaded: true,
+          order: {
+            id: order.Id,
+            orderNumber: order.OrderNumber,
+            erpOrderId: order.ERP_Order_Id__c || null,
+            invoiceNumber: order.Invoice_Number__c || null,
+            added: last.includes('was added from it'),
+          },
+        };
+      }
+    }
+    if (link.recordType === 'Case' || /^500/.test(id)) {
+      const [request] = await salesforce.query(`SELECT CaseNumber FROM Case WHERE Id = '${id}' LIMIT 1`);
+      if (request) return { sent: true, uploaded: true, caseNumber: request.CaseNumber };
+    }
+    return { sent: true, uploaded: true };
   }
 
   // The customers the invoice's phone number and the caller's WhatsApp number belong to.
@@ -670,7 +716,7 @@ function createInvoiceUploads({ salesforce, crm, linkDays = 7, productCodePrefix
           ...invoiceLines(invoice),
         ].filter((line) => line !== null),
       });
-      if (link) await closeLink(link, `matched to order ${order.name} by its ${found.matchedBy}; the order was updated from it.`);
+      if (link) await closeLink(link, `matched to order ${order.name} by its ${found.matchedBy}; the order was updated from it.`, 'Completed', order.id);
       const changed = [...order.orderChanges.map((c) => c.label), ...order.customerChanges.map((c) => c.label), ...order.productChanges];
       return { matched: true, recorded: true, matchedBy: found.matchedBy, orderId: order.id, orderName: order.name, linkedCases: linked, changed };
     }
@@ -704,7 +750,7 @@ function createInvoiceUploads({ salesforce, crm, linkDays = 7, productCodePrefix
           ...invoiceLines(invoice),
         ].filter((line) => line !== null),
       });
-      if (link) await closeLink(link, `no order matched; order ${added.name} was added from it.`);
+      if (link) await closeLink(link, `no order matched; order ${added.name} was added from it.`, 'Completed', added.id);
       return { matched: false, created: true, recorded: true, orderId: added.id, orderName: added.name, linkedCases: linked };
     }
 
@@ -724,7 +770,7 @@ function createInvoiceUploads({ salesforce, crm, linkDays = 7, productCodePrefix
       const [latest] = waiting;
       await attach(file, latest.Id);
       await note({ whatId: latest.Id, whoId: latest.ContactId || caller?.id, subject: 'Invoice uploaded: order not found', open: true, lines: details });
-      await closeLink(link, `no order matched; the invoice is on request ${latest.CaseNumber}.`);
+      await closeLink(link, `no order matched; the invoice is on request ${latest.CaseNumber}.`, 'Completed', latest.Id);
       return { matched: false, recorded: true, caseNumber: latest.CaseNumber };
     }
 
@@ -744,11 +790,11 @@ function createInvoiceUploads({ salesforce, crm, linkDays = 7, productCodePrefix
     });
     if (!created.created) throw new Error(`The request for an unmatched invoice was not saved: ${created.error}`);
     await attach(file, created.caseId);
-    if (link) await closeLink(link, `no order matched; the invoice is on new request ${created.caseNumber}.`);
+    if (link) await closeLink(link, `no order matched; the invoice is on new request ${created.caseNumber}.`, 'Completed', created.caseId);
     return { matched: false, recorded: true, caseNumber: created.caseNumber };
   }
 
-  return { linkSent, linkFailed, findLink, record };
+  return { linkSent, linkFailed, findLink, uploadStatus, record };
 }
 
 module.exports = { createInvoiceUploads, invoiceLines, productFor, LINK_SUBJECT };

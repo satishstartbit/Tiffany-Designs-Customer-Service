@@ -1,7 +1,7 @@
 const express = require('express');
 
 // Each run spends several Salesforce API calls, and the route is public, so runs are spaced out.
-const MIN_INTERVAL_MS = 2 * 60 * 1000;
+const MIN_INTERVAL_MS = 1000;
 
 // cron-job.org calls /cron/run every 15 minutes. ?dryRun=true reports which orders would be called, and calls nobody.
 module.exports = function cronRouter({ deliveryCalls, now = () => Date.now() }) {

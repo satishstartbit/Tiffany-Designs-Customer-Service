@@ -1,14 +1,33 @@
 const express = require('express');
-const { normalizePhone, normalizeIssueType, namesMatch, lastTenDigits, sameReference } = require('../rules');
+const {
+  normalizePhone, normalizeIssueType, namesMatch, lastTenDigits, phoneEnding, numberToConfirm, sameReference,
+} = require('../rules');
 const { formatDate, formatDateTime, formatClock, describeWeek, spokenCaseNumber, shortName } = require('../speech');
 const { resolveDate, todayInIst, MAX_DAYS_AHEAD } = require('../dates');
 const { checkInstallationDay, checkInstallationSlot, INSTALLATION_HOURS } = require('../installationSlots');
 const { formatRupees } = require('../crm/orderItems');
 const { guideMessage, assemblyStepCount } = require('../crm/productGuides');
 const { findOrderFromReferences } = require('../crm/crm');
+const { welcomeLine } = require('../callFlows');
 
 const MAX_PRODUCTS_SPOKEN = 5;
 const DAY_MS = 24 * 60 * 60 * 1000;
+const INDIAN_MOBILE = /^\+91[6-9]\d{9}$/;
+const LATE = Symbol('late');
+
+// The promise's value, or LATE once `deadline` (epoch ms) has passed. A promise that loses keeps running; its failure
+// is not left unhandled.
+function byDeadline(promise, deadline) {
+  const settled = promise.then((value) => ({ value }), (error) => ({ error }));
+  let timer;
+  const late = new Promise((resolve) => { timer = setTimeout(resolve, Math.max(0, deadline - Date.now()), LATE); });
+  return Promise.race([settled, late]).then((result) => {
+    clearTimeout(timer);
+    if (result === LATE) return LATE;
+    if (result.error) throw result.error;
+    return result.value;
+  });
+}
 
 // What a tool answers when Salesforce or another service fails mid-call: the fields the agent saves to variables,
 // empty, and what to do next. Tools that register something say nothing was registered, so the retry is safe.
@@ -19,6 +38,7 @@ const UNANSWERED = {
   '/escalate': { created: false, case_number: null },
   '/orders': { created: false, order_number: null },
   '/invoice-upload-link': { sent: false },
+  '/invoice-upload-status': { uploaded: null },
   '/customer': { saved: false, new_customer: null },
   '/service-area': { valid: false, route: null },
   '/service-hours': { open: null, next_open: null },
@@ -26,6 +46,7 @@ const UNANSWERED = {
 const REGISTERING = ['/cases', '/installation', '/escalate', '/orders', '/customer'];
 const AFTER_SECOND_FAILURE = {
   '/orders': 'call tool:request_human_callback with the confirmed products, their quantities and the delivery city.',
+  '/invoice-upload-status': 'ask for the invoice number printed on the invoice and call tool:find_order with it.',
 };
 
 // Call dispositions written by the call-end webhook, as a phrase the agent can say.
@@ -53,7 +74,19 @@ const REQUEST_KINDS = {
   replacement: 'a replacement or return request',
 };
 
+// Where the number a record would be saved with comes from (rules numberToConfirm), as the agent says it back.
+const NUMBER_SOURCES = {
+  call: 'the number of this call',
+  given: 'the number the customer gave',
+  file: 'the mobile number on file',
+};
+
+const CALLING_NUMBER_UNKNOWN = 'Nothing is saved yet: the number of this call is not known. Ask the customer for the 10 digit mobile '
+  + 'number, read it back in two groups of five digits, and call this tool again with it as phone, use_calling_number set to false '
+  + 'and its last four digits as contact_number_ending.';
+
 const capitalized = (text) => text.charAt(0).toUpperCase() + text.slice(1);
+const isTrue = (value) => value === true || value === 'true';
 
 // "302021" as "3 0 2 0 2 1", so the voice reads digits rather than a large number.
 const spokenDigits = (value) => String(value || '').replace(/\D/g, '').split('').join(' ');
@@ -63,6 +96,26 @@ const spokenDigits = (value) => String(value || '').replace(/\D/g, '').split('')
 function placeWords({ city, state, postalCode }) {
   const where = [...new Map([city, state].filter(Boolean).map((p) => [p.toLowerCase(), p])).values()].join(', ');
   return `${where ? ` in ${where}` : ''}${postalCode ? `, PIN code ${spokenDigits(postalCode)}` : ''}`;
+}
+
+// The number a request, an order or a customer is saved with: the number of this call when the customer asks for it
+// (use_calling_number; it comes from caller_phone, so the agent never says or types those digits), else the number the
+// agent passes. `unknown` when the customer asked for the number of this call and the call has none.
+function chosenPhone(body) {
+  if (!isTrue(body.use_calling_number)) return { phone: normalizePhone(body.phone) };
+  const caller = normalizePhone(body.caller_phone);
+  return caller ? { phone: caller } : { unknown: true };
+}
+
+// What the agent hears when the customer has not agreed to the number a record would be saved with: that number by its
+// last four digits, to say back and confirm before calling the tool again. `what` names the record, as "this order".
+function confirmNumberMessage({ ending, source, confirmed }, what) {
+  return `Nothing is saved yet: the customer has not confirmed the mobile number for ${what}. It would be ${NUMBER_SOURCES[source]}, `
+    + `ending ${spokenDigits(ending)}${confirmed ? `, not the number ending ${spokenDigits(confirmed)}` : ''}. Say that back to the `
+    + `customer and ask whether to use it. When the customer agrees, call this tool again with the same details and contact_number_ending ${ending}. `
+    + (source === 'call' ? '' : 'When the customer wants the number of this call, call it again with use_calling_number set to true. ')
+    + 'When the customer wants another number, ask for the 10 digit number, read it back in two groups of five digits, and call this '
+    + 'tool again with it as phone, use_calling_number set to false and its last four digits as contact_number_ending.';
 }
 
 function callOutcome(disposition) {
@@ -130,7 +183,9 @@ function caseResponse(res, result, successMessage, extra = {}) {
         + 'Ask the customer whether they want an update on that request or a new request. For a new request, call this tool again with new_request set to true.',
     });
   }
+  if (result.numberToConfirm) return refused(res, confirmNumberMessage(result.numberToConfirm, 'this request'));
   if (!result.created) return refused(res, result.error);
+  const reached = result.contactNumberEnding ? ` The service team will call the number ending ${spokenDigits(result.contactNumberEnding)}.` : '';
   return res.json({
     created: true,
     case_id: result.caseId,
@@ -139,8 +194,9 @@ function caseResponse(res, result, successMessage, extra = {}) {
     service_route: result.serviceRoute,
     within_business_hours: result.withinBusinessHours,
     order_verified: result.orderVerified,
+    contact_number_ending: result.contactNumberEnding || null,
     ...extra,
-    message: `${successMessage(spokenCaseNumber(result.caseNumber))}${result.withinBusinessHours ? '' : ' The service team will follow up on the next working day.'}`,
+    message: `${successMessage(spokenCaseNumber(result.caseNumber))}${reached}${result.withinBusinessHours ? '' : ' The service team will follow up on the next working day.'}`,
   });
 }
 
@@ -148,14 +204,22 @@ function caseResponse(res, result, successMessage, extra = {}) {
 // Responses are flat, snake_case and include a short `message` the agent can relay, with what to ask next when
 // something is missing. Every answer is HTTP 200, failures included (see UNANSWERED).
 // `invoiceLinks` (src/invoiceLinks.js) sends invoice upload links; without it the link tool says none can be sent.
-module.exports = function agentToolsRouter({ crm, invoiceLinks, productGuides, now = () => Date.now(), logger = console }) {
+// `invoiceUploads` (src/crm/invoiceUploads.js) says what became of an uploaded invoice while the caller is on the call.
+// `callStartBudgetMs` is how long the call-start lookup may take, since the greeting waits for it.
+module.exports = function agentToolsRouter({
+  crm, invoiceLinks, invoiceUploads, productGuides, callStartBudgetMs = 1000, now = () => Date.now(), logger = console,
+}) {
   const router = express.Router();
 
   // Runs as the call starts (the agent's on-start tool), before the greeting. On a phone call Sarvam sends the number
   // the customer is calling from; it becomes customer_phone, so the agent never asks for it, and a customer on record
   // is greeted by first name. Outbound calls and website calls already carry these, and keep what they have. It answers
   // with every variable it is given back, so a failed lookup leaves the call as it was.
+  // The greeting is spoken only after this answers, so the lookup has `callStartBudgetMs`: when Salesforce is slower,
+  // the answer goes without what is not known yet (caller_details empty), and the agent looks the caller up with
+  // find_customer on its first reply instead (Phase 4 step 1).
   router.post('/call-start', async (req, res) => {
+    const deadline = Date.now() + callStartBudgetMs;
     const body = req.body || {};
     const given = {
       customer_phone: String(body.customer_phone || ''),
@@ -166,7 +230,7 @@ module.exports = function agentToolsRouter({ crm, invoiceLinks, productGuides, n
     // Sarvam's caller identifier is the phone number on a phone call ("07357558134") and an email in its own test chat.
     const callerIsPhone = !body.caller_type || body.caller_type === 'phone_number';
     const caller = [body.customer_phone, callerIsPhone ? body.caller_phone : null]
-      .map(normalizePhone).find((p) => p && /^\+91[6-9]\d{9}$/.test(p));
+      .map(normalizePhone).find((p) => p && INDIAN_MOBILE.test(p));
     if (!inbound || !caller) return res.json({ ...given, caller_details: '', known_customer: false });
 
     // What is on record for the number, so the agent starts the call knowing it and never asks for the number.
@@ -174,12 +238,16 @@ module.exports = function agentToolsRouter({ crm, invoiceLinks, productGuides, n
     let firstName = null;
     let details = `${number} is not on record as a customer.`;
     try {
-      const contact = await crm.findContactByPhone(caller);
-      if (contact) {
+      const contact = await byDeadline(crm.findContactByPhone(caller), deadline);
+      if (contact === LATE) {
+        logger.warn(`The caller lookup at call start took over ${callStartBudgetMs} ms; the agent looks the caller up on its first reply.`);
+        details = '';
+      } else if (contact) {
         firstName = contact.firstName || String(contact.name || '').trim().split(/\s+/)[0] || null;
-        const { orderLine, requestLine } = await recordsOf(contact);
+        const records = await byDeadline(recordsOf(contact), deadline);
         const owner = contact.name ? `is registered to ${contact.name}` : 'is on record with no name saved, so ask for the full name before registering anything';
-        details = `${number} ${owner}. ${orderLine}${requestLine}`;
+        if (records === LATE) logger.warn(`The caller's orders and requests took over ${callStartBudgetMs} ms at call start; the agent looks them up on its first reply.`);
+        details = records === LATE ? '' : `${number} ${owner}. ${records.orderLine}${records.requestLine}`;
       }
     } catch (err) {
       logger.error(`Looking up the caller at call start failed: ${err.message}`);
@@ -188,7 +256,7 @@ module.exports = function agentToolsRouter({ crm, invoiceLinks, productGuides, n
     return res.json({
       customer_phone: caller,
       customer_name: given.customer_name || firstName || '',
-      opening_line: firstName ? `Namaste ${firstName} ji, welcome to Tiffany Designs. How can I help you today?` : given.opening_line,
+      opening_line: firstName ? welcomeLine(firstName) : given.opening_line,
       caller_details: details,
       known_customer: Boolean(firstName),
     });
@@ -229,7 +297,7 @@ module.exports = function agentToolsRouter({ crm, invoiceLinks, productGuides, n
     return {
       issueType,
       description: body.description,
-      phone: normalizePhone(body.phone),
+      phone: chosenPhone(body).phone,
       customerName: body.customer_name,
       erpOrderId: body.order_id,
       orderNumber: body.order_number,
@@ -249,6 +317,9 @@ module.exports = function agentToolsRouter({ crm, invoiceLinks, productGuides, n
       // The number the caller confirmed the order with in find_order, and the number of the call (agent variables).
       orderPhone: normalizePhone(body.order_phone),
       callerPhone: normalizePhone(body.caller_phone),
+      // The last four digits of the number the customer agreed to; nothing is saved on another number.
+      numberEnding: body.contact_number_ending,
+      confirmNumber: true,
       useDetailsOnFile: body.use_details_on_file === true || body.use_details_on_file === 'true',
       newRequest: body.new_request === true || body.new_request === 'true',
       atDeliveryAddress: body.at_delivery_address === true || body.at_delivery_address === 'true',
@@ -258,9 +329,10 @@ module.exports = function agentToolsRouter({ crm, invoiceLinks, productGuides, n
   // A customer's recent orders and open requests, as the agent hears them; the open requests come with every answer,
   // so the agent knows them before asking about the concern.
   async function recordsOf(contact) {
-    const orders = contact.accountId ? await crm.findRecentOrdersForAccount(contact.accountId) : [];
+    const [orders, requests] = contact.accountId
+      ? await Promise.all([crm.findRecentOrdersForAccount(contact.accountId), crm.getCaseStatus({ accountId: contact.accountId })])
+      : [[], []];
     const named = orders.filter((o) => o.erpOrderId);
-    const requests = contact.accountId ? await crm.getCaseStatus({ accountId: contact.accountId }) : [];
     const orderLine = named.length
       ? `Recent orders: ${named.map((o) => `${o.erpOrderId}, ${o.deliveryStatus ? o.deliveryStatus.toLowerCase() : 'status unknown'}`).join('; ')}.`
       : 'No order id is on record.';
@@ -324,8 +396,8 @@ module.exports = function agentToolsRouter({ crm, invoiceLinks, productGuides, n
   function unconfirmed(check, body) {
     if (!check.onRecord) {
       return "An order matches, but no mobile number is on record for it, so it cannot be confirmed as the customer's and nothing "
-        + 'about it can be shared. Offer to send the WhatsApp link to upload the invoice: the order is completed from it, and the '
-        + 'customer can call again after uploading it.';
+        + 'about it can be shared. Offer to send the WhatsApp link to upload the invoice: the order is completed from it, and once '
+        + 'the customer has uploaded it, on this call or before calling again, the concern can be resolved.';
     }
     if (normalizePhone(body.order_phone)) {
       return 'The number the customer gave is not the mobile number this order was placed with, so nothing about the order can be '
@@ -536,7 +608,10 @@ module.exports = function agentToolsRouter({ crm, invoiceLinks, productGuides, n
     const body = req.body || {};
 
     console.log('invoice-upload-link', body);
-    const phone = normalizePhone(body.phone);
+    const { phone, unknown } = chosenPhone(body);
+    if (unknown) {
+      return res.json({ sent: false, message: 'The number of this call is not known. Ask for the 10 digit WhatsApp number, read it back in two groups of five digits, and call this tool again with it as phone.' });
+    }
     if (!phone || !/^\+91[6-9]\d{9}$/.test(phone)) {
       return res.json({ sent: false, message: 'A valid 10 digit Indian mobile number that is on WhatsApp is needed. Ask for it.' });
     }
@@ -548,16 +623,93 @@ module.exports = function agentToolsRouter({ crm, invoiceLinks, productGuides, n
         sent: true,
         message: `The upload link is sent on WhatsApp to the number ending ${spokenDigits(result.ending)}. Tell the customer to open it and upload `
           + 'a clear photo, screenshot or PDF of the Tiffany Designs invoice; the service system then finds the order, or adds it when it is '
-          + 'not on record, with the details on the invoice. Ask the customer to call again once it is uploaded, so the concern can be resolved.',
+          + 'not on record, with the details on the invoice. Ask whether the customer wants to upload it now while staying on the call. Once '
+          + 'the customer says it is uploaded, call tool:check_invoice_upload with this WhatsApp number. A customer who uploads it later calls '
+          + 'again once it is uploaded, so the concern can be resolved.',
       });
     }
     return res.json({
       sent: false,
       message: result.reason === 'limited'
-        ? 'Links were already sent to this number today. Ask the customer to use the link already on WhatsApp and to call again once the invoice is uploaded.'
+        ? 'Links were already sent to this number today. Ask the customer to use the link already on WhatsApp. Once the customer says the '
+          + 'invoice is uploaded, call tool:check_invoice_upload with this number; a customer who uploads it later calls again once it is uploaded.'
         : 'The WhatsApp link cannot be sent right now. Register no installation, damage or replacement request without the order: offer a call back '
           + 'from the service team instead, with the order id, invoice number and product the customer gave in the reason.',
     });
+  });
+
+  // Once the caller says the invoice is uploaded (on the call the link was sent in, or a later one), what became of the
+  // newest link sent to the WhatsApp number or the number of the call: the order the invoice was matched to or added
+  // as, so the agent finds it with find_order and carries on with the concern; why it was refused; or the request it
+  // went to the service team on. Only the order's reference is given: find_order confirms the order as the caller's
+  // before anything about it is said.
+  router.post('/invoice-upload-status', async (req, res) => {
+    const body = req.body || {};
+    const byInvoiceNumber = 'ask for the invoice number printed on the invoice and call tool:find_order with it.';
+    if (!invoiceUploads) return res.json({ uploaded: null, message: `Uploads cannot be checked right now, so ${byInvoiceNumber}` });
+    const phones = [body.phone, body.caller_phone].map(normalizePhone).filter((p) => p && INDIAN_MOBILE.test(p));
+    if (!phones.length) {
+      return res.json({ uploaded: null, message: 'The 10 digit WhatsApp number the upload link was sent to is needed. Ask for it.' });
+    }
+
+    const status = await invoiceUploads.uploadStatus(phones);
+    if (!status.sent) {
+      return res.json({
+        link_sent: false,
+        uploaded: false,
+        message: 'No upload link was sent to this number recently. Ask which WhatsApp number the link came on and call this tool again with it. '
+          + `When the customer does not know, ${byInvoiceNumber}`,
+      });
+    }
+    if (!status.uploaded) {
+      return res.json({
+        link_sent: true,
+        uploaded: false,
+        message: 'No invoice has been received on the link yet. Ask the customer to finish the upload and to say when the page shows that the '
+          + `invoice is received, then call this tool again. When it is still not received after that, ${byInvoiceNumber}`,
+      });
+    }
+    if (status.refused !== undefined) {
+      return res.json({
+        link_sent: true,
+        uploaded: true,
+        accepted: false,
+        message: `The invoice the customer uploaded was not accepted${status.refused ? `, because ${status.refused}` : ''}, and nothing was saved; `
+          + 'the upload page showed the customer why. Say so in one short sentence and ask whether the customer wants to upload the Tiffany '
+          + 'Designs invoice for the order, where Sold By shows Tiffany Designs Private Limited, on the same link now.',
+      });
+    }
+    if (status.order) {
+      const { order } = status;
+      const reference = order.erpOrderId ? `order id ${order.erpOrderId}` : `order number ${order.orderNumber}`;
+      return res.json({
+        link_sent: true,
+        uploaded: true,
+        accepted: true,
+        order_found: true,
+        order_added: order.added,
+        order_id: order.erpOrderId,
+        order_number: order.orderNumber,
+        invoice_number: order.invoiceNumber,
+        message: `The invoice is received${order.added ? ', and as no order matched it, an order was added from it' : ' and matched to its order, which was updated from it'}. `
+          + `Call tool:find_order now with ${reference} and the WhatsApp number as the mobile number, and follow its message. Once the order is `
+          + "confirmed, carry on with the customer's concern from where it stopped, without asking again for anything the customer already gave.",
+      });
+    }
+    if (status.caseNumber) {
+      return res.json({
+        link_sent: true,
+        uploaded: true,
+        accepted: true,
+        order_found: false,
+        case_number: status.caseNumber,
+        spoken_case_number: spokenCaseNumber(status.caseNumber),
+        message: `The invoice is received, but no order could be added from it automatically, so it is with the service team on request `
+          + `${spokenCaseNumber(status.caseNumber)}. Give the customer the request number and say the service team will find the order and contact `
+          + 'them. Register no installation, damage, part, replacement or return request for it on this call.',
+      });
+    }
+    return res.json({ link_sent: true, uploaded: true, accepted: true, order_found: false, message: `The invoice is received. To find its order, ${byInvoiceNumber}` });
   });
 
   router.post('/products', async (req, res) => {
@@ -576,10 +728,13 @@ module.exports = function agentToolsRouter({ crm, invoiceLinks, productGuides, n
 
   router.post('/orders', async (req, res) => {
     const body = req.body || {};
-    const phone = normalizePhone(body.phone);
-    if (!phone || !/^\+91[6-9]\d{9}$/.test(phone)) {
+    const { phone, unknown } = chosenPhone(body);
+    if (unknown) return res.json({ created: false, order_number: null, message: CALLING_NUMBER_UNKNOWN });
+    if (!phone || !INDIAN_MOBILE.test(phone)) {
       return res.json({ created: false, order_number: null, message: 'A valid 10 digit Indian mobile number is needed to place the order.' });
     }
+    const unconfirmed = numberToConfirm(phone, { confirmedEnding: body.contact_number_ending, given: phone, caller: body.caller_phone });
+    if (unconfirmed) return res.json({ created: false, order_number: null, message: confirmNumberMessage(unconfirmed, 'this order') });
     const result = await crm.createOrder({
       customerName: body.customer_name,
       phone,
@@ -600,8 +755,8 @@ module.exports = function agentToolsRouter({ crm, invoiceLinks, productGuides, n
       order_number: result.orderNumber,
       spoken_order_number: spokenNumber,
       total: result.total,
-      message: `Order ${spokenNumber} is placed for ${lines}, total list price ${formatRupees(result.total)}. `
-        + 'The sales team will call to confirm the final price, delivery and payment.',
+      message: `Order ${spokenNumber} is placed for ${lines}, total list price ${formatRupees(result.total)}. The sales team will call `
+        + `the number ending ${spokenDigits(phoneEnding(phone))} to confirm the final price, delivery and payment.`,
     });
   });
 
@@ -664,6 +819,7 @@ module.exports = function agentToolsRouter({ crm, invoiceLinks, productGuides, n
     if (!req.body.description) {
       return refused(res, 'A short description of the issue is required. Call this tool again with one sentence describing the problem.');
     }
+    if (chosenPhone(req.body).unknown) return refused(res, CALLING_NUMBER_UNKNOWN);
     const result = await crm.createServiceCase(caseInput(req.body, issueType));
     return caseResponse(res, result, (n) => `Service request ${n} is registered.`);
   });
@@ -679,6 +835,7 @@ module.exports = function agentToolsRouter({ crm, invoiceLinks, productGuides, n
     if (!resolved.ok) return refused(res, dateProblem(resolved));
     const slot = checkInstallationSlot(resolved.date, body.preferred_time, now());
     if (!slot.ok) return refused(res, slot.message);
+    if (chosenPhone(body).unknown) return refused(res, CALLING_NUMBER_UNKNOWN);
 
     const reschedule = body.reschedule === true || body.reschedule === 'true';
     const result = await crm.createServiceCase(caseInput(
@@ -698,6 +855,7 @@ module.exports = function agentToolsRouter({ crm, invoiceLinks, productGuides, n
   });
 
   router.post('/escalate', async (req, res) => {
+    if (chosenPhone(req.body || {}).unknown) return refused(res, CALLING_NUMBER_UNKNOWN);
     const result = await crm.createServiceCase(caseInput(
       { ...req.body, description: `Reason: ${req.body?.reason || 'not stated'}` },
       'escalation',
@@ -788,10 +946,13 @@ module.exports = function agentToolsRouter({ crm, invoiceLinks, productGuides, n
   // Module 3: saves a new customer; changes for an existing customer go to the service team to confirm.
   router.post('/customer', async (req, res) => {
     const body = req.body || {};
-    const phone = normalizePhone(body.phone);
-    if (!phone || !/^\+91[6-9]\d{9}$/.test(phone)) {
+    const { phone, unknown } = chosenPhone(body);
+    if (unknown) return res.json({ saved: false, new_customer: null, message: CALLING_NUMBER_UNKNOWN });
+    if (!phone || !INDIAN_MOBILE.test(phone)) {
       return res.json({ saved: false, new_customer: null, message: 'A valid 10 digit Indian mobile number is needed.' });
     }
+    const unconfirmed = numberToConfirm(phone, { confirmedEnding: body.contact_number_ending, given: phone, caller: body.caller_phone });
+    if (unconfirmed) return res.json({ saved: false, new_customer: null, message: confirmNumberMessage(unconfirmed, 'these details') });
     const result = await crm.saveCustomerDetails({
       customerName: body.customer_name,
       phone,

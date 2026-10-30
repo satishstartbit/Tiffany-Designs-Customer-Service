@@ -1,7 +1,9 @@
 const { createApp } = require('../src/app');
 const { createScheduler, createMemoryJobStore } = require('../src/scheduler');
 const { createJobHandlers } = require('../src/callFlows');
-const { lastTenDigits, nameWords, namesMatch, sameReference } = require('../src/rules');
+const {
+  lastTenDigits, phoneEnding, numberToConfirm, nameWords, namesMatch, sameReference,
+} = require('../src/rules');
 const { SERVICE_TYPES, requestKind, findOrderFromReferences } = require('../src/crm/crm');
 
 const SECRETS = { internalApiKey: 'internal-key', siteCallApiKey: 'site-key', agentToolSecret: 'agent-secret', webhookToken: 'hook-token', cronSecret: 'cron-secret' };
@@ -238,6 +240,12 @@ function createFakeCrm({ now = () => Date.now() } = {}) {
       const kind = input.issueType === 'installation_reschedule' ? null : requestKind(serviceType, subType);
       const existing = linked && kind && !input.newRequest ? openRequests.find((r) => r.orderId === linked.id && r.kind === kind) : null;
       if (existing) return { created: false, existingRequest: existing, error: `Request ${existing.caseNumber} of this kind is already open for the order.` };
+      // Like the real one: for the voice agent, nothing is saved until the caller agreed to the number by its ending.
+      const mobile = input.phone || (await this.getDetailsOnFile({ order: linked })).mobile;
+      if (input.confirmNumber) {
+        const unconfirmed = numberToConfirm(mobile, { confirmedEnding: input.numberEnding, given: input.phone, caller: input.callerPhone });
+        if (unconfirmed) return { created: false, numberToConfirm: unconfirmed };
+      }
       const verified = Boolean(linked);
       const order = linked;
       const city = (input.city || order?.city || '').toLowerCase();
@@ -245,7 +253,10 @@ function createFakeCrm({ now = () => Date.now() } = {}) {
       const route = !city && !pin ? null : ncr.includes(city) || ['110', '121', '122', '201'].includes(pin.slice(0, 3)) ? 'Internal' : 'External Provider';
       const record = { caseId: `500${created.length}`, caseNumber: String(1100 + created.length).padStart(8, '0'), input, createdAt: now() };
       created.push(record);
-      return { created: true, caseId: record.caseId, caseNumber: record.caseNumber, serviceRoute: route, withinBusinessHours: state.withinBusinessHours, orderVerified: verified };
+      return {
+        created: true, caseId: record.caseId, caseNumber: record.caseNumber, serviceRoute: route, withinBusinessHours: state.withinBusinessHours,
+        contactNumberEnding: phoneEnding(mobile), orderVerified: verified,
+      };
     },
     async getCaseStatus({ caseNumber, accountId }) {
       if (caseNumber) return serviceCases.filter((c) => c.caseNumber === String(caseNumber).padStart(8, '0'));

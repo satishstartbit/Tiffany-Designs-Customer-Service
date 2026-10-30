@@ -184,7 +184,10 @@ test('book_installation with at_delivery_address registers the request at the de
   const { s, salesforce } = await serverWith(org());
   t.after(s.close);
   const res = await s.call('POST', '/api/agent/installation', {
-    body: { order_id: 'TD-ORD-2002', preferred_date: '2026-10-17', preferred_time: 'morning', use_details_on_file: true, at_delivery_address: true, caller_phone: CALLER },
+    body: {
+      order_id: 'TD-ORD-2002', preferred_date: '2026-10-17', preferred_time: 'morning', use_details_on_file: true, at_delivery_address: true, caller_phone: CALLER,
+      contact_number_ending: '4578',
+    },
     headers: s.agent,
   });
   assert.equal(res.body.created, true);

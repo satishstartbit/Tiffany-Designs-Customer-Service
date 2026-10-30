@@ -97,23 +97,30 @@ module.exports = function invoiceUploadsRouter({ reader, records, limiter, logge
     if (result.refused) {
       return res.status(422).json({ error: result.refused.reason, message: REFUSED[result.refused.reason](result.refused) });
     }
+    // A customer still on the call tells the assistant, which then finds the order (check_invoice_upload).
+    const onTheCall = 'If you are still on the call with our assistant, tell it that the invoice is uploaded';
     const answer = { invoice_number: invoice.invoiceNumber, order_id: invoice.orderId };
     if (result.matched) {
-      return res.json({ status: 'matched', ...answer, message: 'Thank you. We found your order and added your invoice to it. Our service team will take it from here.' });
+      return res.json({
+        status: 'matched',
+        ...answer,
+        message: `Thank you. We found your order and added your invoice to it. ${onTheCall}; otherwise our service team will take it from here.`,
+      });
     }
     if (result.created) {
       return res.json({
         status: 'created',
         ...answer,
         message: 'Thank you. Your order was not in our records, so we have added it from your invoice. Our service team will check it. '
-          + 'Please call us again to continue with your request.',
+          + `${onTheCall}; otherwise please call us again to continue with your request.`,
       });
     }
     if (result.recorded) {
       return res.json({
         status: 'received',
         ...answer,
-        message: 'Thank you. We have your invoice, but could not match it to an order automatically. Our service team will check it and contact you.',
+        message: 'Thank you. We have your invoice, but could not match it to an order automatically. Our service team will check it and contact you. '
+          + `${onTheCall}.`,
       });
     }
     return res.json({

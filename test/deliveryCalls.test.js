@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { createDeliveryCalls, deliveredAt, mobileToCall } = require('../src/deliveryCalls');
+const { createDeliveryCalls, mobileToCall } = require('../src/deliveryCalls');
 const { createDeliveredOrders, CALL_MARKER_SUBJECT } = require('../src/crm/deliveredOrders');
 const { createScheduler, createMemoryJobStore } = require('../src/scheduler');
 const { createApp } = require('../src/app');
@@ -17,13 +17,18 @@ function order(id, overrides = {}) {
     erpOrderId: `TD-ORD-${id}`,
     deliveryStatus: 'Delivered',
     deliveryDate: '2026-10-22',
-    // Saved as delivered two hours ago.
     lastModified: '2026-10-22T04:00:00.000+0000',
     city: 'Delhi',
     customer: { id: '003A', name: 'Aarav Sharma', mobile: '98765 43210', phone: null },
     ...overrides,
   };
 }
+
+// An order of its own customer, with a mobile number of its own.
+const ownCustomer = (id, overrides = {}) => order(id, {
+  customer: { id: `003-${id}`, name: `Customer ${id}`, mobile: `98000 ${String(id).padStart(5, '0')}`, phone: null },
+  ...overrides,
+});
 
 // Each marker notes how many calls had been placed when it was saved, to show it comes after the call.
 function fakeOrders(list, sarvam, { called = [], open = [] } = {}) {
@@ -56,27 +61,17 @@ function fakeOrders(list, sarvam, { called = [], open = [] } = {}) {
   };
 }
 
-function setup(list, { called, open, serviceOpen = true, serviceHoursOnly = false, maxPerRun = 5, canStartCalls = true, jobs = [] } = {}) {
+function setup(list, { called, open, serviceOpen = true, serviceHoursOnly = false, maxPerRun = 20, canStartCalls = true, jobs = [] } = {}) {
   const sarvam = createFakeSarvam({ canStartCalls });
   const orders = fakeOrders(list, sarvam, { called, open });
   const store = createMemoryJobStore();
   for (const job of jobs) store.create(job);
   const scheduler = createScheduler({ store, handlers: {}, now: () => NOW, logger: quiet });
   const crm = { getServiceHours: async () => ({ open: serviceOpen, opensAt: serviceOpen ? null : new Date('2026-10-23T03:30:00Z') }) };
-  const config = testConfig({ deliveryCalls: { delayMinutes: 60, maxPerRun, serviceHoursOnly } });
+  const config = testConfig({ deliveryCalls: { maxPerRun, serviceHoursOnly } });
   const deliveryCalls = createDeliveryCalls({ orders, crm, sarvam, scheduler, config, now: () => NOW, logger: quiet });
   return { orders, sarvam, deliveryCalls };
 }
-
-test('the delivery time is the later of the start of the delivery day in India and the last save', () => {
-  assert.equal(deliveredAt(order('1')), Date.parse('2026-10-22T04:00:00Z'));
-  assert.equal(
-    deliveredAt(order('1', { deliveryDate: '2026-10-23', lastModified: '2026-10-22T04:00:00.000+0000' })),
-    Date.parse('2026-10-22T18:30:00Z'),
-    'a delivery date ahead of the last save counts from midnight that day',
-  );
-  assert.equal(deliveredAt(order('1', { deliveryDate: null, lastModified: null })), null);
-});
 
 test('only an Indian mobile number is called; the mobile comes before the other phone', () => {
   assert.equal(mobileToCall({ mobile: '(987) 654-3210', phone: '+91 98200 11111' }), '+919876543210');
@@ -86,8 +81,8 @@ test('only an Indian mobile number is called; the mobile comes before the other 
   assert.equal(mobileToCall(null), null);
 });
 
-test('an order delivered today is called once, an hour after delivery, and marked as called after the call', async () => {
-  const { orders, sarvam, deliveryCalls } = setup([order('1001')]);
+test('an order delivered today is called once, without waiting, and marked as called after the call', async () => {
+  const { orders, sarvam, deliveryCalls } = setup([order('1001', { lastModified: '2026-10-22T06:00:00.000+0000' })]);
   const result = await deliveryCalls.run();
 
   assert.equal(orders.date, '2026-10-22', 'only orders delivered today are fetched');
@@ -95,7 +90,7 @@ test('an order delivered today is called once, an hour after delivery, and marke
   assert.deepEqual(result.failed, []);
   const [call] = sarvam.started;
   assert.equal(call.phone, '+919876543210');
-  const opening = 'Hello, this is the Tiffany Designs AI service assistant, calling about your recent delivery. Am I speaking with Aarav Sharma?';
+  const opening = 'नमस्ते, मैं टिफ़नी डिज़ाइन्स का AI सर्विस असिस्टेंट हूँ। आपकी हाल की डिलीवरी के बारे में कॉल किया है। क्या मेरी बात Aarav Sharma जी से हो रही है?';
   assert.deepEqual(call.variables, {
     customer_name: 'Aarav Sharma',
     customer_phone: '+919876543210',
@@ -106,7 +101,7 @@ test('an order delivered today is called once, an hour after delivery, and marke
     call_reason: 'delivery_check',
     opening_line: opening,
   });
-  assert.deepEqual(call.overrides, { initial_bot_message: opening, initial_language_name: 'English' }, 'the agent greets with opening_line in English');
+  assert.deepEqual(call.overrides, { initial_bot_message: opening, initial_language_name: 'Hindi' }, 'the agent greets with opening_line in Hindi');
   assert.equal(call.webhook.metadata.identifier, 'order:1001', 'the call log lands on the order');
   assert.deepEqual(orders.markers, [{ orderId: '1001', contactId: '003A', attemptId: 'attempt-1', callsBefore: 1 }]);
 
@@ -120,7 +115,7 @@ test('orders that break a rule are skipped with the reason', async () => {
   const { sarvam, deliveryCalls } = setup(
     [
       order('1', { deliveryStatus: 'Shipped' }),
-      order('2', { lastModified: '2026-10-22T05:30:00.000+0000' }),
+      ownCustomer('2', { lastModified: '2026-10-22T05:59:00.000+0000' }),
       order('3', { customer: null }),
       order('4', { customer: { id: '003D', name: 'Landline Only', mobile: null, phone: '011 2345 6789' } }),
       order('5'),
@@ -137,14 +132,38 @@ test('orders that break a rule are skipped with the reason', async () => {
   const result = await deliveryCalls.run();
   assert.deepEqual(result.skipped, {
     not_delivered: ['TD-ORD-1'],
-    too_soon: ['TD-ORD-2'],
     no_phone: ['TD-ORD-3', 'TD-ORD-4'],
     already_called: ['TD-ORD-5'],
     open_request: ['TD-ORD-6'],
     followup_scheduled: ['TD-ORD-7'],
   });
-  assert.deepEqual(result.placed.map((p) => p.order), ['TD-ORD-8']);
-  assert.equal(sarvam.started.length, 1);
+  assert.deepEqual(result.placed.map((p) => p.order), ['TD-ORD-2', 'TD-ORD-8'], 'an order marked Delivered a minute ago is called too');
+  assert.equal(sarvam.started.length, 2);
+});
+
+test('a run places all its calls at once, one to each number; a second order of the same customer is called next run', async () => {
+  const { orders, sarvam, deliveryCalls } = setup([ownCustomer('1'), ownCustomer('2'), ownCustomer('3'), order('4'), order('5')]);
+  const start = sarvam.startCall.bind(sarvam);
+  let inFlight = 0;
+  let most = 0;
+  sarvam.startCall = async (call) => {
+    inFlight += 1;
+    most = Math.max(most, inFlight);
+    await new Promise((resolve) => { setTimeout(resolve, 10); });
+    inFlight -= 1;
+    return start(call);
+  };
+
+  const first = await deliveryCalls.run();
+  assert.equal(most, 4, 'every call is requested before the first one is answered');
+  assert.deepEqual(first.placed.map((p) => p.order), ['TD-ORD-1', 'TD-ORD-2', 'TD-ORD-3', 'TD-ORD-4']);
+  assert.deepEqual(first.deferred, ['TD-ORD-5'], 'orders 4 and 5 go to the same mobile');
+  assert.deepEqual(orders.markers.map((m) => m.orderId).sort(), ['1', '2', '3', '4']);
+
+  const second = await deliveryCalls.run();
+  assert.deepEqual(second.placed.map((p) => p.order), ['TD-ORD-5']);
+  assert.deepEqual(second.deferred, []);
+  assert.equal(sarvam.started.length, 5);
 });
 
 test('calls go out outside service hours too, unless DELIVERY_CALLS_SERVICE_HOURS_ONLY is set', async () => {
@@ -162,10 +181,10 @@ test('calls go out outside service hours too, unless DELIVERY_CALLS_SERVICE_HOUR
 });
 
 test('a run places at most the configured number of calls and leaves the rest for the next run', async () => {
-  const { sarvam, deliveryCalls } = setup([order('1'), order('2'), order('3')], { maxPerRun: 2 });
+  const { sarvam, deliveryCalls } = setup([ownCustomer('1'), ownCustomer('2'), ownCustomer('3')], { maxPerRun: 2 });
   const first = await deliveryCalls.run();
   assert.deepEqual(first.placed.map((p) => p.order), ['TD-ORD-1', 'TD-ORD-2']);
-  assert.equal(first.deferred, 1);
+  assert.deepEqual(first.deferred, ['TD-ORD-3']);
   const second = await deliveryCalls.run();
   assert.deepEqual(second.placed.map((p) => p.order), ['TD-ORD-3']);
   assert.equal(sarvam.started.length, 3);
@@ -215,7 +234,7 @@ test('without instant call settings a real run is refused with a 503; a dry run 
   assert.deepEqual((await deliveryCalls.run({ dryRun: true })).wouldCall, ['TD-ORD-1']);
 });
 
-test('/cron/run is open to anyone, at most once every two minutes', async (t) => {
+test('/cron/run is open to anyone, at most once a second', async (t) => {
   const runs = [];
   const clock = { now: NOW };
   const deliveryCalls = { run: async (options) => { runs.push(options); return { placed: [] }; } };
@@ -235,10 +254,10 @@ test('/cron/run is open to anyone, at most once every two minutes', async (t) =>
   assert.equal((await call('GET', '/cron/run')).status, 200, 'no key is needed');
   const early = await call('GET', '/cron/run');
   assert.equal(early.status, 429);
-  assert.equal(early.headers.get('retry-after'), '120');
-  assert.deepEqual(await early.json(), { error: 'too_soon', retryAfterSeconds: 120 });
+  assert.equal(early.headers.get('retry-after'), '1');
+  assert.deepEqual(await early.json(), { error: 'too_soon', retryAfterSeconds: 1 });
 
-  clock.now += 2 * 60 * 1000;
+  clock.now += 1000;
   assert.equal((await call('POST', '/cron/run?dryRun=true')).status, 200);
   assert.deepEqual(runs, [{ dryRun: false }, { dryRun: true }]);
 });

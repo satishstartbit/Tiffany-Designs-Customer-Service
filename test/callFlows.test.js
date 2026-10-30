@@ -1,16 +1,21 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { openingLine, outboundOverrides, noticeFor, noticeJobId, createJobHandlers } = require('../src/callFlows');
+const { openingLine, welcomeLine, outboundOverrides, noticeFor, noticeJobId, createJobHandlers } = require('../src/callFlows');
 const { createFakeSarvam } = require('./helpers');
 
-test('outbound calls open by confirming who answered, without mentioning the order', () => {
-  assert.equal(openingLine('delivery_followup', 'Aarav Sharma'), 'Hello, this is the Tiffany Designs AI service assistant. Am I speaking with Aarav Sharma?');
-  assert.equal(openingLine('delivery_followup', null), 'Hello, this is the Tiffany Designs AI service assistant. May I know who I am speaking with?');
-  assert.equal(openingLine('callback_request', 'Meera'), 'Hello, this is the Tiffany Designs AI service assistant, calling back as requested. Am I speaking with Meera?');
+test('outbound calls open in Hindi by confirming who answered, without mentioning the order', () => {
+  assert.equal(openingLine('delivery_followup', 'Aarav Sharma'), 'नमस्ते, मैं टिफ़नी डिज़ाइन्स का AI सर्विस असिस्टेंट हूँ। क्या मेरी बात Aarav Sharma जी से हो रही है?');
+  assert.equal(openingLine('delivery_followup', null), 'नमस्ते, मैं टिफ़नी डिज़ाइन्स का AI सर्विस असिस्टेंट हूँ। क्या आप बता सकते हैं कि मेरी बात किससे हो रही है?');
+  assert.equal(openingLine('callback_request', 'Meera'), 'नमस्ते, मैं टिफ़नी डिज़ाइन्स का AI सर्विस असिस्टेंट हूँ। आपके कहने पर वापस कॉल किया है। क्या मेरी बात Meera जी से हो रही है?');
   for (const reason of ['delivery_followup', 'callback_request', 'service_update']) {
-    assert.doesNotMatch(openingLine(reason, 'X'), /order|delivery|case|request \d/i, reason);
+    assert.doesNotMatch(openingLine(reason, 'X'), /order|delivery|case|request \d|ऑर्डर|डिलीवरी|रिक्वेस्ट/i, reason);
   }
-  assert.deepEqual(Object.keys(outboundOverrides('delivery_followup', 'X')).sort(), ['initial_bot_message', 'initial_language_name']);
+  assert.deepEqual(outboundOverrides('delivery_followup', 'X'), { initial_bot_message: openingLine('delivery_followup', 'X'), initial_language_name: 'Hindi' });
+});
+
+test('inbound calls are welcomed in Hindi, by first name when the caller is a customer', () => {
+  assert.equal(welcomeLine(), 'नमस्ते, टिफ़नी डिज़ाइन्स में आपका स्वागत है। बताइए, मैं आपकी क्या मदद करूँ?');
+  assert.equal(welcomeLine('Satish'), 'नमस्ते Satish जी, टिफ़नी डिज़ाइन्स में आपका स्वागत है। बताइए, मैं आपकी क्या मदद करूँ?');
 });
 
 const notice = {
@@ -51,7 +56,7 @@ test('the service update job dials the notification campaign with the update tex
     order_number: 'TD-ORD-1001',
     call_reason: 'service_update',
     notice_details: 'Update text.',
-    opening_line: 'Hello, this is the Tiffany Designs AI service assistant. Am I speaking with Aarav Sharma?',
+    opening_line: 'नमस्ते, मैं टिफ़नी डिज़ाइन्स का AI सर्विस असिस्टेंट हूँ। क्या मेरी बात Aarav Sharma जी से हो रही है?',
   });
-  assert.match(users[0].overrides.initial_bot_message, /Am I speaking with Aarav Sharma\?$/);
+  assert.match(users[0].overrides.initial_bot_message, /क्या मेरी बात Aarav Sharma जी से हो रही है\?$/);
 });

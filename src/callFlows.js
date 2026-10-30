@@ -24,17 +24,32 @@ function followUpJobId(orderId) {
   return `delivery_followup:${orderId}`;
 }
 
-// Outbound calls open by confirming who answered; nothing about the order is said before that.
-function openingLine(reason, customerName) {
-  const who = customerName ? `Am I speaking with ${customerName}?` : 'May I know who I am speaking with?';
-  const intro = 'Hello, this is the Tiffany Designs AI service assistant';
-  return reason === CALL_REASONS.callbackRequest ? `${intro}, calling back as requested. ${who}` : `${intro}. ${who}`;
+// Every call opens in Hindi, and Sarvam then follows the language the customer answers in. The voice speaks the
+// opening line exactly as written (it is the variable opening_line, not translated), so the lines are Hindi here, worded
+// so that nothing changes with the voice's gender.
+const BRAND_HINDI = 'टिफ़नी डिज़ाइन्स';
+const OPENING_LANGUAGE = 'Hindi';
+
+// The inbound welcome (phone and website calls), by first name when the number belongs to a customer.
+function welcomeLine(firstName = null) {
+  return `नमस्ते${firstName ? ` ${firstName} जी` : ''}, ${BRAND_HINDI} में आपका स्वागत है। बताइए, मैं आपकी क्या मदद करूँ?`;
 }
 
-// Sarvam speaks the agent's greeting, whose English text is {{opening_line}}, and ignores initial_bot_message
-// while that greeting exists; both are sent so the line is right either way.
+// An outbound call's first line: the assistant says who it is, why it calls when `why` is given, and asks for the
+// customer by name. Nothing about the order is said before the customer confirms.
+function confirmIdentityLine(customerName, why = '') {
+  const who = customerName ? `क्या मेरी बात ${customerName} जी से हो रही है?` : 'क्या आप बता सकते हैं कि मेरी बात किससे हो रही है?';
+  return [`नमस्ते, मैं ${BRAND_HINDI} का AI सर्विस असिस्टेंट हूँ।`, why, who].filter(Boolean).join(' ');
+}
+
+function openingLine(reason, customerName) {
+  return confirmIdentityLine(customerName, reason === CALL_REASONS.callbackRequest ? 'आपके कहने पर वापस कॉल किया है।' : '');
+}
+
+// Sarvam speaks the agent's greeting, which is {{opening_line}}, and ignores initial_bot_message while that greeting
+// exists; both are sent so the line is right either way.
 function outboundOverrides(reason, customerName) {
-  return { initial_bot_message: openingLine(reason, customerName), initial_language_name: 'English' };
+  return { initial_bot_message: openingLine(reason, customerName), initial_language_name: OPENING_LANGUAGE };
 }
 
 function outboundVariables(reason, customerName, variables) {
@@ -113,6 +128,9 @@ module.exports = {
   CALL_REASONS,
   NOTICE_EVENTS,
   followUpJobId,
+  OPENING_LANGUAGE,
+  welcomeLine,
+  confirmIdentityLine,
   openingLine,
   outboundOverrides,
   outboundVariables,

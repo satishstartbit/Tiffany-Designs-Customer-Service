@@ -67,7 +67,15 @@ function createApp({
   app.get('/api/jobs', internalKey, async (req, res) => res.json({ jobs: await scheduler.list() }));
   // Places the calls that are due; on Vercel this replaces the in-process timer.
   app.get('/api/cron/jobs', cronSecret, async (req, res) => res.json(await scheduler.tick()));
-  app.use('/api/agent', agentSecret, agentToolsRouter({ crm, now, logger, invoiceLinks: invoices?.sender, productGuides }));
+  app.use('/api/agent', agentSecret, agentToolsRouter({
+    crm,
+    now,
+    logger,
+    invoiceLinks: invoices?.sender,
+    invoiceUploads: invoices?.records,
+    productGuides,
+    callStartBudgetMs: config.callStartBudgetMs,
+  }));
   if (invoices) {
     app.use('/api/invoice-uploads', invoiceUploadsRouter({
       reader: invoices.reader,

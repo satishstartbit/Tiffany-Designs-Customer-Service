@@ -58,6 +58,23 @@ function lastTenDigits(phone) {
   return digits.length >= 10 ? digits.slice(-10) : null;
 }
 
+// The last four digits of a number, as the voice agent says a number back for the caller to confirm.
+function phoneEnding(phone) {
+  const digits = String(phone ?? '').replace(/\D/g, '');
+  return digits.length >= 4 ? digits.slice(-4) : null;
+}
+
+// Nothing is saved on a mobile number until the caller has agreed to it: the agent says the number's last four digits
+// back and passes the ones the caller confirmed. Null when they are this number's; otherwise what to say back: the
+// ending, and whether it is the number of this call, a number the caller gave, or the one on file.
+function numberToConfirm(mobile, { confirmedEnding, given, caller }) {
+  const ending = phoneEnding(mobile);
+  const confirmed = phoneEnding(confirmedEnding);
+  if (ending && confirmed === ending) return null;
+  const source = caller && lastTenDigits(caller) === lastTenDigits(mobile) ? 'call' : given ? 'given' : 'file';
+  return { ending, source, confirmed };
+}
+
 function normalizeIssueType(value) {
   const key = String(value || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
   const resolved = ISSUE_ALIASES[key] || key;
@@ -65,8 +82,11 @@ function normalizeIssueType(value) {
 }
 
 // Words that say nothing about who someone is: titles, the "Demo Customer - " prefix on the org's sample accounts, and
-// the "Unknown Customer" the voice agent once saved for callers who gave no name.
-const NAME_FILLER = new Set(['mr', 'mrs', 'ms', 'miss', 'dr', 'shri', 'smt', 'sri', 'ji', 'demo', 'customer', 'test', 'unknown']);
+// the "Unknown Customer" the voice agent once saved for callers who gave no name, also as it says them in Hindi.
+const NAME_FILLER = new Set([
+  'mr', 'mrs', 'ms', 'miss', 'dr', 'shri', 'smt', 'sri', 'ji', 'demo', 'customer', 'test', 'unknown',
+  'श्री', 'श्रीमती', 'जी', 'अज्ञात', 'अननोन', 'ग्राहक', 'कस्टमर',
+]);
 
 function nameWords(name) {
   return String(name || '').toLowerCase().normalize('NFKD').replace(/[^a-z\s]/g, ' ')
@@ -149,6 +169,6 @@ function sameReference(said, stored) {
 }
 
 module.exports = {
-  ISSUE_TYPES, normalizePhone, lastTenDigits, normalizeIssueType, nameWords, personNameWords, fullName, hasName, namesMatch, joinDigits,
-  trailingNumber, sameReference,
+  ISSUE_TYPES, normalizePhone, lastTenDigits, phoneEnding, numberToConfirm, normalizeIssueType, nameWords, personNameWords, fullName,
+  hasName, namesMatch, joinDigits, trailingNumber, sameReference,
 };

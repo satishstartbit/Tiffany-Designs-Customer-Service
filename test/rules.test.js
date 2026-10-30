@@ -1,6 +1,26 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { normalizePhone, lastTenDigits, normalizeIssueType, namesMatch } = require('../src/rules');
+const {
+  normalizePhone, lastTenDigits, phoneEnding, numberToConfirm, fullName, normalizeIssueType, namesMatch,
+} = require('../src/rules');
+
+test('a number is confirmed by its last four digits, and otherwise said back with where it comes from', () => {
+  assert.equal(phoneEnding('+91 78784 54578'), '4578');
+  assert.equal(phoneEnding('45'), null);
+  const caller = '+917357558134';
+  assert.equal(numberToConfirm(caller, { confirmedEnding: '8 1 3 4', given: caller, caller }), null);
+  assert.equal(numberToConfirm(caller, { confirmedEnding: '7357558134', given: caller, caller }), null, 'the whole number has the same ending');
+  assert.deepEqual(numberToConfirm(caller, { confirmedEnding: '2345', given: caller, caller }), { ending: '8134', source: 'call', confirmed: '2345' });
+  assert.deepEqual(numberToConfirm('+919829012345', { given: '+919829012345', caller }), { ending: '2345', source: 'given', confirmed: null });
+  assert.deepEqual(numberToConfirm('+919829012345', { caller }), { ending: '2345', source: 'file', confirmed: null });
+  assert.deepEqual(numberToConfirm(null, { confirmedEnding: '' }), { ending: null, source: 'file', confirmed: null }, 'no number is never confirmed');
+});
+
+test('a placeholder is not a full name, in English or in Hindi', () => {
+  for (const name of ['Unknown Customer', 'अज्ञात ग्राहक', 'अननोन कस्टमर', 'रमेश जी', 'श्री रमेश']) assert.equal(fullName(name), null, name);
+  assert.equal(fullName('रमेश कुमार'), 'रमेश कुमार');
+  assert.equal(fullName('श्री रमेश कुमार जी'), 'रमेश कुमार');
+});
 
 test('normalizePhone accepts Indian mobile formats and returns E.164', () => {
   assert.equal(normalizePhone('9876543210'), '+919876543210');

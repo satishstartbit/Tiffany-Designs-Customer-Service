@@ -185,7 +185,7 @@ test('requests pass use_details_on_file to the server, so no mobile number is ne
   const s = await startTestServer();
   t.after(s.close);
   const installation = await s.call('POST', '/api/agent/installation', {
-    body: { order_id: 'TD-ORD-1111', preferred_date: '2026-10-20', preferred_time: 'morning', use_details_on_file: true, caller_phone: '+919820011111' },
+    body: { order_id: 'TD-ORD-1111', preferred_date: '2026-10-20', preferred_time: 'morning', use_details_on_file: true, caller_phone: '+919820011111', contact_number_ending: '1111' },
     headers: s.agent,
   });
   assert.equal(installation.body.created, true);
@@ -193,12 +193,13 @@ test('requests pass use_details_on_file to the server, so no mobile number is ne
   assert.equal(s.crm.created.at(-1).input.phone, null);
 
   const ret = await s.call('POST', '/api/agent/cases', {
-    body: { issue_type: 'return', description: 'Customer wants to return the bookcase.', order_id: 'TD-ORD-1111', use_details_on_file: 'true', order_phone: '+919820011111' },
+    body: { issue_type: 'return', description: 'Customer wants to return the bookcase.', order_id: 'TD-ORD-1111', use_details_on_file: 'true', order_phone: '+919820011111', contact_number_ending: '1111' },
     headers: s.agent,
   });
   assert.equal(ret.body.created, true);
   assert.equal(s.crm.created.at(-1).input.useDetailsOnFile, true);
 
-  await s.call('POST', '/api/agent/cases', { body: { issue_type: 'general', description: 'x', phone: '9876543210' }, headers: s.agent });
+  await s.call('POST', '/api/agent/cases', { body: { issue_type: 'general', description: 'x', phone: '9876543210', contact_number_ending: '3210' }, headers: s.agent });
+  assert.equal(s.crm.created.length, 3);
   assert.equal(s.crm.created.at(-1).input.useDetailsOnFile, false, 'off unless asked for');
 });

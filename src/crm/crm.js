@@ -1,5 +1,6 @@
 const {
-  lastTenDigits, normalizePhone, nameWords, fullName, hasName, namesMatch, joinDigits, trailingNumber, sameReference,
+  lastTenDigits, phoneEnding, numberToConfirm, normalizePhone, nameWords, fullName, hasName, namesMatch, joinDigits, trailingNumber,
+  sameReference,
 } = require('../rules');
 const { todayInIst } = require('../dates');
 const { createBusinessHours } = require('./businessHours');
@@ -770,6 +771,11 @@ function createCrm({
     if (!mobile) {
       return { created: false, error: 'A mobile number is needed to register the request. Ask for the 10 digit number the service team should call.' };
     }
+    // For the voice agent (confirmNumber), nothing is saved until the caller has agreed to this number by its ending.
+    if (input.confirmNumber) {
+      const unconfirmed = numberToConfirm(mobile, { confirmedEnding: input.numberEnding, given: input.phone, caller: input.callerPhone });
+      if (unconfirmed) return { created: false, numberToConfirm: unconfirmed };
+    }
 
     // The caller chose the address the order was delivered to, or the customer's address on file when the order has
     // none; any address given with it is ignored.
@@ -877,6 +883,7 @@ function createCrm({
       caseNumber: saved?.CaseNumber || null,
       serviceRoute: saved?.Service_Route__c || null,
       withinBusinessHours,
+      contactNumberEnding: phoneEnding(mobile),
       orderVerified: Boolean(order),
       orderLinked: Boolean(order),
       ...(onFile ? { usedDetailsOnFile: true } : {}),

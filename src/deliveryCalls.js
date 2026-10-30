@@ -1,40 +1,25 @@
 const { normalizePhone } = require('./rules');
-const { VARS } = require('./callFlows');
+const { VARS, OPENING_LANGUAGE, confirmIdentityLine } = require('./callFlows');
 const { todayInIst } = require('./dates');
 const { formatDate } = require('./speech');
 
 // Agent call reason for these calls: confirm every part arrived, then offer installation.
 const CALL_REASON = 'delivery_check';
 const INDIAN_MOBILE = /^\+91[6-9]\d{9}$/;
-const MINUTE_MS = 60 * 1000;
 
-// Sarvam ignores app_overrides.initial_bot_message while the agent has a translated greeting, so the agent's English
-// greeting is the variable opening_line and the call starts in English.
+// Sarvam ignores app_overrides.initial_bot_message while the agent has a greeting, so the greeting is the variable
+// opening_line, in Hindi like every call's first line (src/callFlows.js).
 function openingLine(customerName) {
-  const intro = 'Hello, this is the Tiffany Designs AI service assistant, calling about your recent delivery.';
-  return `${intro} ${customerName ? `Am I speaking with ${customerName}?` : 'May I know who I am speaking with?'}`;
-}
-
-// Salesforce keeps the delivery date without a time. The last save of an order is never earlier than the moment it
-// was marked Delivered, so waiting from the later of that save and the start of the delivery day never calls early.
-function deliveredAt(order) {
-  const times = [
-    order.deliveryDate ? Date.parse(`${order.deliveryDate}T00:00:00+05:30`) : NaN,
-    Date.parse(order.lastModified),
-  ].filter(Number.isFinite);
-  return times.length ? Math.max(...times) : null;
+  return confirmIdentityLine(customerName, 'आपकी हाल की डिलीवरी के बारे में कॉल किया है।');
 }
 
 function mobileToCall(customer) {
   return [customer?.mobile, customer?.phone].map(normalizePhone).find((p) => p && INDIAN_MOBILE.test(p)) || null;
 }
 
-// Why an order gets no call now, or null when it is due one.
-function skipReason(order, { now, delayMs, called, openRequests, followUps }) {
+// Why an order gets no call, or null when it is due one.
+function skipReason(order, { called, openRequests, followUps }) {
   if (order.deliveryStatus !== 'Delivered') return 'not_delivered';
-  const at = deliveredAt(order);
-  if (at === null) return 'no_delivery_date';
-  if (now < at + delayMs) return 'too_soon';
   if (!mobileToCall(order.customer)) return 'no_phone';
   if (called.has(order.id)) return 'already_called';
   // The Salesforce-triggered follow-up (POST /api/orders/delivered) already calls about this order.
@@ -44,6 +29,24 @@ function skipReason(order, { now, delayMs, called, openRequests, followUps }) {
 }
 
 const orderRef = (order) => order.erpOrderId || order.orderNumber;
+
+// The orders a run calls: at most maxPerRun, and one per number, since a second call to a phone already ringing would
+// not get through. The rest are called on a later run.
+function pickBatch(due, maxPerRun) {
+  const phones = new Set();
+  const batch = [];
+  const deferred = [];
+  for (const order of due) {
+    const phone = mobileToCall(order.customer);
+    if (batch.length < maxPerRun && !phones.has(phone)) {
+      phones.add(phone);
+      batch.push(order);
+    } else {
+      deferred.push(order);
+    }
+  }
+  return { batch, deferred };
+}
 
 function createDeliveryCalls({ orders, crm, sarvam, scheduler, config, now = () => Date.now(), logger = console }) {
   let running = false;
@@ -91,7 +94,7 @@ function createDeliveryCalls({ orders, crm, sarvam, scheduler, config, now = () 
           [VARS.callReason]: CALL_REASON,
           opening_line: openingLine(name),
         },
-        overrides: { initial_bot_message: openingLine(name), initial_language_name: 'English' },
+        overrides: { initial_bot_message: openingLine(name), initial_language_name: OPENING_LANGUAGE },
         webhook: webhookFor(order),
       });
       const markerError = await markCalled(order, attemptId);
@@ -105,7 +108,7 @@ function createDeliveryCalls({ orders, crm, sarvam, scheduler, config, now = () 
   }
 
   async function check(dryRun) {
-    const { delayMinutes, maxPerRun, serviceHoursOnly } = config.deliveryCalls;
+    const { maxPerRun, serviceHoursOnly } = config.deliveryCalls;
     const hours = await crm.getServiceHours();
     if (serviceHoursOnly && !hours.open && !dryRun) return { skipped: 'outside_service_hours', opensAt: hours.opensAt };
 
@@ -118,29 +121,32 @@ function createDeliveryCalls({ orders, crm, sarvam, scheduler, config, now = () 
     const skipped = {};
     const due = [];
     for (const order of delivered) {
-      const reason = skipReason(order, { now: now(), delayMs: delayMinutes * MINUTE_MS, called, openRequests, followUps });
+      const reason = skipReason(order, { called, openRequests, followUps });
       if (reason) (skipped[reason] ||= []).push(orderRef(order));
       else due.push(order);
     }
-    const batch = due.slice(0, maxPerRun);
-    const summary = { dryRun, serviceOpen: hours.open, deliveredOn: today, checked: delivered.length, skipped, deferred: due.length - batch.length };
+    const { batch, deferred } = pickBatch(due, maxPerRun);
+    const summary = { dryRun, serviceOpen: hours.open, deliveredOn: today, checked: delivered.length, skipped, deferred: deferred.map(orderRef) };
     if (dryRun) return { ...summary, wouldCall: batch.map(orderRef) };
 
     const products = await orders.productNames(batch.map((o) => o.id));
+    const outcomes = await Promise.allSettled(batch.map((order) => place(order, products[order.id])));
     const placed = [];
     const failed = [];
-    for (const order of batch) {
-      try {
-        placed.push({ order: orderRef(order), ...(await place(order, products[order.id])) });
-      } catch (err) {
-        logger.error(`Delivery check call for order ${order.id} failed: ${err.message}`);
-        failed.push({ order: orderRef(order), error: err.message });
+    outcomes.forEach((outcome, i) => {
+      const order = batch[i];
+      if (outcome.status === 'fulfilled') {
+        placed.push({ order: orderRef(order), ...outcome.value });
+      } else {
+        logger.error(`Delivery check call for order ${order.id} failed: ${outcome.reason.message}`);
+        failed.push({ order: orderRef(order), error: outcome.reason.message });
       }
-    }
+    });
     return { ...summary, placed, failed };
   }
 
-  // One pass: find the orders delivered today, apply the rules and call the ones that are due. dryRun calls nobody.
+  // One pass: find the orders delivered today, apply the rules and call every one that is due, all at once. dryRun
+  // calls nobody.
   async function run({ dryRun = false } = {}) {
     if (!dryRun && !sarvam.canStartCalls) {
       const err = new Error('Delivery check calls need SARVAM_AGENT_ID, SARVAM_APP_VERSION, SARVAM_CONNECTION_ID and SARVAM_AGENT_PHONE');
@@ -159,4 +165,4 @@ function createDeliveryCalls({ orders, crm, sarvam, scheduler, config, now = () 
   return { run };
 }
 
-module.exports = { createDeliveryCalls, deliveredAt, mobileToCall, skipReason, CALL_REASON };
+module.exports = { createDeliveryCalls, mobileToCall, skipReason, CALL_REASON };

@@ -162,7 +162,7 @@ test('book_installation asks before a second installation request, and registers
   const s = await startTestServer();
   t.after(s.close);
   s.crm.openRequests.push({ orderId: '801A', caseNumber: '00001087', kind: 'installation', createdDate: '2026-10-12T05:00:00.000Z' });
-  const body = { order_id: 'TD-ORD-1001', phone: '9876543210', preferred_date: '2026-10-17', preferred_time: 'morning' };
+  const body = { order_id: 'TD-ORD-1001', phone: '9876543210', contact_number_ending: '3210', preferred_date: '2026-10-17', preferred_time: 'morning' };
 
   const first = await s.call('POST', '/api/agent/installation', { body, headers: s.agent });
   assert.equal(first.status, 200);
@@ -184,7 +184,7 @@ test('register_service_request asks before a second request of the same kind', a
   const s = await startTestServer();
   t.after(s.close);
   s.crm.openRequests.push({ orderId: '801A', caseNumber: '00001081', kind: 'replacement', createdDate: '2026-10-13T05:00:00.000Z' });
-  const body = { issue_type: 'return', description: 'Customer wants to return the wardrobe.', order_id: '1001', phone: '9876543210' };
+  const body = { issue_type: 'return', description: 'Customer wants to return the wardrobe.', order_id: '1001', phone: '9876543210', contact_number_ending: '3210' };
 
   const first = await s.call('POST', '/api/agent/cases', { body, headers: s.agent });
   assert.equal(first.body.existing_request, true);

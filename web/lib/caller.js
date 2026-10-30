@@ -11,8 +11,10 @@ export function callerPhone(value) {
 export const CALL_START = 'client.action.interaction_start';
 
 // The agent's short welcome on a website call (its opening_line), by first name when the number is a customer's.
+// Every call opens in Hindi and the voice speaks the line as written; keep it in step with welcomeLine in
+// src/callFlows.js.
 export function openingLine(name = null) {
-  return `Namaste${name ? ` ${name} ji` : ''}, welcome to Tiffany Designs. How can I help you today?`;
+  return `नमस्ते${name ? ` ${name} जी` : ''}, टिफ़नी डिज़ाइन्स में आपका स्वागत है। बताइए, मैं आपकी क्या मदद करूँ?`;
 }
 
 // The message as the widget would send it, with customer_phone, the welcome as opening_line, and customer_name when

@@ -86,11 +86,11 @@ test.describe('delivery follow-up scheduling', () => {
         product_name: 'Demo 3-Door Wardrobe',
         delivery_city: 'Delhi',
         call_reason: 'delivery_followup',
-        opening_line: 'Hello, this is the Tiffany Designs AI service assistant. Am I speaking with Aarav Sharma?',
+        opening_line: 'नमस्ते, मैं टिफ़नी डिज़ाइन्स का AI सर्विस असिस्टेंट हूँ। क्या मेरी बात Aarav Sharma जी से हो रही है?',
       },
       overrides: {
-        initial_bot_message: 'Hello, this is the Tiffany Designs AI service assistant. Am I speaking with Aarav Sharma?',
-        initial_language_name: 'English',
+        initial_bot_message: 'नमस्ते, मैं टिफ़नी डिज़ाइन्स का AI सर्विस असिस्टेंट हूँ। क्या मेरी बात Aarav Sharma जी से हो रही है?',
+        initial_language_name: 'Hindi',
       },
     }]);
   });
@@ -197,7 +197,7 @@ test.describe('customer callback requests (website "call me" panel)', () => {
 
     const [call] = s.sarvam.started;
     assert.equal(call.phone, '+919876543210');
-    const opening = 'Hello, this is the Tiffany Designs AI service assistant, calling back as requested. Am I speaking with Aarav?';
+    const opening = 'नमस्ते, मैं टिफ़नी डिज़ाइन्स का AI सर्विस असिस्टेंट हूँ। आपके कहने पर वापस कॉल किया है। क्या मेरी बात Aarav जी से हो रही है?';
     assert.deepEqual(call.variables, {
       customer_name: 'Aarav', customer_phone: '+919876543210', order_number: 'TD-ORD-1001', call_reason: 'callback_request', opening_line: opening,
     }, 'the agent greets with opening_line, not the customer care greeting');
@@ -213,14 +213,14 @@ test.describe('customer callback requests (website "call me" panel)', () => {
     t.after(s.close);
     await request(s, { phone: '9876543210', consent: true });
     assert.equal(s.sarvam.started[0].variables.customer_name, 'Aarav Sharma');
-    assert.match(s.sarvam.started[0].overrides.initial_bot_message, /Am I speaking with Aarav Sharma\?$/);
+    assert.match(s.sarvam.started[0].overrides.initial_bot_message, /क्या मेरी बात Aarav Sharma जी से हो रही है\?$/);
   });
 
   test('an unknown number is asked who is speaking', async (t) => {
     const s = await startTestServer();
     t.after(s.close);
     await request(s, { phone: '9000000001', consent: true });
-    assert.match(s.sarvam.started[0].overrides.initial_bot_message, /May I know who I am speaking with\?$/);
+    assert.match(s.sarvam.started[0].overrides.initial_bot_message, /क्या आप बता सकते हैं कि मेरी बात किससे हो रही है\?$/);
   });
 
   test('nothing is dialled without consent', async (t) => {
@@ -398,12 +398,12 @@ test.describe('agent tools used during a call', () => {
     const s = await startTestServer();
     t.after(s.close);
     const start = (body) => s.call('POST', '/api/agent/call-start', { body, headers: s.agent }).then((r) => r.body);
-    const defaults = { customer_phone: '', customer_name: '', call_reason: 'inbound', opening_line: 'Namaste, welcome to Tiffany Designs. How can I help you today?' };
+    const defaults = { customer_phone: '', customer_name: '', call_reason: 'inbound', opening_line: 'नमस्ते, टिफ़नी डिज़ाइन्स में आपका स्वागत है। बताइए, मैं आपकी क्या मदद करूँ?' };
 
     assert.deepEqual(await start({ ...defaults, caller_phone: '09876543210', caller_type: 'phone_number' }), {
       customer_phone: '+919876543210',
       customer_name: 'Aarav',
-      opening_line: 'Namaste Aarav ji, welcome to Tiffany Designs. How can I help you today?',
+      opening_line: 'नमस्ते Aarav जी, टिफ़नी डिज़ाइन्स में आपका स्वागत है। बताइए, मैं आपकी क्या मदद करूँ?',
       caller_details: 'The number for this call, ending 3 2 1 0, is registered to Aarav Sharma. Recent orders: TD-ORD-1001, delivered. '
         + 'Open requests: 1063 for Installation, Appointment Scheduled.',
       known_customer: true,
@@ -436,6 +436,36 @@ test.describe('agent tools used during a call', () => {
     assert.equal(down.caller_details, '', 'nothing is claimed about the number when the lookup failed');
   });
 
+  test('the greeting does not wait for a slow lookup at call start: what is late is left for the agent to look up', async (t) => {
+    const s = await startTestServer({ config: testConfig({ callStartBudgetMs: 100 }) });
+    t.after(s.close);
+    const start = (body) => s.call('POST', '/api/agent/call-start', { body, headers: s.agent }).then((r) => r.body);
+    const defaults = { customer_phone: '', customer_name: '', call_reason: 'inbound', opening_line: 'नमस्ते, टिफ़नी डिज़ाइन्स में आपका स्वागत है। बताइए, मैं आपकी क्या मदद करूँ?' };
+    const slow = (fn, ms) => (...args) => new Promise((resolve, reject) => setTimeout(() => fn(...args).then(resolve, reject), ms));
+    const { findContactByPhone, findRecentOrdersForAccount } = s.crm;
+
+    s.crm.findRecentOrdersForAccount = slow(findRecentOrdersForAccount, 400);
+    let started = Date.now();
+    const lateRecords = await start({ ...defaults, caller_phone: '09876543210' });
+    assert.ok(Date.now() - started < 350, 'answered within the budget');
+    assert.equal(lateRecords.customer_name, 'Aarav');
+    assert.match(lateRecords.opening_line, /^नमस्ते Aarav जी/, 'the name came in time, so the greeting has it');
+    assert.equal(lateRecords.caller_details, '', 'without the orders and requests, the agent looks the caller up on its first reply');
+
+    s.crm.findRecentOrdersForAccount = findRecentOrdersForAccount;
+    s.crm.findContactByPhone = slow(findContactByPhone, 400);
+    started = Date.now();
+    const lateContact = await start({ ...defaults, caller_phone: '09876543210' });
+    assert.ok(Date.now() - started < 350, 'answered within the budget');
+    assert.deepEqual(lateContact, {
+      customer_phone: '+919876543210', customer_name: '', opening_line: defaults.opening_line, caller_details: '', known_customer: false,
+    }, 'the number is still kept, and the plain greeting goes on time');
+
+    s.crm.findContactByPhone = slow(async () => { throw new Error('Salesforce is down'); }, 400);
+    assert.equal((await start({ ...defaults, caller_phone: '09876543210' })).customer_phone, '+919876543210');
+    await new Promise((resolve) => setTimeout(resolve, 450));
+  });
+
   test('customer lookup by the caller number gives the first name and the open requests', async (t) => {
     const s = await startTestServer();
     t.after(s.close);
@@ -465,7 +495,7 @@ test.describe('agent tools used during a call', () => {
 
     const booking = await s.call('POST', '/api/agent/installation', {
       headers: s.agent,
-      body: { phone: '9876543210', preferred_date: '2026-10-17', preferred_time: '11 am' },
+      body: { phone: '9876543210', contact_number_ending: '3210', preferred_date: '2026-10-17', preferred_time: '11 am' },
     });
     assert.equal(booking.status, 200);
     assert.equal(booking.body.created, false);
@@ -474,7 +504,7 @@ test.describe('agent tools used during a call', () => {
       + 'When it fails again, tell the customer the details are noted for the service team, who will follow up.');
 
     s.crm.createOrder = down;
-    const order = await s.call('POST', '/api/agent/orders', { headers: s.agent, body: { phone: '9000000001', items: 'TD-STD-01' } });
+    const order = await s.call('POST', '/api/agent/orders', { headers: s.agent, body: { phone: '9000000001', contact_number_ending: '0001', items: 'TD-STD-01' } });
     assert.equal(order.body.order_number, null);
     assert.match(order.body.message, /When it fails again, call tool:request_human_callback with the confirmed products/);
   });
@@ -692,7 +722,7 @@ test.describe('agent tools used during a call', () => {
     const res = await s.call('POST', '/api/agent/orders', {
       headers: s.agent,
       body: {
-        customer_name: 'Ravi Kumar', phone: '90000 00001', items: 'TD-STD-01 x 1, TD-CHR-01 x 2',
+        customer_name: 'Ravi Kumar', phone: '90000 00001', contact_number_ending: '0001', items: 'TD-STD-01 x 1, TD-CHR-01 x 2',
         address: 'Flat 4, 12 MG Road', city: 'Gurugram', state: 'Haryana', postal_code: '122002', notes: 'Call before delivery',
       },
     });
@@ -704,7 +734,7 @@ test.describe('agent tools used during a call', () => {
       spoken_order_number: '120',
       total: 18997,
       message: 'Order 120 is placed for 1 Demo Study Table, 2 Demo Study Chair, total list price 18,997 rupees. '
-        + 'The sales team will call to confirm the final price, delivery and payment.',
+        + 'The sales team will call the number ending 0 0 0 1 to confirm the final price, delivery and payment.',
     });
     assert.deepEqual(s.crm.placedOrders[0].input, {
       customerName: 'Ravi Kumar', phone: '+919000000001', items: 'TD-STD-01 x 1, TD-CHR-01 x 2',
@@ -720,7 +750,7 @@ test.describe('agent tools used during a call', () => {
       assert.equal(res.status, 200, String(phone));
       assert.deepEqual(res.body, { created: false, order_number: null, message: 'A valid 10 digit Indian mobile number is needed to place the order.' });
     }
-    const noItems = await s.call('POST', '/api/agent/orders', { headers: s.agent, body: { phone: '9000000001' } });
+    const noItems = await s.call('POST', '/api/agent/orders', { headers: s.agent, body: { phone: '9000000001', contact_number_ending: '0001' } });
     assert.deepEqual(noItems.body, { created: false, order_number: null, message: 'No product was given. Ask which product and how many.' });
     assert.equal(s.crm.placedOrders.length, 0);
   });
@@ -745,6 +775,7 @@ test.describe('agent tools used during a call', () => {
         description: 'Two shelf brackets missing from the wardrobe box',
         order_id: 'TD-ORD-1001',
         phone: '9876543210',
+        contact_number_ending: '3210',
         part_number: 'WRD-3D-HDW-001',
         quantity: '2',
       },
@@ -754,7 +785,8 @@ test.describe('agent tools used during a call', () => {
     assert.equal(res.body.order_verified, true);
     assert.equal(res.body.case_number, '00001100');
     assert.equal(res.body.spoken_case_number, '1100');
-    assert.equal(res.body.message, 'Service request 1100 is registered.');
+    assert.equal(res.body.contact_number_ending, '3210');
+    assert.equal(res.body.message, 'Service request 1100 is registered. The service team will call the number ending 3 2 1 0.');
     const [created] = s.crm.created;
     assert.equal(created.input.issueType, 'missing_parts');
     assert.equal(created.input.phone, '+919876543210');
@@ -766,7 +798,7 @@ test.describe('agent tools used during a call', () => {
     t.after(s.close);
     const res = await s.call('POST', '/api/agent/cases', {
       headers: s.agent,
-      body: { issue_type: 'damaged', description: 'Side panel cracked', order_id: 'TD-ORD-1111', phone: '9820011111', city: 'Jaipur' },
+      body: { issue_type: 'damaged', description: 'Side panel cracked', order_id: 'TD-ORD-1111', phone: '9820011111', contact_number_ending: '1111', city: 'Jaipur' },
     });
     assert.equal(res.body.service_route, 'External Provider');
   });
@@ -775,7 +807,7 @@ test.describe('agent tools used during a call', () => {
     const s = await startTestServer();
     t.after(s.close);
     s.crm.state.withinBusinessHours = false;
-    const res = await s.call('POST', '/api/agent/cases', { headers: s.agent, body: { issue_type: 'general', description: 'Warranty question', phone: '9876543210' } });
+    const res = await s.call('POST', '/api/agent/cases', { headers: s.agent, body: { issue_type: 'general', description: 'Warranty question', phone: '9876543210', contact_number_ending: '3210' } });
     assert.equal(res.body.within_business_hours, false);
     assert.match(res.body.message, /next working day/);
   });
@@ -784,7 +816,7 @@ test.describe('agent tools used during a call', () => {
     const s = await startTestServer();
     t.after(s.close);
     for (const issue of ['return', 'replacement', 'delivery damage', 'wrong component', 'defective', 'quality_issue', 'installation_followup', 'reinstallation']) {
-      const res = await s.call('POST', '/api/agent/cases', { headers: s.agent, body: { issue_type: issue, description: 'x', order_id: 'TD-ORD-1001', phone: '9876543210' } });
+      const res = await s.call('POST', '/api/agent/cases', { headers: s.agent, body: { issue_type: issue, description: 'x', order_id: 'TD-ORD-1001', phone: '9876543210', contact_number_ending: '3210' } });
       assert.equal(res.body.created, true, issue);
     }
     assert.deepEqual(s.crm.created.map((c) => c.input.issueType), ['return', 'replacement', 'delivery_damage', 'wrong_part', 'defective', 'quality_issue', 'installation_followup', 'reinstallation']);
@@ -813,10 +845,11 @@ test.describe('agent tools used during a call', () => {
     t.after(s.close);
     const res = await s.call('POST', '/api/agent/installation', {
       headers: s.agent,
-      body: { order_id: 'TD-ORD-1001', phone: '9876543210', preferred_date: '2026-10-17', preferred_time: '11:00' },
+      body: { order_id: 'TD-ORD-1001', phone: '9876543210', contact_number_ending: '3210', preferred_date: '2026-10-17', preferred_time: '11:00' },
     });
     assert.equal(res.status, 200);
-    assert.equal(res.body.message, 'Installation request 1100 is registered with a preferred slot of Saturday, 17 October, at 11 am. The service team confirms the appointment.');
+    assert.equal(res.body.message, 'Installation request 1100 is registered with a preferred slot of Saturday, 17 October, at 11 am. '
+      + 'The service team confirms the appointment. The service team will call the number ending 3 2 1 0.');
     const [created] = s.crm.created;
     assert.equal(created.input.issueType, 'installation');
     assert.equal(created.input.preferredDate, '2026-10-17');
@@ -829,7 +862,7 @@ test.describe('agent tools used during a call', () => {
     t.after(s.close);
     await s.call('POST', '/api/agent/installation', {
       headers: s.agent,
-      body: { order_id: 'TD-ORD-1001', phone: '9876543210', preferred_date: '2026-10-20', preferred_time: '3 pm', reschedule: 'true', existing_case_number: '1062' },
+      body: { order_id: 'TD-ORD-1001', phone: '9876543210', contact_number_ending: '3210', preferred_date: '2026-10-20', preferred_time: '3 pm', reschedule: 'true', existing_case_number: '1062' },
     });
     assert.equal(s.crm.created[0].input.issueType, 'installation_reschedule');
     assert.equal(s.crm.created[0].input.description, 'Customer asked to reschedule installation for request 1062.');
@@ -859,7 +892,9 @@ test.describe('agent tools used during a call', () => {
   test('installation booking resolves a spoken date and stores the calendar date', async (t) => {
     const s = await startTestServer();
     t.after(s.close);
-    const res = await s.call('POST', '/api/agent/installation', { headers: s.agent, body: { order_id: 'TD-ORD-1001', phone: '9876543210', preferred_date: 'tomorrow', preferred_time: 'morning' } });
+    const res = await s.call('POST', '/api/agent/installation', {
+      headers: s.agent, body: { order_id: 'TD-ORD-1001', phone: '9876543210', contact_number_ending: '3210', preferred_date: 'tomorrow', preferred_time: 'morning' },
+    });
     assert.equal(res.body.created, true);
     assert.equal(s.crm.created[0].input.preferredDate, '2026-10-15');
     assert.equal(s.crm.created[0].input.preferredTime, 'morning, 10 am to 12 pm');
@@ -885,7 +920,7 @@ test.describe('agent tools used during a call', () => {
     const s = await startTestServer();
     t.after(s.close);
     const slot = { preferred_date: '2026-10-17', preferred_time: 'morning' };
-    const byNumber = await s.call('POST', '/api/agent/installation', { headers: s.agent, body: { order_number: '00000122', phone: '9820011111', ...slot } });
+    const byNumber = await s.call('POST', '/api/agent/installation', { headers: s.agent, body: { order_number: '00000122', phone: '9820011111', contact_number_ending: '1111', ...slot } });
     assert.equal(byNumber.body.created, true);
     assert.equal(s.crm.created.at(-1).input.orderNumber, '00000122');
 
@@ -911,10 +946,82 @@ test.describe('agent tools used during a call', () => {
     assert.match(lookup.body.message, /^A customer record with no name saved is on this number; ask for the full name before registering anything\./);
   });
 
+  test('the number of this call is used when the customer asks for it, and nothing is registered until its ending is confirmed', async (t) => {
+    const s = await startTestServer();
+    t.after(s.close);
+    // As on a live call: the order was confirmed with the number it was placed with, the caller then asked to be reached
+    // on the number they were calling from, and the agent sent the order's number as phone.
+    const caller = '+919000000555';
+    const body = {
+      order_id: 'TD-ORD-1001', order_phone: '+919876543210', caller_phone: caller, phone: '9876543210', use_calling_number: true,
+      customer_name: 'Ramesh Kumar', preferred_date: '2026-10-17', preferred_time: '11 am',
+    };
+    const book = (extra) => s.call('POST', '/api/agent/installation', { headers: s.agent, body: { ...body, ...extra } });
+
+    const unconfirmed = await book({});
+    assert.equal(unconfirmed.body.created, false);
+    assert.equal(unconfirmed.body.case_number, null);
+    assert.equal(unconfirmed.body.message, 'Nothing is saved yet: the customer has not confirmed the mobile number for this request. It would be the number '
+      + 'of this call, ending 0 5 5 5. Say that back to the customer and ask whether to use it. When the customer agrees, call this tool again with '
+      + 'the same details and contact_number_ending 0555. When the customer wants another number, ask for the 10 digit number, read it back in two '
+      + 'groups of five digits, and call this tool again with it as phone, use_calling_number set to false and its last four digits as contact_number_ending.');
+    const wrong = await book({ contact_number_ending: '3210' });
+    assert.match(wrong.body.message, /It would be the number of this call, ending 0 5 5 5, not the number ending 3 2 1 0\./);
+    assert.equal(s.crm.created.length, 0);
+
+    const booked = await book({ contact_number_ending: '0555' });
+    assert.equal(booked.body.created, true);
+    assert.equal(s.crm.created[0].input.phone, caller, 'the number of the call, not the digits the agent sent');
+    assert.match(booked.body.message, /The service team will call the number ending 0 5 5 5\./);
+
+    // Without a number for the call, as in a chat test, the agent asks for the digits instead.
+    const unknown = await book({ caller_phone: '', contact_number_ending: '0555' });
+    assert.equal(unknown.body.created, false);
+    assert.match(unknown.body.message, /^Nothing is saved yet: the number of this call is not known\. Ask the customer for the 10 digit mobile number/);
+
+    // The number on file is said back too, with the number of this call offered instead.
+    const onFile = await s.call('POST', '/api/agent/cases', {
+      headers: s.agent,
+      body: { issue_type: 'damaged', description: 'Door cracked', order_id: 'TD-ORD-1001', order_phone: '+919876543210', caller_phone: caller, use_details_on_file: true },
+    });
+    assert.equal(onFile.body.created, false);
+    assert.match(onFile.body.message, /It would be the mobile number on file, ending 3 2 1 0\. .* When the customer wants the number of this call, call it again with use_calling_number set to true\./);
+    const callBack = await s.call('POST', '/api/agent/escalate', { headers: s.agent, body: { reason: 'Wants a manager', use_calling_number: 'true', caller_phone: caller, contact_number_ending: '0555' } });
+    assert.equal(callBack.body.created, true);
+    assert.equal(s.crm.created.at(-1).input.phone, caller);
+    assert.equal(s.crm.created.length, 2);
+  });
+
+  test('an order and customer details go on the number of this call when the customer asks for it, once its ending is confirmed', async (t) => {
+    const s = await startTestServer();
+    t.after(s.close);
+    const caller = '+919000000555';
+    const order = {
+      customer_name: 'Ravi Kumar', use_calling_number: 'true', phone: '9876543210', caller_phone: caller, items: 'TD-STD-01 x 1',
+      address: 'Flat 4, 12 MG Road', city: 'Gurugram', state: 'Haryana', postal_code: '122002',
+    };
+    const first = await s.call('POST', '/api/agent/orders', { headers: s.agent, body: order });
+    assert.deepEqual([first.body.created, first.body.order_number], [false, null]);
+    assert.match(first.body.message, /^Nothing is saved yet: the customer has not confirmed the mobile number for this order\. It would be the number of this call, ending 0 5 5 5\./);
+    assert.equal(s.crm.placedOrders.length, 0);
+    const placed = await s.call('POST', '/api/agent/orders', { headers: s.agent, body: { ...order, contact_number_ending: '0555' } });
+    assert.equal(placed.body.created, true);
+    assert.equal(s.crm.placedOrders[0].input.phone, caller);
+    assert.match(placed.body.message, /The sales team will call the number ending 0 5 5 5 to confirm/);
+
+    const details = { customer_name: 'Ravi Kumar', use_calling_number: true, caller_phone: caller, email: 'ravi@example.com' };
+    const unsaved = await s.call('POST', '/api/agent/customer', { headers: s.agent, body: details });
+    assert.equal(unsaved.body.saved, false);
+    assert.match(unsaved.body.message, /^Nothing is saved yet: the customer has not confirmed the mobile number for these details\./);
+    const saved = await s.call('POST', '/api/agent/customer', { headers: s.agent, body: { ...details, contact_number_ending: '0555' } });
+    assert.equal(saved.body.saved, true);
+    assert.deepEqual(s.crm.savedCustomers.map((c) => c.input.phone), [caller]);
+  });
+
   test('escalation registers a request for a human callback', async (t) => {
     const s = await startTestServer();
     t.after(s.close);
-    const res = await s.call('POST', '/api/agent/escalate', { headers: s.agent, body: { reason: 'Customer wants a manager', phone: '9876543210' } });
+    const res = await s.call('POST', '/api/agent/escalate', { headers: s.agent, body: { reason: 'Customer wants a manager', phone: '9876543210', contact_number_ending: '3210' } });
     assert.equal(res.status, 200);
     assert.match(res.body.message, /flagged for a service team member/);
     const [created] = s.crm.created;
@@ -986,7 +1093,10 @@ test.describe('agent tools used during a call', () => {
     t.after(s.close);
     const fresh = await s.call('POST', '/api/agent/customer', {
       headers: s.agent,
-      body: { customer_name: 'Ravi Kumar', phone: '90000 00001', email: 'ravi@example.com', alternate_phone: '9811122233', address: '12 MG Road', city: 'Gurugram', state: 'Haryana', postal_code: '122002' },
+      body: {
+        customer_name: 'Ravi Kumar', phone: '90000 00001', contact_number_ending: '0001', email: 'ravi@example.com', alternate_phone: '9811122233',
+        address: '12 MG Road', city: 'Gurugram', state: 'Haryana', postal_code: '122002',
+      },
     });
     assert.deepEqual(fresh.body, { saved: true, new_customer: true, message: 'The details are saved for Ravi Kumar.' });
     assert.deepEqual(s.crm.savedCustomers[0].input, {
@@ -994,7 +1104,7 @@ test.describe('agent tools used during a call', () => {
       address: '12 MG Road', city: 'Gurugram', state: 'Haryana', postalCode: '122002',
     });
 
-    const known = await s.call('POST', '/api/agent/customer', { headers: s.agent, body: { phone: '9876543210', address: 'New flat 9', city: 'Noida' } });
+    const known = await s.call('POST', '/api/agent/customer', { headers: s.agent, body: { phone: '9876543210', contact_number_ending: '3210', address: 'New flat 9', city: 'Noida' } });
     assert.equal(known.body.new_customer, false);
     assert.equal(known.body.message, 'The details are noted for the service team, who will check them with the customer before updating the record.');
     assert.doesNotMatch(known.body.message, /Aarav/, 'the name on record is not revealed to the caller');
@@ -1005,7 +1115,7 @@ test.describe('agent tools used during a call', () => {
     t.after(s.close);
     const noPhone = await s.call('POST', '/api/agent/customer', { headers: s.agent, body: { customer_name: 'Ravi' } });
     assert.deepEqual(noPhone.body, { saved: false, new_customer: null, message: 'A valid 10 digit Indian mobile number is needed.' });
-    const noName = await s.call('POST', '/api/agent/customer', { headers: s.agent, body: { phone: '9000000001' } });
+    const noName = await s.call('POST', '/api/agent/customer', { headers: s.agent, body: { phone: '9000000001', contact_number_ending: '0001' } });
     assert.equal(noName.status, 200);
     assert.equal(noName.body.message, "The customer's name is needed to save a new customer.");
     assert.equal(s.crm.savedCustomers.length, 0);
@@ -1083,7 +1193,9 @@ test.describe('Sarvam call-end webhook', () => {
     t.after(s.close);
     const callStart = new Date(s.clock.now).toISOString();
     s.clock.now += 60 * 1000;
-    await s.call('POST', '/api/agent/cases', { headers: s.agent, body: { issue_type: 'missing_parts', description: 'Drawer handles missing', order_id: 'TD-ORD-1001', phone: '9876543210' } });
+    await s.call('POST', '/api/agent/cases', {
+      headers: s.agent, body: { issue_type: 'missing_parts', description: 'Drawer handles missing', order_id: 'TD-ORD-1001', phone: '9876543210', contact_number_ending: '3210' },
+    });
 
     s.clock.now += 60 * 1000;
     const res = await s.call('POST', s.hookPath('/api/webhooks/sarvam'), {
@@ -1098,7 +1210,7 @@ test.describe('Sarvam call-end webhook', () => {
   test('a case from an earlier call does not stop a fallback for this one', async (t) => {
     const s = await startTestServer();
     t.after(s.close);
-    await s.call('POST', '/api/agent/cases', { headers: s.agent, body: { issue_type: 'general', description: 'Earlier call', phone: '9876543210' } });
+    await s.call('POST', '/api/agent/cases', { headers: s.agent, body: { issue_type: 'general', description: 'Earlier call', phone: '9876543210', contact_number_ending: '3210' } });
     s.clock.now += 3 * 60 * 60 * 1000;
     const res = await s.call('POST', s.hookPath('/api/webhooks/sarvam'), {
       body: { ...outbound, start_datetime: new Date(s.clock.now - 5 * 60 * 1000).toISOString(), final_agent_variables: { issue_type: 'damaged', issue_description: 'Door hinge broken', order_number: 'TD-ORD-1001' } },
@@ -1114,7 +1226,7 @@ test.describe('Sarvam call-end webhook', () => {
     s.clock.now += 60 * 1000;
     await s.call('POST', '/api/agent/orders', {
       headers: s.agent,
-      body: { customer_name: 'Aarav Sharma', phone: '9876543210', items: 'TD-STD-01 x 1', address: '12 MG Road', city: 'Delhi', postal_code: '110001' },
+      body: { customer_name: 'Aarav Sharma', phone: '9876543210', contact_number_ending: '3210', items: 'TD-STD-01 x 1', address: '12 MG Road', city: 'Delhi', postal_code: '110001' },
     });
     const res = await s.call('POST', s.hookPath('/api/webhooks/sarvam'), {
       body: { ...outbound, user_identifier: 'callback:+919876543210', start_datetime: callStart, output_agent_variables: { call_outcome: 'order_placed', placed_order_number: '120' } },
@@ -1133,7 +1245,7 @@ test.describe('Sarvam call-end webhook', () => {
     const callStart = new Date(s.clock.now).toISOString();
     await s.call('POST', '/api/agent/orders', {
       headers: s.agent,
-      body: { phone: '9876543210', items: 'TD-BKC-01', address: '12 MG Road', city: 'Delhi', postal_code: '110001' },
+      body: { phone: '9876543210', contact_number_ending: '3210', items: 'TD-BKC-01', address: '12 MG Road', city: 'Delhi', postal_code: '110001' },
     });
     await s.call('POST', s.hookPath('/api/webhooks/sarvam'), {
       body: { ...outbound, user_identifier: 'callback:+919876543210', start_datetime: callStart, output_agent_variables: { call_outcome: 'order_placed', placed_order_number: '999' } },
@@ -1146,8 +1258,9 @@ test.describe('Sarvam call-end webhook', () => {
     t.after(s.close);
     await s.call('POST', '/api/agent/orders', {
       headers: s.agent,
-      body: { phone: '9876543210', items: 'TD-BKC-01', address: '12 MG Road', city: 'Delhi', postal_code: '110001' },
+      body: { phone: '9876543210', contact_number_ending: '3210', items: 'TD-BKC-01', address: '12 MG Road', city: 'Delhi', postal_code: '110001' },
     });
+    assert.equal(s.crm.placedOrders.length, 1);
     s.clock.now += 3 * HOUR;
     const res = await s.call('POST', s.hookPath('/api/webhooks/sarvam'), {
       body: { ...outbound, start_datetime: new Date(s.clock.now - 5 * 60 * 1000).toISOString(), output_agent_variables: { placed_order_number: '120' } },

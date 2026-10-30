@@ -177,7 +177,9 @@ test('createServiceCase saves a classified phone case linked to the verified ord
     quantity: 1,
   });
 
-  assert.deepEqual(result, { created: true, caseId: 'Case-1', caseNumber: '00001100', serviceRoute: 'Internal', withinBusinessHours: true, orderVerified: true, orderLinked: true });
+  assert.deepEqual(result, {
+    created: true, caseId: 'Case-1', caseNumber: '00001100', serviceRoute: 'Internal', withinBusinessHours: true, contactNumberEnding: '0001', orderVerified: true, orderLinked: true,
+  });
   assert.equal(sf.log.creates.length, 1, 'no account or contact is created for a known customer');
   const { sobject, fields } = sf.log.creates[0];
   assert.equal(sobject, 'Case');
@@ -380,6 +382,31 @@ test('a caller on another number registers for the order\'s customer, with their
   assert.match(hindi.log.creates[0].fields.Description, /Contact for this request: रवि चौधरी, on/);
 });
 
+test('for the voice agent nothing is saved until the caller has confirmed the number by its last four digits', async () => {
+  const sf = fakeSalesforce({ queries: ORG });
+  const crm = createCrm({ salesforce: sf, businessHours: open });
+  // The order was confirmed with the number it was placed with; the caller wants to be reached on the number of the call.
+  const input = {
+    issueType: 'installation', description: 'Customer requested installation.', erpOrderId: 'TD-ORD-1001', orderPhone: '+919810000001',
+    phone: '+917845784578', callerPhone: '+917845784578', customerName: 'Ramesh Kumar', confirmNumber: true,
+  };
+  assert.deepEqual(await crm.createServiceCase(input), { created: false, numberToConfirm: { ending: '4578', source: 'call', confirmed: null } });
+  assert.deepEqual((await crm.createServiceCase({ ...input, numberEnding: '0001' })).numberToConfirm, { ending: '4578', source: 'call', confirmed: '0001' });
+  assert.deepEqual((await crm.createServiceCase({ ...input, phone: undefined, useDetailsOnFile: true })).numberToConfirm, { ending: '0001', source: 'file', confirmed: null });
+  assert.deepEqual((await crm.createServiceCase({ ...input, phone: '+919000000002' })).numberToConfirm, { ending: '0002', source: 'given', confirmed: null });
+  assert.equal(sf.log.creates.length, 0);
+
+  const result = await crm.createServiceCase({ ...input, numberEnding: '4578' });
+  assert.equal(result.contactNumberEnding, '4578');
+  assert.equal(sf.log.creates[0].fields.Customer_Mobile__c, '+917845784578');
+
+  // No customer is made for a new caller before the number is confirmed.
+  const fresh = fakeSalesforce({ queries: ORG });
+  const general = { issueType: 'general', description: 'x', phone: '+919000000001', customerName: 'Ravi Kumar', confirmNumber: true };
+  assert.equal((await createCrm({ salesforce: fresh, businessHours: open }).createServiceCase(general)).created, false);
+  assert.equal(fresh.log.creates.length, 0);
+});
+
 test('without a mobile given, the order\'s customer is reached on the number on file', async () => {
   const sf = fakeSalesforce({ queries: ORG });
   const input = { issueType: 'replacement', description: 'Need a new shelf', erpOrderId: 'TD-ORD-1001', invoiceNumber: 'INV-2001' };
@@ -397,7 +424,7 @@ test('without a mobile given, the order\'s customer is reached on the number on 
 test('a new caller is saved only under a full name, and a record saved without one takes the name given', async () => {
   const sf = fakeSalesforce({ queries: ORG });
   const crm = createCrm({ salesforce: sf, businessHours: open });
-  for (const customerName of [undefined, '', 'Ravi', 'Customer', 'Unknown Customer']) {
+  for (const customerName of [undefined, '', 'Ravi', 'Customer', 'Unknown Customer', 'अज्ञात ग्राहक', 'रमेश जी']) {
     const refused = await crm.createServiceCase({ issueType: 'escalation', description: 'Call me', phone: '+919000000001', customerName });
     assert.match(refused.error, /^No customer with a name is on record for this mobile number, so the full name, first and last, is needed\./, String(customerName));
   }
