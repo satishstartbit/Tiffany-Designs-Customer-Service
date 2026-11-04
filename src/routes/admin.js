@@ -1,9 +1,9 @@
 const express = require('express');
 
-// Data for the staff console (web/): read-only views, order edits, and product guides. It sits behind the internal key:
-// the console's own server calls it with the key, so no browser ever holds it. The console names the signed-in person
-// in X-Console-User, which goes into the order's or the guide's history.
-module.exports = function adminRouter({ consoleData, productGuides }) {
+// Data for the staff console (web/): read-only views, order and customer edits, and product guides. It sits behind the
+// internal key: the console's own server calls it with the key, so no browser ever holds it. The console names the
+// signed-in person in X-Console-User, which goes into the order's, the customer's or the guide's history.
+module.exports = function adminRouter({ consoleData, productGuides, customers }) {
   const router = express.Router();
   const editorOf = (req) => String(req.get('x-console-user') || '').replace(/[^\w@.+ -]/g, '').slice(0, 120) || 'The service console';
   const saved = (result, res) => {
@@ -54,6 +54,16 @@ module.exports = function adminRouter({ consoleData, productGuides }) {
   });
   router.get('/customers', send((req) => consoleData.listCustomers(pick(req, ['q', 'page', 'pageSize']))));
   router.get('/customers/:id', send((req) => consoleData.getCustomer(req.params.id)));
+  if (customers) {
+    router.get('/customers/:id/edit', send((req) => customers.getCustomerForEdit(req.params.id)));
+    router.patch('/customers/:id', async (req, res, next) => {
+      try {
+        return saved(await customers.updateCustomer(req.params.id, req.body, { editedBy: editorOf(req) }), res);
+      } catch (err) {
+        return next(err);
+      }
+    });
+  }
   router.get('/cases', send((req) => consoleData.listCases(pick(req, ['q', 'state', 'status', 'type', 'origin', 'page', 'pageSize']))));
   router.get('/cases/:id', send((req) => consoleData.getCase(req.params.id)));
   router.get('/field-service', send(() => consoleData.listFieldService()));

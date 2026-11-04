@@ -223,7 +223,8 @@ function toContactRow(r) {
   };
 }
 
-function createConsoleData({ salesforce, crm, scheduler, productCodePrefix = 'TD-', now = () => Date.now(), logger = console }) {
+// `customers` (src/crm/customers.js) lets the order edit form change the order's customer details too.
+function createConsoleData({ salesforce, crm, scheduler, customers, productCodePrefix = 'TD-', now = () => Date.now(), logger = console }) {
   let schemaCache = null;
 
   // The org's own rules for each editable Order field: type, length, whether it may be empty, allowed values.
@@ -326,6 +327,17 @@ function createConsoleData({ salesforce, crm, scheduler, productCodePrefix = 'TD
     return { ...pageOf(rows.map(toOrderRow), p), filters: { statuses: ORDER_STATUSES, deliveryStatuses: DELIVERY_STATUSES, sources: ORDER_SOURCES } };
   }
 
+  // The order's customer, as the voice agent takes it (crm getOrderContact): the contact who authorised the order,
+  // else the account's first contact with a number, else its first contact.
+  async function accountContact(accountId) {
+    if (!accountId) return null;
+    const contacts = await salesforce.query(
+      `SELECT Id, Name, MobilePhone, Phone, Email FROM Contact WHERE AccountId = ${quoted(accountId)} ORDER BY CreatedDate LIMIT 20`,
+    );
+    return contacts.find((c) => c.MobilePhone || c.Phone) || contacts[0] || null;
+  }
+  const orderCustomerId = async (row) => row.CustomerAuthorizedById || (await accountContact(row.AccountId))?.Id || null;
+
   async function getOrder(id) {
     if (!isId(id)) return null;
     const [row] = await salesforce.query(
@@ -335,13 +347,14 @@ function createConsoleData({ salesforce, crm, scheduler, productCodePrefix = 'TD
       + `FROM Order WHERE Id = ${quoted(id)} LIMIT 1`,
     );
     if (!row) return null;
-    const [items, cases, activities] = await Promise.all([
+    const [items, cases, activities, customer] = await Promise.all([
       salesforce.query(
         'SELECT Id, Product2Id, Product2.Name, Product2.ProductCode, Quantity, UnitPrice, TotalPrice, Description '
         + `FROM OrderItem WHERE OrderId = ${quoted(id)} ORDER BY CreatedDate`,
       ),
       salesforce.query(`SELECT ${CASE_LIST_FIELDS} FROM Case WHERE Order__c = ${quoted(id)} ORDER BY CreatedDate DESC LIMIT 20`),
       salesforce.query(`SELECT ${ACTIVITY_FIELDS} FROM Task WHERE WhatId = ${quoted(id)} ORDER BY CreatedDate DESC LIMIT 20`),
+      row.CustomerAuthorizedById ? { Id: row.CustomerAuthorizedById, ...row.CustomerAuthorizedBy } : accountContact(row.AccountId),
     ]);
     const address = (prefix) => [row[`${prefix}Street`], row[`${prefix}City`], row[`${prefix}State`], row[`${prefix}PostalCode`]].filter(Boolean).join(', ') || null;
     return {
@@ -350,12 +363,12 @@ function createConsoleData({ salesforce, crm, scheduler, productCodePrefix = 'TD
       fulfilment: row.Fulfilment_Type__c || null,
       shippingAddress: address('Shipping'),
       billingAddress: address('Billing'),
-      contact: row.CustomerAuthorizedById ? {
-        id: row.CustomerAuthorizedById,
-        name: row.CustomerAuthorizedBy?.Name || null,
-        mobile: row.CustomerAuthorizedBy?.MobilePhone || null,
-        phone: row.CustomerAuthorizedBy?.Phone || null,
-        email: row.CustomerAuthorizedBy?.Email || null,
+      contact: customer ? {
+        id: customer.Id,
+        name: customer.Name || null,
+        mobile: customer.MobilePhone || null,
+        phone: customer.Phone || null,
+        email: customer.Email || null,
       } : null,
       items: items.map((i) => ({
         id: i.Id,
@@ -376,21 +389,24 @@ function createConsoleData({ salesforce, crm, scheduler, productCodePrefix = 'TD
 
   async function editableOrder(id) {
     const [row] = await salesforce.query(
-      `SELECT Id, OrderNumber, Account.Name, CustomerAuthorizedById, ShippingCountryCode, ${EDIT_FIELDS.join(', ')} FROM Order WHERE Id = ${quoted(id)} LIMIT 1`,
+      `SELECT Id, OrderNumber, AccountId, Account.Name, CustomerAuthorizedById, ShippingCountryCode, ${EDIT_FIELDS.join(', ')} FROM Order WHERE Id = ${quoted(id)} LIMIT 1`,
     );
     return row || null;
   }
 
-  // The order's current values, the allowed choices and the limits, for the console's edit form.
+  // The order's current values, the allowed choices and the limits, for the console's edit form, with the same for
+  // the order's customer (null when the order has none).
   async function getOrderForEdit(id) {
     if (!isId(id)) return null;
     const [row, schema] = await Promise.all([editableOrder(id), orderSchema()]);
     if (!row) return null;
     const meta = (key) => schema.fields[ORDER_EDITS[key][0]];
+    const customerId = customers ? await orderCustomerId(row) : null;
     return {
       id: row.Id,
       orderNumber: row.OrderNumber,
       customerName: row.Account?.Name || null,
+      customer: customerId ? await customers.getCustomerForEdit(customerId) : null,
       values: Object.fromEntries(Object.entries(ORDER_EDITS).map(([key, [name]]) => [key, row[name] ?? null])),
       options: {
         statuses: meta('status').values,
@@ -424,15 +440,18 @@ function createConsoleData({ salesforce, crm, scheduler, productCodePrefix = 'TD
     return { value };
   }
 
-  // Saves what staff changed on an order. Only the fields listed in ORDER_EDITS are accepted, each value is checked
-  // against the org's own rules first, only real changes are sent, and a completed task on the order records who
-  // changed what (every console save reaches Salesforce as the integration user).
+  // Saves what staff changed on an order, and on its customer when `changes.customer` holds customer details
+  // (src/crm/customers.js). Only the fields listed in ORDER_EDITS are accepted, each value is checked against the org's
+  // own rules first (the customer's too, so a refused customer detail saves nothing), only real changes are sent, and a
+  // completed task on the order records who changed what (every console save reaches Salesforce as the integration user).
   async function updateOrder(id, changes, { editedBy = 'The service console' } = {}) {
     if (!isId(id)) return null;
     if (!changes || typeof changes !== 'object' || Array.isArray(changes)) {
       return { error: 'invalid', message: 'Send the changes as a JSON object.' };
     }
-    const unknown = Object.keys(changes).filter((k) => !Object.hasOwn(ORDER_EDITS, k));
+    const { customer: customerChanges, ...orderChanges } = changes;
+    const unknown = Object.keys(orderChanges).filter((k) => !Object.hasOwn(ORDER_EDITS, k));
+    if (customerChanges !== undefined && !customers) unknown.push('customer');
     if (unknown.length) return { error: 'invalid', field: unknown[0], message: `These cannot be changed here: ${unknown.join(', ')}.` };
 
     const [row, schema] = await Promise.all([editableOrder(id), orderSchema()]);
@@ -441,7 +460,7 @@ function createConsoleData({ salesforce, crm, scheduler, productCodePrefix = 'TD
 
     const fields = {};
     const changed = [];
-    for (const [key, raw] of Object.entries(changes)) {
+    for (const [key, raw] of Object.entries(orderChanges)) {
       if (raw === undefined) continue;
       const [name, label] = ORDER_EDITS[key];
       const checked = checkValue(key, raw, schema, row);
@@ -451,31 +470,52 @@ function createConsoleData({ salesforce, crm, scheduler, productCodePrefix = 'TD
       fields[name] = checked.value;
       changed.push({ field: key, label, from: before, to: checked.value });
     }
-    if (!changed.length) return { updated: false, changes: [], order: await getOrder(id) };
-    if (fields.ShippingStateCode && !row.ShippingCountryCode) fields.ShippingCountryCode = 'IN';
 
-    try {
-      await salesforce.update('Order', id, fields);
-    } catch (err) {
-      const refusal = salesforceRefusal(err);
-      if (refusal) return { error: 'rejected', ...refusal };
-      throw err;
+    // Customer fields are named customer.<field> in the form, so their messages land under the right field.
+    const asCustomer = (result) => ({ ...result, field: result.field ? `customer.${result.field}` : 'customer' });
+    let customerPlan = null;
+    if (customerChanges !== undefined) {
+      const customerId = await orderCustomerId(row);
+      customerPlan = customerId ? await customers.planChanges(customerId, customerChanges) : null;
+      if (!customerPlan) return { error: 'invalid', field: 'customer', message: 'This order has no customer record to change.' };
+      if (customerPlan.error) return asCustomer(customerPlan);
+    }
+    if (!changed.length && !customerPlan?.changed.length) return { updated: false, changes: [], order: await getOrder(id) };
+
+    if (changed.length) {
+      if (fields.ShippingStateCode && !row.ShippingCountryCode) fields.ShippingCountryCode = 'IN';
+      try {
+        await salesforce.update('Order', id, fields);
+      } catch (err) {
+        const refusal = salesforceRefusal(err);
+        if (refusal) return { error: 'rejected', ...refusal };
+        throw err;
+      }
+
+      const shown = (c, value) => {
+        if (value === null) return '(empty)';
+        const text = c.field === 'shippingState' ? stateName(value) : String(value);
+        return text.length > 200 ? `${text.slice(0, 200)}…` : text;
+      };
+      await salesforce.create('Task', Object.fromEntries(Object.entries({
+        WhatId: id,
+        WhoId: row.CustomerAuthorizedById,
+        Subject: 'Order edited in the service console',
+        Description: [`${editedBy} changed:`, ...changed.map((c) => `- ${c.label}: ${shown(c, c.from)} → ${shown(c, c.to)}`)].join('\n'),
+        Status: 'Completed',
+        Priority: 'Normal',
+        ActivityDate: todayInIst(now()).toISOString().slice(0, 10),
+      }).filter(([, v]) => v))).catch((err) => logger.error(`Order ${id} was saved, but its history note failed: ${err.message}`));
     }
 
-    const shown = (c, value) => {
-      if (value === null) return '(empty)';
-      const text = c.field === 'shippingState' ? stateName(value) : String(value);
-      return text.length > 200 ? `${text.slice(0, 200)}…` : text;
-    };
-    await salesforce.create('Task', Object.fromEntries(Object.entries({
-      WhatId: id,
-      WhoId: row.CustomerAuthorizedById,
-      Subject: 'Order edited in the service console',
-      Description: [`${editedBy} changed:`, ...changed.map((c) => `- ${c.label}: ${shown(c, c.from)} → ${shown(c, c.to)}`)].join('\n'),
-      Status: 'Completed',
-      Priority: 'Normal',
-      ActivityDate: todayInIst(now()).toISOString().slice(0, 10),
-    }).filter(([, v]) => v))).catch((err) => logger.error(`Order ${id} was saved, but its history note failed: ${err.message}`));
+    if (customerPlan?.changed.length) {
+      const saved = await customers.applyChanges(customerPlan, { editedBy, orderId: id });
+      if (saved.error) {
+        const message = changed.length ? `The order changes were saved, but not the customer details: ${saved.message}` : saved.message;
+        return asCustomer({ ...saved, message });
+      }
+      changed.push(...saved.changes.map((c) => ({ ...c, field: `customer.${c.field}` })));
+    }
 
     return { updated: true, changes: changed, order: await getOrder(id) };
   }

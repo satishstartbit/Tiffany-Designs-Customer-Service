@@ -3,6 +3,7 @@ const { salesforce, sfRequest } = require('./salesforce');
 const { createCrm } = require('./crm/crm');
 const { createConsoleData } = require('./crm/console');
 const { createProductGuides } = require('./crm/productGuides');
+const { createCustomerEdits } = require('./crm/customers');
 const { createDeliveredOrders } = require('./crm/deliveredOrders');
 const { createDeliveryCalls } = require('./deliveryCalls');
 const { createSarvamClient } = require('./sarvam');
@@ -64,7 +65,8 @@ function buildServer() {
     prefix: config.redis.prefix,
   });
 
-  const consoleData = createConsoleData({ salesforce, crm, scheduler, productCodePrefix: config.salesforce.productCodePrefix });
+  const customers = createCustomerEdits({ salesforce });
+  const consoleData = createConsoleData({ salesforce, crm, scheduler, customers, productCodePrefix: config.salesforce.productCodePrefix });
   const deliveryCalls = createDeliveryCalls({ orders: createDeliveredOrders({ salesforce }), crm, sarvam, scheduler, config });
 
   const { invoiceUploads: uploads } = config;
@@ -91,6 +93,7 @@ function buildServer() {
     deliveryCalls,
     invoices,
     productGuides: createProductGuides({ salesforce }),
+    customers,
     checkSalesforce: async () => {
       const limits = await sfRequest('/limits');
       return { dailyApiRequests: limits.DailyApiRequests };

@@ -1,21 +1,24 @@
+import Link from 'next/link';
 import { notFound } from 'next/navigation';
-import { LifeBuoy, Package } from 'lucide-react';
+import { CircleCheck, LifeBuoy, Package, Pencil } from 'lucide-react';
 import ActivityList from '@/components/ActivityList.js';
 import CaseTable from '@/components/CaseTable.js';
 import OrderTable from '@/components/OrderTable.js';
-import { Card, Empty, Fields, PageHeader, Problem, Stat } from '@/components/ui.js';
+import { Card, Empty, Fields, PageHeader, Problem, Stat, readParams } from '@/components/ui.js';
 import { loadAdmin } from '@/lib/api.js';
 import { date, money, number } from '@/lib/format.js';
 
 export const metadata = { title: 'Customer' };
 
-export default async function CustomerPage({ params }) {
+export default async function CustomerPage({ params, searchParams }) {
   const { id } = await params;
+  const { saved } = readParams(await searchParams, ['saved']);
   const { data: c, error } = await loadAdmin(`customers/${encodeURIComponent(id)}`);
   if (error) return <Problem message={error} />;
   if (!c) notFound();
   const spent = c.orders.reduce((sum, o) => sum + (o.total || 0), 0);
   const open = c.cases.filter((k) => !k.closed).length;
+  const savedCount = Number(saved);
 
   return (
     <>
@@ -24,7 +27,16 @@ export default async function CustomerPage({ params }) {
         eyebrow="Customer"
         title={c.name}
         description={[c.accountName !== c.name ? c.accountName : null, c.city, `customer since ${date(c.createdDate)}`].filter(Boolean).join(' · ')}
+        actions={<Link className="btn" href={`/customers/${c.id}/edit`}><Pencil aria-hidden="true" /> Edit customer</Link>}
       />
+      {saved !== '' && (
+        <div className="notice" role="status">
+          <CircleCheck aria-hidden="true" />
+          {savedCount > 0
+            ? `Saved ${savedCount} ${savedCount === 1 ? 'change' : 'changes'} to Salesforce. They are noted in the history below.`
+            : 'Nothing was changed.'}
+        </div>
+      )}
       <div className="stats" style={{ marginTop: 0 }}>
         <Stat icon={Package} label="Orders" value={number(c.orders.length)} hint={money(spent)} />
         <Stat icon={LifeBuoy} label="Cases" value={number(c.cases.length)} hint={`${open} open`} />
@@ -38,8 +50,8 @@ export default async function CustomerPage({ params }) {
           <Card title="Cases" flush>
             {c.cases.length ? <CaseTable cases={c.cases} showCustomer={false} /> : <Empty icon={LifeBuoy} title="No cases" />}
           </Card>
-          <Card title="Calls and emails" flush>
-            <ActivityList activities={c.activities} empty="No calls or emails with this customer" />
+          <Card title="History: calls, emails and edits" flush>
+            <ActivityList activities={c.activities} empty="No calls, emails or edits for this customer yet" />
           </Card>
         </div>
         <div className="grid" style={{ alignContent: 'start' }}>

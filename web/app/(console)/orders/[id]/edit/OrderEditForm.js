@@ -3,8 +3,11 @@
 import Link from 'next/link';
 import { useActionState } from 'react';
 import { Save } from 'lucide-react';
+import CustomerFields from '@/components/CustomerFields.js';
 import { Card, Problem } from '@/components/ui.js';
 import { saveOrder } from './actions.js';
+
+const asFormValues = (values) => Object.fromEntries(Object.entries(values).map(([k, v]) => [k, v ?? '']));
 
 // One labelled control; shows the server's message under the field it is about.
 function Field({ name, label, hint, error, children, wide = false }) {
@@ -20,7 +23,10 @@ function Field({ name, label, hint, error, children, wide = false }) {
 export default function OrderEditForm({ order }) {
   const [state, action, pending] = useActionState(saveOrder.bind(null, order.id), null);
   // After a refused save the form keeps what was typed; React resets the fields to these values.
-  const values = state?.values || Object.fromEntries(Object.entries(order.values).map(([k, v]) => [k, v ?? '']));
+  const values = state?.values || asFormValues(order.values);
+  const customerValues = state?.customer || (order.customer ? asFormValues(order.customer.values) : {});
+  // The server names a customer field customer.<field>.
+  const customerError = state?.field?.startsWith('customer.') ? { field: state.field.slice('customer.'.length), message: state.error } : null;
   const { options, maxLengths, required } = order;
   const errorFor = (name) => (state?.field === name ? state.error : null);
   const control = (name) => ({
@@ -80,6 +86,23 @@ export default function OrderEditForm({ order }) {
           </div>
         </Card>
       </div>
+
+      {order.customer ? (
+        <CustomerFields
+          customer={order.customer}
+          values={customerValues}
+          error={customerError}
+          prefix="customer."
+          title="Customer"
+          addressTitle="Customer address"
+          link
+          notes={false}
+        />
+      ) : (
+        <Card title="Customer">
+          <p className="hint">This order has no customer record, so there are no customer details to edit here.</p>
+        </Card>
+      )}
 
       <Card title="Ship to">
         <div className="form-grid four">

@@ -82,7 +82,7 @@ export default async function OrderPage({ params, searchParams }) {
         </div>
 
         <div className="grid" style={{ alignContent: 'start' }}>
-          <Card title="Customer">
+          <Card title="Customer" action={o.contact && <Link className="btn btn-ghost" href={`/customers/${o.contact.id}/edit`}>Edit</Link>}>
             {o.contact ? (
               <div className="grid" style={{ gap: 12 }}>
                 <div className="item-row">

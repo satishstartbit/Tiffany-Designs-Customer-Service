@@ -15,8 +15,9 @@ const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 
 // `invoices` ({ sender, reader, records, uploadLimiter }) turns on invoice upload links and the upload API.
 // `productGuides` (src/crm/productGuides.js) turns on product guides in the console and for the agent.
+// `customers` (src/crm/customers.js) turns on customer edits in the console.
 function createApp({
-  crm, sarvam, scheduler, config, checkSalesforce, limiter, webCallLimiter, consoleData, deliveryCalls, invoices, productGuides,
+  crm, sarvam, scheduler, config, checkSalesforce, limiter, webCallLimiter, consoleData, deliveryCalls, invoices, productGuides, customers,
   now = () => Date.now(), logger = console,
 }) {
   const app = express();
@@ -85,7 +86,7 @@ function createApp({
     }));
   }
   app.use('/api/webhooks', webhookToken, webhooksRouter({ crm, now, logger }));
-  if (consoleData) app.use('/api/admin', internalKey, adminRouter({ consoleData, productGuides }));
+  if (consoleData) app.use('/api/admin', internalKey, adminRouter({ consoleData, productGuides, customers }));
   if (deliveryCalls) app.use('/cron', cronRouter({ deliveryCalls, now }));
   app.use('/api/sarvam', webCallsRouter({
     sarvam,

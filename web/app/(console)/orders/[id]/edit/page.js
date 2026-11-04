@@ -17,7 +17,7 @@ export default async function EditOrderPage({ params }) {
         back={{ href: `/orders/${id}`, label: 'Back to the order' }}
         eyebrow={`Edit order #${data.orderNumber}`}
         title={data.values.erpOrderId || `#${data.orderNumber}`}
-        description={`${data.customerName ? `${data.customerName}. ` : ''}Changes are saved straight to Salesforce and noted in the order's history with your name.`}
+        description={`${data.customerName ? `${data.customerName}. ` : ''}Changes to the order and its customer are saved straight to Salesforce and noted in their history with your name.`}
       />
       <OrderEditForm order={data} />
     </>

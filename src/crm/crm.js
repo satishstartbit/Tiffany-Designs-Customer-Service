@@ -178,12 +178,13 @@ function orderNumberOf(reference) {
   return digits && digits.length <= 10 ? digits.padStart(8, '0') : null;
 }
 
-// Salesforce's state picklist entries that belong to India (the org uses state and country picklists).
-function indianStatesOf(described) {
+// Salesforce's state picklist entries that belong to India (the org uses state and country picklists). `address` is
+// the address field's prefix: Shipping on an order, Mailing on a contact.
+function indianStatesOf(described, address = 'Shipping') {
   const field = (n) => described.fields.find((f) => f.name === n)?.picklistValues || [];
-  const india = field('ShippingCountryCode').findIndex((c) => c.value === 'IN');
+  const india = field(`${address}CountryCode`).findIndex((c) => c.value === 'IN');
   if (india < 0) return [];
-  return field('ShippingStateCode')
+  return field(`${address}StateCode`)
     .filter((state) => {
       const bits = state.validFor ? Buffer.from(state.validFor, 'base64') : null;
       return state.active && bits && (bits[india >> 3] & (0x80 >> (india % 8)));

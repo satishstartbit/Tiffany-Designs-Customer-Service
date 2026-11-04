@@ -351,7 +351,7 @@ function createFakeSarvam({ canStartCalls = true, canStartWebCalls = true } = {}
 
 // `crm` replaces the in-memory fake, for example with the real one over a fake Salesforce.
 async function startTestServer({
-  nowMs = Date.parse('2026-10-14T06:30:00Z'), config = testConfig(), instantCalls = true, webCalls = true, consoleData, crm: realCrm, invoices,
+  nowMs = Date.parse('2026-10-14T06:30:00Z'), config = testConfig(), instantCalls = true, webCalls = true, consoleData, customers, crm: realCrm, invoices,
 } = {}) {
   const clock = { now: nowMs };
   const now = () => clock.now;
@@ -372,6 +372,7 @@ async function startTestServer({
     now,
     logger,
     consoleData,
+    customers,
     invoices: typeof invoices === 'function' ? invoices({ now, crm }) : invoices,
     checkSalesforce: async () => ({ dailyApiRequests: { Max: 15000, Remaining: 14999 } }),
   });
