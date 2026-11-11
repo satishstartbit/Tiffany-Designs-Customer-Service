@@ -875,7 +875,11 @@ function createCrm({
         || (isMobile(orderContact?.mobile) || isMobile(orderContact?.phone) ? orderContact : null);
       customer = { id: (reached || match.byPhone || match.byName)?.id || orderContact?.id || null, accountId: order.accountId };
       if (!reached) {
-        const person = fullName(input.customerName) || fullName((await findContactByPhone(mobile))?.name);
+        // The person to ask for: the full name given, else whoever the number is registered to, else the caller, when
+        // the number of the call is on this order's customer record (the caller is then the customer, ringing about
+        // their own order and giving another number to be reached on).
+        const callerOnOrder = input.callerPhone && match.contacts.find((c) => [c.mobile, c.phone].some((p) => p && lastTenDigits(p) === lastTenDigits(input.callerPhone)));
+        const person = fullName(input.customerName) || fullName((await findContactByPhone(mobile))?.name) || fullName(callerOnOrder?.name);
         if (!person) return { created: false, error: NAME_NEEDED.order };
         contactNote = `Contact for this request: ${person}, on ${mobile}, a number that is not on the customer's record.`;
       }

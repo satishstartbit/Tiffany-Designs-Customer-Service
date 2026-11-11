@@ -197,6 +197,31 @@ test('register_service_request asks before a second request of the same kind', a
   assert.equal(other.body.created, true, 'a different kind is registered at once');
 });
 
+// On 6 and 10 November calls, new_request and reschedule were refused again and again although the agent sent them as
+// true: the voice platform can send a yes as text ("True"), and only true and "true" were read as yes.
+test('a yes the voice platform sends as text in any case still counts', async (t) => {
+  const s = await startTestServer();
+  t.after(s.close);
+  s.crm.openRequests.push({ orderId: '801A', caseNumber: '00001087', kind: 'installation', createdDate: '2026-10-12T05:00:00.000Z' });
+  const body = { order_id: 'TD-ORD-1001', phone: '9876543210', contact_number_ending: '3210', preferred_date: '2026-10-17', preferred_time: 'morning' };
+  for (const yes of ['True', 'TRUE', 'yes', '1']) {
+    const created = s.crm.created.length;
+    const second = await s.call('POST', '/api/agent/installation', { body: { ...body, new_request: yes }, headers: s.agent });
+    assert.equal(second.body.created, true, `new_request ${yes}`);
+    assert.equal(s.crm.created.length, created + 1);
+  }
+  const moved = await s.call('POST', '/api/agent/installation', { body: { ...body, reschedule: 'True' }, headers: s.agent });
+  assert.equal(moved.body.created, true, 'reschedule "True"');
+  const no = await s.call('POST', '/api/agent/installation', { body: { ...body, new_request: 'False' }, headers: s.agent });
+  assert.equal(no.body.existing_request, true, '"False" is not a yes');
+  const byCall = await s.call('POST', '/api/agent/orders', {
+    headers: s.agent,
+    body: { use_calling_number: 'True', caller_phone: '+919820011111', contact_number_ending: '1111', customer_name: 'Meera Iyer', items: 'TD-STD-01 x 1', address: '4 MI Road', city: 'Jaipur', postal_code: '302012' },
+  });
+  assert.equal(byCall.body.created, true);
+  assert.equal(s.crm.placedOrders.at(-1).input.phone, '+919820011111', 'the number of the call, from use_calling_number "True"');
+});
+
 // ---------- The call-end webhook ----------
 
 test('the language the caller chose is saved on their contact and noted on the call log', async (t) => {

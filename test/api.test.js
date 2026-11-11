@@ -741,7 +741,7 @@ test.describe('agent tools used during a call', () => {
     const firstNameOnly = await s.call('POST', '/api/agent/customer-lookup', { headers: s.agent, body: { customer_name: 'Aarav', postal_code: '110001' } });
     assert.match(firstNameOnly.body.message, /first and last name/);
     const nothing = await s.call('POST', '/api/agent/customer-lookup', { headers: s.agent, body: {} });
-    assert.match(nothing.body.message, /^The number of this call is not known, so do not say or guess any digits of it\..*the first and last name with the six digit PIN code finds the customer instead\.$/);
+    assert.match(nothing.body.message, /^The number of this call is not known, so no customer was looked up\. Carry on with what the customer asked, and do not say or guess any digits of the number\..*first and last name with the six digit PIN code/);
   });
 
   test('lookups use the number of the call when the agent leaves phone empty, and a number the agent passes never confirms an order', async (t) => {
@@ -779,7 +779,7 @@ test.describe('agent tools used during a call', () => {
     for (const [path, body] of [['customer-lookup', {}], ['order-lookup', {}], ['case-status', {}], ['history', {}]]) {
       const noNumber = await call(path, body);
       assert.equal(noNumber.found, false, path);
-      assert.match(noNumber.message, /do not say or guess any digits of it|registered mobile number is needed/, path);
+      assert.match(noNumber.message, /do not say or guess any digits|registered mobile number is needed/, path);
     }
     const status = await call('case-status', { caller_phone: AARAV });
     assert.equal(status.found, true, "the caller's requests by the number of the call");

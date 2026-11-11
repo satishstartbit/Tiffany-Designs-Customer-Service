@@ -125,7 +125,8 @@ function namesOf(body) {
 const anyNameMatches = (names, recorded) => names.some((n) => namesMatch(n, recorded));
 
 const capitalized = (text) => text.charAt(0).toUpperCase() + text.slice(1);
-const isTrue = (value) => value === true || value === 'true';
+// A yes or no the agent sends: true as JSON, or as text in any case (the voice platform can send "True").
+const isTrue = (value) => value === true || /^(true|yes|1)$/i.test(String(value ?? '').trim());
 
 // "302021" as "3 0 2 0 2 1", so the voice reads digits rather than a large number.
 const spokenDigits = (value) => String(value || '').replace(/\D/g, '').split('').join(' ');
@@ -383,9 +384,9 @@ module.exports = function agentToolsRouter({
       // The last four digits of the number the customer agreed to; nothing is saved on another number.
       numberEnding: body.contact_number_ending,
       confirmNumber: true,
-      useDetailsOnFile: body.use_details_on_file === true || body.use_details_on_file === 'true',
-      newRequest: body.new_request === true || body.new_request === 'true',
-      atDeliveryAddress: body.at_delivery_address === true || body.at_delivery_address === 'true',
+      useDetailsOnFile: isTrue(body.use_details_on_file),
+      newRequest: isTrue(body.new_request),
+      atDeliveryAddress: isTrue(body.at_delivery_address),
     };
   }
 
@@ -449,9 +450,12 @@ module.exports = function agentToolsRouter({
       }
       contact = match.contact;
     } else {
+      // Nothing to look up yet: the agent carries on with what the customer asked rather than stopping to ask.
       return res.json({
         found: false,
-        message: `${NUMBER_OF_CALL_UNKNOWN} When the customer does not know the registered number, the first and last name with the six digit PIN code finds the customer instead.`,
+        message: 'The number of this call is not known, so no customer was looked up. Carry on with what the customer asked, and do not '
+          + 'say or guess any digits of the number. Only when the concern needs the customer record, ask for the 10 digit mobile number, '
+          + 'or for the first and last name with the six digit PIN code, and call this tool again with it.',
       });
     }
 
@@ -989,7 +993,7 @@ module.exports = function agentToolsRouter({
     if (!slot.ok) return refused(res, slot.message);
     if (chosenPhone(body).unknown) return refused(res, CALLING_NUMBER_UNKNOWN);
 
-    const reschedule = body.reschedule === true || body.reschedule === 'true';
+    const reschedule = isTrue(body.reschedule);
     const result = await crm.createServiceCase(caseInput(
       {
         description: reschedule

@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from 'react';
 import { X } from 'lucide-react';
 import { AGENT, AGENT_NAME } from '@/lib/agent.js';
 import { callerPhone, withCallerPhone } from '@/lib/caller.js';
+import { CHAT_OPEN_EVENT } from '@/lib/chat.js';
 import { SUPPORT_PHONE } from '@/lib/contact.js';
 
 // The widget titles its panel with its maker's name and has no setting for it, so the title is replaced with the
@@ -84,7 +85,26 @@ const CALLER_STYLE = `
 .tdc-caller p { margin: 0; color: #6b7280; font-size: 12px; line-height: 1.4; }
 .tdc-caller p.tdc-error { color: #b3261e; font-weight: 500; }
 button[data-needs-phone] { opacity: 0.5 !important; cursor: not-allowed !important; }
+.tdc-chat { box-sizing: border-box; display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; height: 40px;
+  margin: 10px 0 0; border: 1px solid #6e2a24; border-radius: 9999px; background: #ffffff; color: #6e2a24; font: inherit;
+  font-size: 14px; font-weight: 600; cursor: pointer; }
+.tdc-chat:hover { background: #f5e9e6; }
+.tdc-chat:focus-visible { outline: none; box-shadow: 0 0 0 3px rgba(110, 42, 36, 0.24); }
+.tdc-chat[hidden] { display: none; }
 `;
+
+const CHAT_ICON = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+  + 'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/></svg>';
+
+// The chat option in the widget's panel, under its call button: it opens the chat panel with the number typed above.
+function createChatButton(onClick) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'tdc-chat';
+  button.innerHTML = `${CHAT_ICON}<span>Start chat</span>`;
+  button.addEventListener('click', onClick);
+  return button;
+}
 
 // The mobile number field inside the widget's panel, above its call button. Made once and moved back in whenever the
 // panel is opened again, so what the customer typed stays.
@@ -120,8 +140,9 @@ function createCallerField({ initial, onInput, onEnter }) {
 
 // The voice call widget (bottom right) for customers. Its panel asks for the customer's mobile number above the call
 // button, and a call starts only with a valid one: the number goes into the call so the agent can find their orders.
-// A short note says what is happening while a call starts, and what to do when it cannot.
-export default function VoiceAgent() {
+// A short note says what is happening while a call starts, and what to do when it cannot. With `chat`, the panel also
+// offers Start chat under the call button, which opens the chat panel (ChatAgent) with the number typed above.
+export default function VoiceAgent({ chat = false }) {
   const [server, setServer] = useState('');
   const [userId, setUserId] = useState('');
   const [note, setNote] = useState({ text: '', problem: false });
@@ -214,6 +235,9 @@ export default function VoiceAgent() {
       },
       onEnter: () => callButton()?.click(),
     });
+    const chatButton = chat
+      ? createChatButton(() => window.dispatchEvent(new CustomEvent(CHAT_OPEN_EVENT, { detail: { phone: field.input.value, start: true } })))
+      : null;
 
     // Runs before the widget's own click handler (which listens further in): no valid number, no call.
     const guard = (event) => {
@@ -234,6 +258,10 @@ export default function VoiceAgent() {
       field.block.hidden = calling;
       button.toggleAttribute('data-needs-phone', !calling && !callerRef.current);
       if (field.block.nextElementSibling !== button) button.before(field.block);
+      if (chatButton) {
+        chatButton.hidden = calling;
+        if (button.nextElementSibling !== chatButton) button.after(chatButton);
+      }
     };
 
     const attach = () => {
@@ -254,7 +282,13 @@ export default function VoiceAgent() {
       observer?.disconnect();
       root?.removeEventListener('click', guard, true);
     };
-  }, [userId]);
+  }, [userId, chat]);
+
+  // The chat buttons read this, so no chat starts during a call.
+  useEffect(() => {
+    document.body.dataset.voice = panel;
+    return () => { delete document.body.dataset.voice; };
+  }, [panel]);
 
   return (
     <>

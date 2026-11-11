@@ -262,7 +262,7 @@ test('the voice agent is on the public customer page, not in the staff console',
   const read = (...parts) => fs.readFileSync(path.join(WEB, 'app', ...parts), 'utf8');
   assert.doesNotMatch(read('(console)', 'layout.js'), /VoiceAgent/, 'the console has no call widget');
   const support = read('support', 'page.js');
-  assert.match(support, /<VoiceAgent \/>/);
+  assert.match(support, /<VoiceAgent chat=\{chat\} \/>/);
   assert.match(support, /<StartCallButton/);
   assert.doesNotMatch(support, /requireSession|loadAdmin|sendAdmin/, 'the customer page needs no sign-in and reads no staff data');
   assert.match(read('call', 'page.js'), /permanentRedirect\('\/support'\)/, 'the old call page link still works');

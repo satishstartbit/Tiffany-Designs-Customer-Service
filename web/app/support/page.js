@@ -5,10 +5,13 @@ import {
   Smartphone, Sofa, TriangleAlert, Wrench,
 } from 'lucide-react';
 import BrandMark from '@/components/BrandMark.js';
+import ChatAgent from '@/components/ChatAgent.js';
 import { AGENT_NAME } from '@/lib/agent.js';
 import StartCallButton from '@/components/StartCallButton.js';
+import StartChatButton from '@/components/StartChatButton.js';
 import VoiceAgent from '@/components/VoiceAgent.js';
 import { loadSupportHours } from '@/lib/api.js';
+import { supportChatOn } from '@/lib/chat.js';
 import { SUPPORT_EMAIL, SUPPORT_PHONE, telLink } from '@/lib/contact.js';
 import { dateTime, minutesOfDay, time } from '@/lib/format.js';
 
@@ -17,14 +20,14 @@ export const metadata = {
   description: 'Talk to the Tiffany Designs AI service assistant from your browser: order status, installation, damaged or missing parts, replacements and new orders.',
 };
 
-const HELP = [
+const help = (chat) => [
   [PackageSearch, 'Track your order', 'Delivery status and dates, from your order id, order number or invoice number.'],
   [CalendarCheck, 'Book installation', 'Get a technician visit booked for your new furniture.'],
   [TriangleAlert, 'Report a problem', 'Damaged, defective, missing or wrong parts, registered for our service team.'],
   [Replace, 'Replacements and returns', 'Ask for a replacement part or a return.'],
   [ClipboardList, 'Check a request', 'The status of a request you already made, and any technician visit.'],
   [Sofa, 'Find furniture', 'Ask about our study tables, wardrobes, beds, bookcases and cabinets, and their prices.'],
-  [ShoppingBag, 'Place an order', 'Order by voice; our sales team confirms the details with you.'],
+  [ShoppingBag, 'Place an order', `Order by voice${chat ? ' or chat' : ''}; our sales team confirms the details with you.`],
   [PhoneCall, 'Ask for a call back', 'Someone from our service team calls you back.'],
 ];
 
@@ -34,11 +37,12 @@ const HANDY = [
   [MapPin, 'Your delivery PIN code', 'So the right team visits you.'],
 ];
 
-// Public: no sign-in. Customers talk to the AI voice agent from here.
+// Public: no sign-in. Customers talk to the AI voice agent from here, and chat with it when SUPPORT_CHAT is on.
 export default async function SupportPage() {
   await connection();
   const hours = await loadSupportHours();
   const openDays = hours?.weekly?.filter((d) => d.window) || [];
+  const chat = supportChatOn(process.env);
 
   return (
     <div className="site">
@@ -68,15 +72,16 @@ export default async function SupportPage() {
             <div className="eyebrow">Customer care</div>
             <h1>Talk to the {AGENT_NAME}</h1>
             <p>
-              Track an order, book installation, report a damaged or missing part, or order furniture, by voice, right here in your browser.
-              No app to install and no waiting on hold.
+              Track an order, book installation, report a damaged or missing part, or order furniture, by voice{chat ? ' or chat' : ''}, right
+              here in your browser. No app to install and no waiting on hold.
             </p>
             <div className="hero-actions">
               <StartCallButton />
+              {chat && <StartChatButton />}
               {/* <a className="btn btn-outline" href={telLink(SUPPORT_PHONE)}><Phone aria-hidden="true" /> Call {SUPPORT_PHONE}</a> */}
             </div>
             <p className="small muted" style={{ marginTop: 14 }}>
-              The {AGENT_NAME} answers any time. Requests registered on the call go straight to our service team.
+              The {AGENT_NAME} answers any time. Requests registered on the call{chat ? ' or in the chat' : ''} go straight to our service team.
             </p>
           </div>
           <div className="call-art" aria-hidden="true">
@@ -93,7 +98,7 @@ export default async function SupportPage() {
         <section className="site-section" id="help">
           <h2 className="site-title">How we can help</h2>
           <div className="help-grid">
-            {HELP.map(([Icon, title, text]) => (
+            {help(chat).map(([Icon, title, text]) => (
               <div className="help-card" key={title}>
                 <Icon aria-hidden="true" />
                 <strong>{title}</strong>
@@ -105,7 +110,7 @@ export default async function SupportPage() {
 
         <section className="site-band" id="before">
           <div className="site-band-inner">
-            <h2 className="site-title">Before you call, keep these handy</h2>
+            <h2 className="site-title">Before you call{chat ? ' or chat' : ''}, keep these handy</h2>
             <div className="handy-grid">
               {HANDY.map(([Icon, title, text]) => (
                 <div className="promise" key={title}>
@@ -116,7 +121,7 @@ export default async function SupportPage() {
             </div>
             <div className="safety">
               <ShieldCheck aria-hidden="true" />
-              <span>We never ask for card, UPI, bank or OTP details on a call. Do not share them with anyone who asks.</span>
+              <span>We never ask for card, UPI, bank or OTP details on a call{chat ? ' or in a chat' : ''}. Do not share them with anyone who asks.</span>
             </div>
           </div>
         </section>
@@ -128,8 +133,14 @@ export default async function SupportPage() {
             <li><strong>Allow the microphone</strong><span>Your browser asks once. Use a quiet place and your phone or computer&apos;s microphone.</span></li>
             <li><strong>Speak naturally</strong><span>Tell the assistant what you need. You get a request or order number before the call ends.</span></li>
           </ol>
-          <div style={{ textAlign: 'center', marginTop: 28 }}>
+          {chat && (
+            <p className="muted" style={{ textAlign: 'center', marginTop: 20 }}>
+              Prefer typing? Press Chat with us, enter your mobile number and type what you need: the same assistant answers in the chat.
+            </p>
+          )}
+          <div className="hero-actions" style={{ justifyContent: 'center', marginTop: 28 }}>
             <StartCallButton />
+            {chat && <StartChatButton />}
           </div>
         </section>
 
@@ -182,7 +193,8 @@ export default async function SupportPage() {
         </div>
       </footer>
 
-      <VoiceAgent />
+      <VoiceAgent chat={chat} />
+      {chat && <ChatAgent />}
     </div>
   );
 }

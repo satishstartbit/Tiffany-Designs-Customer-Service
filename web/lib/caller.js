@@ -1,4 +1,5 @@
-// The mobile number a customer types above the call widget, carried into the call as the agent's customer_phone.
+// The mobile number a customer types above the call widget or in the chat panel, carried into the call or chat as the
+// agent's customer_phone.
 
 // "98765 43210", "+91 98765 43210" or "098765 43210" -> "+919876543210"; null for anything else.
 export function callerPhone(value) {
@@ -17,15 +18,19 @@ export function openingLine(name = null) {
   return `नमस्ते${name ? ` ${name} जी` : ''}, टिफ़नी डिज़ाइन्स में आपका स्वागत है। बताइए, मैं आपकी क्या मदद करूँ?`;
 }
 
-// The message as the widget would send it, with customer_phone, the welcome as opening_line, and customer_name when
-// the number belongs to a customer, added when this is the call-start message.
+// The agent variables a website call or chat starts with: customer_phone, the welcome as opening_line, and
+// customer_name when the number belongs to a customer.
+export function callerVariables(phone, name = null) {
+  return { customer_phone: phone, opening_line: openingLine(name), ...(name ? { customer_name: name } : {}) };
+}
+
+// The message as the widget would send it, with the caller variables added when this is the call-start message.
 export function withCallerPhone(data, phone, name = null) {
   if (!phone || typeof data !== 'string' || !data.includes(CALL_START)) return data;
   try {
     const message = JSON.parse(data);
     if (message.type !== CALL_START) return data;
-    const known = { customer_phone: phone, opening_line: openingLine(name), ...(name ? { customer_name: name } : {}) };
-    return JSON.stringify({ ...message, agent_variables: { ...message.agent_variables, ...known } });
+    return JSON.stringify({ ...message, agent_variables: { ...message.agent_variables, ...callerVariables(phone, name) } });
   } catch {
     return data;
   }

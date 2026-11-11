@@ -380,6 +380,14 @@ test('a caller on another number registers for the order\'s customer, with their
   const hindi = fakeSalesforce({ queries: ORG });
   await createCrm({ salesforce: hindi, businessHours: open }).createServiceCase({ ...input, customerName: 'रवि चौधरी' });
   assert.match(hindi.log.creates[0].fields.Description, /Contact for this request: रवि चौधरी, on/);
+
+  // The customer rings from the number on the order and asks to be reached on another: the caller is the person to ask
+  // for, so a first name alone is enough and the caller's full name on record is used (a 10 November call was asked
+  // for the name the greeting had just used).
+  const own = fakeSalesforce({ queries: ORG });
+  const byCaller = await createCrm({ salesforce: own, businessHours: open }).createServiceCase({ ...input, orderPhone: undefined, callerPhone: '+919810000001', customerName: 'Aarav' });
+  assert.equal(byCaller.created, true);
+  assert.match(own.log.creates[0].fields.Description, /Contact for this request: Aarav Sharma, on \+917845784578/);
 });
 
 test('for the voice agent nothing is saved until the caller has confirmed the number by its last four digits', async () => {

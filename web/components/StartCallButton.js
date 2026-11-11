@@ -2,16 +2,26 @@
 
 import { useState } from 'react';
 import { Mic } from 'lucide-react';
+import { CHAT_CLOSE_EVENT } from '@/lib/chat.js';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // Starts a call from anywhere on the page through the voice widget (bottom right). A closed widget is opened first,
 // with the cursor in the mobile number field of its panel, so the customer gives the number and then presses Start
-// call; an open one starts the call at once (the widget refuses without a valid number).
+// call; an open one starts the call at once (the widget refuses without a valid number). An open chat panel with no
+// chat running steps aside for the widget; a running chat has to end first.
 export default function StartCallButton({ className = 'btn', children = 'Start a voice call' }) {
   const [waiting, setWaiting] = useState('');
 
   async function start() {
+    if (document.body.dataset.chat === 'live') {
+      setWaiting('Please end the chat first, then start a voice call.');
+      return;
+    }
+    if (document.body.dataset.chat) {
+      window.dispatchEvent(new CustomEvent(CHAT_CLOSE_EVENT));
+      await sleep(50);
+    }
     const root = document.querySelector('sarvam-widget')?.shadowRoot;
     const buttons = () => [...(root?.querySelectorAll('button') || [])];
     const find = (pattern) => buttons().find((b) => pattern.test(b.textContent || ''));
