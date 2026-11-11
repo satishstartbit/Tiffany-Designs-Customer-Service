@@ -404,7 +404,7 @@ test.describe('agent tools used during a call', () => {
       customer_phone: '+919876543210',
       customer_name: 'Aarav',
       opening_line: 'नमस्ते Aarav जी, टिफ़नी डिज़ाइन्स में आपका स्वागत है। बताइए, मैं आपकी क्या मदद करूँ?',
-      caller_details: 'The number for this call, ending 3 2 1 0, is registered to Aarav Sharma. Recent orders: TD-ORD-1001, delivered. '
+      caller_details: 'The number for this call, ending 3 2 1 0, is registered to Aarav Sharma. Recent orders: TD-ORD-1001 for Demo 3-Door Wardrobe, delivered. '
         + 'Open requests: 1063 for Installation, Appointment Scheduled.',
       known_customer: true,
     });
@@ -442,9 +442,9 @@ test.describe('agent tools used during a call', () => {
     const start = (body) => s.call('POST', '/api/agent/call-start', { body, headers: s.agent }).then((r) => r.body);
     const defaults = { customer_phone: '', customer_name: '', call_reason: 'inbound', opening_line: 'नमस्ते, टिफ़नी डिज़ाइन्स में आपका स्वागत है। बताइए, मैं आपकी क्या मदद करूँ?' };
     const slow = (fn, ms) => (...args) => new Promise((resolve, reject) => setTimeout(() => fn(...args).then(resolve, reject), ms));
-    const { findContactByPhone, findRecentOrdersForAccount } = s.crm;
+    const { findContactByPhone, findRecentOrdersForAccounts } = s.crm;
 
-    s.crm.findRecentOrdersForAccount = slow(findRecentOrdersForAccount, 400);
+    s.crm.findRecentOrdersForAccounts = slow(findRecentOrdersForAccounts, 400);
     let started = Date.now();
     const lateRecords = await start({ ...defaults, caller_phone: '09876543210' });
     assert.ok(Date.now() - started < 350, 'answered within the budget');
@@ -452,7 +452,7 @@ test.describe('agent tools used during a call', () => {
     assert.match(lateRecords.opening_line, /^नमस्ते Aarav जी/, 'the name came in time, so the greeting has it');
     assert.equal(lateRecords.caller_details, '', 'without the orders and requests, the agent looks the caller up on its first reply');
 
-    s.crm.findRecentOrdersForAccount = findRecentOrdersForAccount;
+    s.crm.findRecentOrdersForAccounts = findRecentOrdersForAccounts;
     s.crm.findContactByPhone = slow(findContactByPhone, 400);
     started = Date.now();
     const lateContact = await start({ ...defaults, caller_phone: '09876543210' });
@@ -473,7 +473,7 @@ test.describe('agent tools used during a call', () => {
     assert.equal(res.body.first_name, 'Aarav');
     assert.equal(res.body.open_requests, 1);
     assert.equal(res.body.message,
-      'Customer Aarav Sharma found; first name Aarav. Recent orders: TD-ORD-1001, delivered. Open requests: 1063 for Installation, Appointment Scheduled.');
+      'Customer Aarav Sharma found; first name Aarav. Recent orders: TD-ORD-1001 for Demo 3-Door Wardrobe, delivered. Open requests: 1063 for Installation, Appointment Scheduled.');
     const unknown = await s.call('POST', '/api/agent/customer-lookup', { body: { phone: '9000000000' }, headers: s.agent });
     assert.match(unknown.body.message, /^No customer record matches this number\. Carry on without saying so/);
   });
@@ -525,7 +525,7 @@ test.describe('agent tools used during a call', () => {
     const AARAV = '9876543210';
     const MEERA = '9820011111';
 
-    const byId = await lookup({ order_id: 'TD-ORD-1001', phone: AARAV });
+    const byId = await lookup({ order_id: 'TD-ORD-1001', caller_phone: AARAV });
     assert.equal(byId.found, true);
     assert.equal(byId.number_confirmed, true);
     assert.equal(byId.order_phone, '+919876543210', 'saved for the other tools');
@@ -535,19 +535,19 @@ test.describe('agent tools used during a call', () => {
 
     assert.equal((await lookup({ order_id: 'td ord 1001', caller_phone: '+919876543210' })).order_id, 'TD-ORD-1001', 'spoken forms of the id work, and the number of the call confirms it');
 
-    const byInvoice = await lookup({ invoice_number: 'INV-1111', phone: MEERA });
+    const byInvoice = await lookup({ invoice_number: 'INV-1111', caller_phone: MEERA });
     assert.equal(byInvoice.order_id, 'TD-ORD-1111');
     assert.equal(byInvoice.message, 'Order TD-ORD-1111 for Demo Bookcase is processing.');
-    assert.equal((await lookup({ order_id: 'INV-2001', phone: AARAV })).order_id, 'TD-ORD-1001', 'an invoice number said as the order id is read as the invoice');
+    assert.equal((await lookup({ order_id: 'INV-2001', caller_phone: AARAV })).order_id, 'TD-ORD-1001', 'an invoice number said as the order id is read as the invoice');
 
     for (const said of ['ORD-00000122', '122', 'order number 122', '00000122']) {
-      const phoneOrder = await lookup({ order_number: said, phone: MEERA });
+      const phoneOrder = await lookup({ order_number: said, caller_phone: MEERA });
       assert.equal(phoneOrder.found, true, said);
       assert.equal(phoneOrder.order_id, null);
       assert.equal(phoneOrder.order_number, '00000122');
       assert.equal(phoneOrder.message, 'Order 122 for Demo Kids Bed is being processed.');
     }
-    assert.equal((await lookup({ order_id: '122', phone: MEERA })).order_number, '00000122', 'an order number said as the order id still works');
+    assert.equal((await lookup({ order_id: '122', caller_phone: MEERA })).order_number, '00000122', 'an order number said as the order id still works');
   });
 
   test('an order placed with another number is shared only after the caller says the number it was placed with', async (t) => {
@@ -555,7 +555,7 @@ test.describe('agent tools used during a call', () => {
     t.after(s.close);
     const lookup = (body) => s.call('POST', '/api/agent/order-lookup', { body, headers: s.agent }).then((r) => r.body);
 
-    const fromAnother = await lookup({ order_id: 'TD-ORD-1001', phone: '9820011111' });
+    const fromAnother = await lookup({ order_id: 'TD-ORD-1001', caller_phone: '9820011111' });
     assert.deepEqual(fromAnother, {
       found: true,
       number_confirmed: false,
@@ -567,11 +567,11 @@ test.describe('agent tools used during a call', () => {
     }, 'nothing about the order: no products, status or order id');
     assert.match((await lookup({ order_id: 'TD-ORD-1001' })).message, /^An order matches\. Before saying anything/, 'no number known yet');
 
-    const wrong = await lookup({ order_id: 'TD-ORD-1001', phone: '9820011111', order_phone: '9000000000' });
+    const wrong = await lookup({ order_id: 'TD-ORD-1001', caller_phone: '9820011111', order_phone: '9000000000' });
     assert.equal(wrong.number_confirmed, false);
     assert.match(wrong.message, /^The number the customer gave is not the mobile number this order was placed with.*offer a call back from the service team\.$/);
 
-    const right = await lookup({ order_id: 'TD-ORD-1001', phone: '9820011111', order_phone: '98765 43210' });
+    const right = await lookup({ order_id: 'TD-ORD-1001', caller_phone: '9820011111', order_phone: '98765 43210' });
     assert.equal(right.number_confirmed, true);
     assert.equal(right.order_phone, '+919876543210');
     assert.equal(right.products, 'Demo 3-Door Wardrobe');
@@ -582,13 +582,13 @@ test.describe('agent tools used during a call', () => {
     t.after(s.close);
     const lookup = (body) => s.call('POST', '/api/agent/order-lookup', { body, headers: s.agent }).then((r) => r.body);
 
-    const complete = await lookup({ order_id: 'TD-ORD-1001', phone: '9876543210' });
+    const complete = await lookup({ order_id: 'TD-ORD-1001', caller_phone: '9876543210' });
     assert.equal(complete.mobile_on_order, true);
     assert.equal(complete.address_on_order, true);
     assert.equal(complete.details_missing, false);
     assert.doesNotMatch(complete.message, /WhatsApp/);
 
-    const bare = await lookup({ order_id: 'TD-ORD-3333', phone: '9876543210' });
+    const bare = await lookup({ order_id: 'TD-ORD-3333', caller_phone: '9876543210' });
     assert.equal(bare.found, true);
     assert.equal(bare.number_confirmed, false);
     assert.equal(bare.mobile_on_order, false, 'its account has no contact with a number');
@@ -598,7 +598,7 @@ test.describe('agent tools used during a call', () => {
 
     const getOrderById = s.crm.getOrderById.bind(s.crm);
     s.crm.getOrderById = async (id) => ({ ...(await getOrderById(id)), street: null });
-    const noStreet = await lookup({ order_id: 'TD-ORD-1001', phone: '9876543210' });
+    const noStreet = await lookup({ order_id: 'TD-ORD-1001', caller_phone: '9876543210' });
     assert.equal(noStreet.address_on_order, false, 'a city and PIN code without a street is not an address to visit');
     assert.match(noStreet.message, /The order has no delivery address on record\. After answering what the customer asked, offer to send a WhatsApp link/);
   });
@@ -608,7 +608,7 @@ test.describe('agent tools used during a call', () => {
     t.after(s.close);
     const lookup = (body) => s.call('POST', '/api/agent/order-lookup', { body, headers: s.agent }).then((r) => r.body);
 
-    assert.equal((await lookup({ order_id: 'TD-ORD-1010', invoice_number: 'INV-1111', phone: '9820011111' })).order_id, 'TD-ORD-1111');
+    assert.equal((await lookup({ order_id: 'TD-ORD-1010', invoice_number: 'INV-1111', caller_phone: '9820011111' })).order_id, 'TD-ORD-1111');
 
     const shared = await lookup({ invoice_number: 'INV-7777' });
     assert.equal(shared.found, false, 'an invoice number on two orders does not pick one at random');
@@ -623,7 +623,7 @@ test.describe('agent tools used during a call', () => {
     assert.match(unknown.message, /^No order matches that number\..* When it finds nothing again, tell the customer the order could not be found and offer to send a link on WhatsApp/);
     const nothing = await lookup({});
     assert.equal(nothing.found, false);
-    assert.match(nothing.message, /order id, order number or invoice number, or the registered mobile number/);
+    assert.match(nothing.message, /^An order id, order number or invoice number is needed\. The number of this call is not known, so do not say or guess any digits of it\./);
     const noOrders = await lookup({ phone: '9000000000' });
     assert.match(noOrders.message, /^No order is linked to this phone number\..*offer to send a link on WhatsApp to upload a photo, screenshot or PDF of the invoice\.$/);
   });
@@ -644,16 +644,85 @@ test.describe('agent tools used during a call', () => {
     assert.equal((await s.call('POST', '/api/agent/part-lookup', { body: {}, headers: s.agent })).body.found, false);
   });
 
-  test('without an order id the latest order on the caller number is used', async (t) => {
+  test('without an order id, the order on the caller number is given, or every order on it to choose from', async (t) => {
     const s = await startTestServer();
     t.after(s.close);
-    const res = await s.call('POST', '/api/agent/order-lookup', { body: { phone: '9820011111' }, headers: s.agent });
-    assert.equal(res.body.order_id, 'TD-ORD-1111');
-    assert.equal(res.body.delivery_status, 'Processing');
-    assert.equal(res.body.order_phone, '+919820011111', 'the number it was found by confirms it');
-    const none = await s.call('POST', '/api/agent/order-lookup', { body: { phone: '9000000000' }, headers: s.agent });
-    assert.equal(none.body.found, false);
-    assert.equal((await s.call('POST', '/api/agent/order-lookup', { body: {}, headers: s.agent })).body.found, false);
+    const lookup = (body) => s.call('POST', '/api/agent/order-lookup', { body, headers: s.agent }).then((r) => r.body);
+
+    const one = await lookup({ caller_phone: '9876543210' });
+    assert.equal(one.order_id, 'TD-ORD-1001', 'the only order on the number is answered in full');
+    assert.equal(one.order_phone, '+919876543210', 'the number it was found by confirms it');
+    assert.match(one.message, /^The order on this number: Order TD-ORD-1001 for Demo 3-Door Wardrobe was delivered/);
+
+    const several = await lookup({ caller_phone: '9820011111' });
+    assert.equal(several.found, true);
+    assert.equal(several.several_orders, true);
+    assert.equal(several.order_phone, '+919820011111', 'saved, so the order the caller picks is confirmed');
+    assert.equal(several.order_id, null);
+    assert.deepEqual(several.orders.map((o) => o.order_id || o.order_number), ['TD-ORD-1111', '00000122']);
+    assert.match(several.message, /^2 orders on this number: TD-ORD-1111 for Demo Bookcase, processing; order 122 for Demo Kids Bed, status unknown\. .*call tool:find_order again with its order id/);
+    const picked = await lookup({ order_number: '122', order_phone: several.order_phone });
+    assert.equal(picked.number_confirmed, true);
+    assert.equal(picked.products, 'Demo Kids Bed');
+
+    const none = await lookup({ phone: '9000000000' });
+    assert.equal(none.found, false);
+    assert.match(none.message, /^No order is linked to this phone number\./);
+    assert.equal((await lookup({})).found, false);
+  });
+
+  test('the orders on a number are found on every customer record the number is on, and the name picks the customer', async (t) => {
+    const s = await startTestServer();
+    t.after(s.close);
+    const lookup = (body) => s.call('POST', '/api/agent/order-lookup', { body, headers: s.agent }).then((r) => r.body);
+    // The org has one mobile on two to four accounts: Meera's number is also on a relative's record with its own order.
+    s.crm.contacts.push({ id: '003R', name: 'Ravi Iyer', firstName: 'Ravi', accountId: '001R', mobile: '+919820011111', phone: null, postalCode: '600001' });
+    s.crm.orders.push({ id: '801R', orderNumber: '00000140', erpOrderId: 'TD-ORD-1400', invoiceNumber: 'INV-1400', orderSource: 'Website', deliveryStatus: 'Delivered', deliveryDate: '2026-10-10', accountId: '001R', accountName: 'Ravi Iyer', contactId: '003R', street: '9 Beach Road', city: 'Chennai', postalCode: '600001', productSummary: 'Demo TV Cabinet' });
+
+    const all = await lookup({ caller_phone: '9820011111' });
+    assert.deepEqual(all.orders.map((o) => o.order_id || o.order_number).sort(), ['00000122', 'TD-ORD-1111', 'TD-ORD-1400'], "both customers' orders");
+
+    const ravi = await lookup({ caller_phone: '9820011111', customer_name: 'Ravi Iyer' });
+    assert.equal(ravi.order_id, 'TD-ORD-1400', 'the name narrows them to that customer, whose one order is answered');
+    assert.equal(ravi.number_confirmed, true);
+
+    const stranger = await lookup({ caller_phone: '9820011111', customer_name: 'Kabir Khan' });
+    assert.equal(stranger.found, false);
+    assert.match(stranger.message, /^The orders on this number are under another name\./);
+
+    const shortRef = await lookup({ order_number: '1400', caller_phone: '9820011111' });
+    assert.equal(shortRef.order_id, 'TD-ORD-1400', 'a reference on the second record is confirmed by the number too');
+  });
+
+  test('by full name and PIN code the orders are named, and nothing more is given until a number confirms one', async (t) => {
+    const s = await startTestServer();
+    t.after(s.close);
+    const lookup = (body) => s.call('POST', '/api/agent/order-lookup', { body, headers: s.agent }).then((r) => r.body);
+
+    const byName = await lookup({ customer_name: 'Meera Iyer', postal_code: '600 001', caller_phone: '+919000000000' });
+    assert.equal(byName.found, true);
+    assert.equal(byName.number_confirmed, false);
+    assert.equal(byName.order_phone, undefined, 'nothing saved that would confirm it');
+    assert.deepEqual(byName.orders, [{ order_id: 'TD-ORD-1111', order_number: '00000114' }, { order_id: null, order_number: '00000122' }]);
+    assert.match(byName.message, /^Orders found by name and PIN code: TD-ORD-1111 for Demo Bookcase; order 122 for Demo Kids Bed\. Nothing more about them can be shared until a number confirms the order\./);
+    assert.doesNotMatch(byName.message, /processing|delivered/i, 'no status before the number confirms it');
+
+    const confirmed = await lookup({ order_id: 'TD-ORD-1111', order_phone: '98200 11111', caller_phone: '+919000000000' });
+    assert.equal(confirmed.number_confirmed, true);
+
+    // The agent passes the name in English letters and as written; records hold either script.
+    const bothScripts = await lookup({ customer_name: 'Meera Iyer', customer_name_local: 'मीरा अय्यर', postal_code: '600001' });
+    assert.equal(bothScripts.found, true);
+    s.crm.contacts.push({ id: '003H', name: 'प्रदीप चौधरी', firstName: 'प्रदीप', accountId: '001H', mobile: '+919811100000', phone: null, postalCode: '302020' });
+    s.crm.orders.push({ id: '801H', orderNumber: '00000153', erpOrderId: null, invoiceNumber: null, orderSource: 'Other', deliveryStatus: null, deliveryDate: null, accountId: '001H', accountName: 'प्रदीप चौधरी', contactId: '003H', street: null, city: 'Jaipur', postalCode: '302020', productSummary: 'Demo TV Cabinet' });
+    const hindiRecord = await lookup({ customer_name: 'Pradeep Chaudhary', customer_name_local: 'प्रदीप चौधरी', postal_code: '302020' });
+    assert.equal(hindiRecord.found, true, 'a record saved in Hindi script is found by the name as written');
+    assert.deepEqual(hindiRecord.orders, [{ order_id: null, order_number: '00000153' }]);
+    assert.equal((await lookup({ customer_name: 'Pradeep Chaudhary', postal_code: '302020' })).found, false, 'English letters alone do not match a Hindi record');
+
+    assert.match((await lookup({ customer_name: 'Meera Iyer', postal_code: '110001' })).message, /^No order matches this name and PIN code\./);
+    assert.match((await lookup({ customer_name: 'Meera', postal_code: '600001' })).message, /first and last name and the six digit PIN code/);
+    assert.match((await lookup({ customer_name: 'Meera Iyer' })).message, /^To find orders by name, the six digit PIN code/);
   });
 
   test('without the mobile, a customer is found by full name and PIN code, with orders and open requests', async (t) => {
@@ -664,7 +733,7 @@ test.describe('agent tools used during a call', () => {
     assert.equal(res.body.verified_by, 'name_and_pin');
     assert.equal(res.body.latest_order_id, 'TD-ORD-1001');
     assert.equal(res.body.message,
-      'Customer Aarav Sharma found by name and PIN code. Recent orders: TD-ORD-1001, delivered. Open requests: 1063 for Installation, Appointment Scheduled.');
+      'Customer Aarav Sharma found by name and PIN code. Recent orders: TD-ORD-1001 for Demo 3-Door Wardrobe, delivered. Open requests: 1063 for Installation, Appointment Scheduled.');
 
     const wrongPin = await s.call('POST', '/api/agent/customer-lookup', { headers: s.agent, body: { customer_name: 'Aarav Sharma', postal_code: '560001' } });
     assert.equal(wrongPin.body.found, false);
@@ -672,7 +741,50 @@ test.describe('agent tools used during a call', () => {
     const firstNameOnly = await s.call('POST', '/api/agent/customer-lookup', { headers: s.agent, body: { customer_name: 'Aarav', postal_code: '110001' } });
     assert.match(firstNameOnly.body.message, /first and last name/);
     const nothing = await s.call('POST', '/api/agent/customer-lookup', { headers: s.agent, body: {} });
-    assert.equal(nothing.body.message, 'The registered mobile number is needed, or the full name with the six digit PIN code.');
+    assert.match(nothing.body.message, /^The number of this call is not known, so do not say or guess any digits of it\..*the first and last name with the six digit PIN code finds the customer instead\.$/);
+  });
+
+  test('lookups use the number of the call when the agent leaves phone empty, and a number the agent passes never confirms an order', async (t) => {
+    const s = await startTestServer();
+    t.after(s.close);
+    const call = (path, body) => s.call('POST', `/api/agent/${path}`, { body, headers: s.agent }).then((r) => r.body);
+    const AARAV = '+919876543210';
+    const MEERA = '+919820011111';
+
+    const caller = await call('customer-lookup', { caller_phone: AARAV });
+    assert.equal(caller.found, true, 'the caller is found without the agent typing the number');
+    assert.equal(caller.customer_name, 'Aarav Sharma');
+    assert.equal(caller.number_ending, '3210');
+    assert.match(caller.message, /^The number for this call, ending 3 2 1 0, is registered to Aarav Sharma\. Customer Aarav Sharma found/);
+    const unknownCaller = await call('customer-lookup', { caller_phone: '+919000000000' });
+    assert.match(unknownCaller.message, /^The number for this call, ending 0 0 0 0, is not on record as a customer\./);
+    const said = await call('customer-lookup', { phone: '98765 43210', caller_phone: MEERA });
+    assert.equal(said.customer_name, 'Aarav Sharma', 'a number the customer says is still looked up');
+    assert.doesNotMatch(said.message, /number for this call/);
+
+    const latest = await call('order-lookup', { caller_phone: MEERA });
+    assert.deepEqual(latest.orders.map((o) => o.order_id || o.order_number), ['TD-ORD-1111', '00000122'], "the orders on the caller's number");
+    assert.equal(latest.order_phone, MEERA);
+
+    // A call whose number the call start did not learn: the model made up a number that belongs to another customer.
+    const madeUp = await call('order-lookup', { order_id: 'TD-ORD-1001', phone: '9876543210' });
+    assert.equal(madeUp.number_confirmed, false, 'a phone the agent passes is not a number from the call');
+    assert.equal(madeUp.products, undefined, 'nothing about the order is shared');
+    const madeUpOnFile = await call('details-on-file', { order_id: 'TD-ORD-1001', phone: '9876543210' });
+    assert.equal(madeUpOnFile.found, false);
+    assert.equal(madeUpOnFile.mobile_ending, undefined);
+    const confirmed = await call('order-lookup', { order_id: 'TD-ORD-1001', order_phone: '9876543210' });
+    assert.equal(confirmed.number_confirmed, true, 'the number the caller says the order was placed with still confirms it');
+
+    for (const [path, body] of [['customer-lookup', {}], ['order-lookup', {}], ['case-status', {}], ['history', {}]]) {
+      const noNumber = await call(path, body);
+      assert.equal(noNumber.found, false, path);
+      assert.match(noNumber.message, /do not say or guess any digits of it|registered mobile number is needed/, path);
+    }
+    const status = await call('case-status', { caller_phone: AARAV });
+    assert.equal(status.found, true, "the caller's requests by the number of the call");
+    const history = await call('history', { caller_phone: AARAV });
+    assert.equal(history.found, true);
   });
 
   test('without the mobile, a request is shown with its number and the full name or the order id', async (t) => {
@@ -1035,10 +1147,44 @@ test.describe('agent tools used during a call', () => {
     const mine = await s.call('POST', '/api/agent/case-status', { headers: s.agent, body: { phone: '9820011111' } });
     assert.equal(mine.body.found, true);
     assert.equal(mine.body.case_number, '00001060');
-    assert.equal(mine.body.message, 'Request 1060 for Damage or Defect is Replacement Dispatched. Replacement part status: Dispatched, expected by Sunday, 18 October.');
+    assert.match(mine.body.message, /^Request 1060, for Damage or Defect for TD-ORD-1111, is Replacement Dispatched\. Replacement part status: Dispatched, expected by Sunday, 18 October\. Answer what the customer asked/);
 
     const byNumber = await s.call('POST', '/api/agent/case-status', { headers: s.agent, body: { phone: '9876543210', case_number: '1063' } });
-    assert.equal(byNumber.body.message, 'Request 1063 for Installation is Appointment Scheduled. A service visit is appointment scheduled for Friday, 16 October at 11:00 am with technician Vikram.');
+    assert.match(byNumber.body.message, /^Request 1063, for Installation for TD-ORD-1001, is Appointment Scheduled\. A service visit is appointment scheduled for Friday, 16 October at 11:00 am with technician Vikram\./);
+  });
+
+  test('on a later call the agent hears what a request noted: the issue, the part, the product, the order and the slot', async (t) => {
+    const s = await startTestServer();
+    t.after(s.close);
+    s.crm.serviceCases.push({
+      id: '500Z', caseNumber: '00001120', accountId: '001A', serviceType: 'Damage or Defect', subType: 'Damaged Product', status: 'New', closed: false,
+      createdDate: '2026-10-13T06:00:00.000Z', contactName: 'Aarav Sharma', accountName: 'Aarav Sharma', erpOrderId: 'TD-ORD-1001', orderNumber: '00000101',
+      products: ['Rocco Walky Kitchen Island Storage Cabinet with Wheels, Solid Rubber Wood Top'],
+      damagedPart: { name: 'Side organizer end panel', partNumber: 'KIS-WALKY-12' },
+      details: { issue: 'The side panel arrived cracked.', part: 'Side organizer end panel (sticker 3)', quantity: '1', preferredSlot: '2026-10-17 11 am' },
+      visit: null, shipment: null,
+    });
+    const res = await s.call('POST', '/api/agent/case-status', { headers: s.agent, body: { caller_phone: '+919876543210' } });
+    assert.equal(res.body.found, true);
+    assert.equal(res.body.open_requests, 2);
+    const damage = res.body.requests.find((r) => r.case_number === '00001120');
+    assert.deepEqual(damage, {
+      case_number: '00001120', service_type: 'Damage or Defect', sub_type: 'Damaged Product', status: 'New', closed: false,
+      registered_on: '2026-10-13T06:00:00.000Z', order_id: 'TD-ORD-1001', order_number: '00000101',
+      issue: 'The side panel arrived cracked.', part: 'Side organizer end panel (sticker 3)', quantity: '1',
+    });
+    assert.match(res.body.message, /Request 1120, for Damage or Defect, damaged product, registered on Tuesday, 13 October for TD-ORD-1001, Rocco Walky Kitchen Island Storage Cabinet, is New\. What was noted: The side panel arrived cracked\. Part: Side organizer end panel \(sticker 3\), quantity 1\. Preferred slot asked for: Saturday, 17 October, 11 am\./);
+
+    // When nothing is open, the latest requests are given, closed ones included.
+    for (const c of s.crm.serviceCases) c.closed = true;
+    const closed = await s.call('POST', '/api/agent/case-status', { headers: s.agent, body: { caller_phone: '+919876543210' } });
+    assert.equal(closed.body.open_requests, 0);
+    assert.match(closed.body.message, /^No request is open now; the latest ones are these\. Request 1063, for Installation for TD-ORD-1001, is closed\./);
+
+    // The request number with the full name works from another phone.
+    const elsewhere = await s.call('POST', '/api/agent/case-status', { headers: s.agent, body: { caller_phone: '+919000000000', case_number: '1120', customer_name: 'Aarav Sharma' } });
+    assert.equal(elsewhere.body.found, true);
+    assert.equal(elsewhere.body.case_number, '00001120');
   });
 
   test('a caller cannot read another customer’s case by number', async (t) => {

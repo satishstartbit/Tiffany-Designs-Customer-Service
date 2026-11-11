@@ -66,7 +66,7 @@ test('when a short number matches several orders, the agent is asked to get the 
   assert.equal(ambiguous.body.found, false);
   assert.equal(ambiguous.body.message, 'More than one order ends in these digits. Ask for the full order id or the invoice number.');
 
-  const mine = await s.call('POST', '/api/agent/order-lookup', { body: { order_number: '1009', phone: '9876543210' }, headers: s.agent });
+  const mine = await s.call('POST', '/api/agent/order-lookup', { body: { order_number: '1009', caller_phone: '9876543210' }, headers: s.agent });
   assert.equal(mine.body.order_id, 'TD-ORD-1009', 'the caller\'s mobile picks their order');
 });
 

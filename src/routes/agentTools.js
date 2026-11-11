@@ -11,6 +11,7 @@ const { findOrderFromReferences } = require('../crm/crm');
 const { welcomeLine } = require('../callFlows');
 
 const MAX_PRODUCTS_SPOKEN = 5;
+const MAX_ORDERS_LISTED = 5;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const INDIAN_MOBILE = /^\+91[6-9]\d{9}$/;
 const LATE = Symbol('late');
@@ -85,6 +86,44 @@ const CALLING_NUMBER_UNKNOWN = 'Nothing is saved yet: the number of this call is
   + 'number, read it back in two groups of five digits, and call this tool again with it as phone, use_calling_number set to false '
   + 'and its last four digits as contact_number_ending.';
 
+// What a lookup answers when the agent left phone empty for the caller's own number and the call has none (the call
+// start lookup did not answer, or the call carries no number): ask, never guess.
+const NUMBER_OF_CALL_UNKNOWN = 'The number of this call is not known, so do not say or guess any digits of it. Ask the customer to say '
+  + 'the 10 digit mobile number, read it back in two groups of five digits, and once the customer confirms it, call this tool again with it as phone.';
+
+// The number a lookup is for: the number the customer said in this call (phone), else the number of the call
+// (caller_phone, from customer_phone), so the agent leaves phone empty for the caller's own number and never types it.
+// `ofCall` is true when the number is the call's.
+function lookupPhone(body) {
+  const given = normalizePhone(body.phone);
+  if (given) return { phone: given, ofCall: given === normalizePhone(body.caller_phone) };
+  const caller = normalizePhone(body.caller_phone);
+  return caller ? { phone: caller, ofCall: true } : { phone: null, ofCall: false };
+}
+
+// A product name as the agent says it in a list: catalogue names run to 200 characters ("Rocco Walky Kitchen Island
+// Storage Cabinet with Wheels, Solid Rubber Wood Top, ..."), so only the part before the first comma or "with".
+function shortProduct(name) {
+  const head = String(name || '').split(/,| with | - /i)[0].trim();
+  return head.length > 60 ? `${head.slice(0, 57).replace(/\s+\S*$/, '')}…` : head;
+}
+
+// An order as the agent names it in a list: its order id, or for a phone order its order number, with its products.
+function orderName(order) {
+  return order.erpOrderId || `order ${spokenCaseNumber(order.orderNumber)}`;
+}
+function orderWords(order) {
+  const products = [...new Set(String(order.productSummary || '').split(', ').map(shortProduct).filter(Boolean))].join(' and ');
+  return `${orderName(order)}${products ? ` for ${products}` : ''}, ${order.deliveryStatus ? order.deliveryStatus.toLowerCase() : 'status unknown'}`;
+}
+
+// The name a caller gave, in both scripts the agent passes it in: customer_name in English letters and
+// customer_name_local as the caller would write it (records hold "Meera Iyer" and "प्रदीप चौधरी" alike).
+function namesOf(body) {
+  return [...new Set([body.customer_name, body.customer_name_local].map((n) => String(n || '').trim()).filter(Boolean))];
+}
+const anyNameMatches = (names, recorded) => names.some((n) => namesMatch(n, recorded));
+
 const capitalized = (text) => text.charAt(0).toUpperCase() + text.slice(1);
 const isTrue = (value) => value === true || value === 'true';
 
@@ -142,8 +181,30 @@ function describeOrder({ orderId, products, deliveryStatus, deliveryDate }) {
   return `${what} is ${deliveryStatus ? deliveryStatus.toLowerCase() : 'being processed'}.`;
 }
 
+// "2026-10-17 11 am" as "Saturday, 17 October, 11 am".
+function spokenSlot(slot) {
+  const m = /^(\d{4}-\d{2}-\d{2})\s*(.*)$/.exec(String(slot || '').trim());
+  if (!m) return String(slot || '').trim() || null;
+  return [formatDate(m[1]), m[2]].filter(Boolean).join(', ');
+}
+
+// A request as the agent tells a caller about it: what kind it is, when it was registered and for which order and
+// product, what the customer reported (the issue in their words, the part and how many), the slot asked for, its
+// status, and any service visit or replacement part. Addresses and contact numbers are never part of it.
 function caseSummary(c) {
-  const parts = [`Request ${spokenCaseNumber(c.caseNumber)} for ${c.serviceType || 'service'} is ${c.status}.`];
+  const kind = [c.serviceType || 'service', c.subType && c.subType !== c.serviceType ? c.subType.toLowerCase() : null].filter(Boolean).join(', ');
+  const order = c.erpOrderId || (c.orderNumber ? `order ${spokenCaseNumber(c.orderNumber)}` : null);
+  const products = [...new Set((c.products || []).map(shortProduct).filter(Boolean))].join(' and ') || c.details?.product || null;
+  const when = formatDate(c.createdDate);
+  const parts = [
+    `Request ${spokenCaseNumber(c.caseNumber)}, for ${kind}${when ? `, registered on ${when}` : ''}`
+      + `${order ? ` for ${order}` : ''}${products ? `${order ? ',' : ' for'} ${products}` : ''}, `
+      + `${c.closed ? `is closed${c.closedDate ? ` since ${formatDate(c.closedDate)}` : ''}` : `is ${c.status}`}.`,
+  ];
+  if (c.details?.issue) parts.push(`What was noted: ${c.details.issue.replace(/[.\s]+$/, '')}.`);
+  const part = c.details?.part || c.damagedPart?.name || null;
+  if (part) parts.push(`Part: ${part.replace(/[.\s]+$/, '')}${c.details?.quantity ? `, quantity ${c.details.quantity}` : ''}.`);
+  if (c.details?.preferredSlot) parts.push(`Preferred slot asked for: ${spokenSlot(c.details.preferredSlot)}.`);
   if (c.visit?.scheduledStart) {
     const tech = shortName(c.visit.technician);
     parts.push(`A service visit is ${c.visit.status ? c.visit.status.toLowerCase() : 'planned'} for ${formatDateTime(c.visit.scheduledStart)}${tech ? ` with technician ${tech}` : ''}.`);
@@ -238,13 +299,15 @@ module.exports = function agentToolsRouter({
     let firstName = null;
     let details = `${number} is not on record as a customer.`;
     try {
-      const contact = await byDeadline(crm.findContactByPhone(caller), deadline);
+      // The contact and every account with the number are looked up together, so the greeting waits for one round.
+      const found = await byDeadline(Promise.all([crm.findContactByPhone(caller), accountsFor(null, caller)]), deadline);
+      const contact = found === LATE ? LATE : found[0];
       if (contact === LATE) {
         logger.warn(`The caller lookup at call start took over ${callStartBudgetMs} ms; the agent looks the caller up on its first reply.`);
         details = '';
       } else if (contact) {
         firstName = contact.firstName || String(contact.name || '').trim().split(/\s+/)[0] || null;
-        const records = await byDeadline(recordsOf(contact), deadline);
+        const records = await byDeadline(recordsOf([...new Set([contact.accountId, ...found[1]].filter(Boolean))]), deadline);
         const owner = contact.name ? `is registered to ${contact.name}` : 'is on record with no name saved, so ask for the full name before registering anything';
         if (records === LATE) logger.warn(`The caller's orders and requests took over ${callStartBudgetMs} ms at call start; the agent looks them up on its first reply.`);
         details = records === LATE ? '' : `${number} ${owner}. ${records.orderLine}${records.requestLine}`;
@@ -326,36 +389,57 @@ module.exports = function agentToolsRouter({
     };
   }
 
+  // The accounts a caller's orders and requests are on: the contact's own, and those of every other contact with the
+  // same number (one mobile can be on several customer records).
+  async function accountsFor(contact, phone) {
+    const others = phone && crm.findAccountIdsByPhone ? await crm.findAccountIdsByPhone(phone) : [];
+    return [...new Set([contact?.accountId, ...others].filter(Boolean))];
+  }
+
+  // The customer a full name and PIN code find, trying the name in each script the agent gave it in: found by any of
+  // them, else invalid only when every form was (no first and last name, or no six digit PIN code).
+  async function findByNameAndPin(names, postalCode) {
+    const statuses = [];
+    for (const name of names) {
+      const match = await crm.findCustomerByNameAndPin(name, postalCode);
+      if (match.status === 'found') return match;
+      statuses.push(match.status);
+    }
+    return { status: statuses.includes('ambiguous') ? 'ambiguous' : statuses.includes('none') ? 'none' : 'invalid' };
+  }
+
   // A customer's recent orders and open requests, as the agent hears them; the open requests come with every answer,
-  // so the agent knows them before asking about the concern.
-  async function recordsOf(contact) {
-    const [orders, requests] = contact.accountId
-      ? await Promise.all([crm.findRecentOrdersForAccount(contact.accountId), crm.getCaseStatus({ accountId: contact.accountId })])
+  // so the agent knows them before asking about the concern. Every order is named, by its order id or, for a phone
+  // order that has none, by its order number, with its products.
+  async function recordsOf(accounts) {
+    const [orders, requests] = accounts.length
+      ? await Promise.all([crm.findRecentOrdersForAccounts(accounts), crm.getCaseStatus({ accountIds: accounts })])
       : [[], []];
-    const named = orders.filter((o) => o.erpOrderId);
-    const orderLine = named.length
-      ? `Recent orders: ${named.map((o) => `${o.erpOrderId}, ${o.deliveryStatus ? o.deliveryStatus.toLowerCase() : 'status unknown'}`).join('; ')}.`
-      : 'No order id is on record.';
+    const named = orders.filter((o) => o.erpOrderId || o.orderNumber);
+    const orderLine = named.length ? `Recent orders: ${named.map(orderWords).join('; ')}.` : 'No order is on record.';
     const requestLine = requests.length
       ? ` Open requests: ${requests.map((c) => `${spokenCaseNumber(c.caseNumber)} for ${c.serviceType || 'service'}, ${c.status}`).join('; ')}.`
       : '';
     return { named, requests, orderLine, requestLine };
   }
 
+  // The agent leaves phone empty for the caller's own number; the number of the call (caller_phone) is used then.
   router.post('/customer-lookup', async (req, res) => {
-    const phone = normalizePhone(req.body?.phone);
-    const { customer_name: customerName, postal_code: postalCode } = req.body || {};
+    const { phone, ofCall } = lookupPhone(req.body || {});
+    const { postal_code: postalCode } = req.body || {};
     let contact;
+    let accounts = [];
     if (phone) {
-      contact = await crm.findContactByPhone(phone);
+      [contact, accounts] = await Promise.all([crm.findContactByPhone(phone), accountsFor(null, phone)]);
       if (!contact) {
         return res.json({
           found: false,
-          message: 'No customer record matches this number. Carry on without saying so, and ask for the order id, order number or invoice number when the concern needs an order.',
+          message: `${ofCall ? `The number for this call, ending ${spokenDigits(phoneEnding(phone))}, is not on record as a customer. ` : 'No customer record matches this number. '}`
+            + 'Carry on without saying so, and ask for the order id, order number or invoice number when the concern needs an order.',
         });
       }
-    } else if (customerName && postalCode) {
-      const match = await crm.findCustomerByNameAndPin(customerName, postalCode);
+    } else if (namesOf(req.body || {}).length && postalCode) {
+      const match = await findByNameAndPin(namesOf(req.body || {}), postalCode);
       if (match.status === 'invalid') {
         return res.json({ found: false, message: 'Without the mobile number, the first and last name and the six digit PIN code are needed.' });
       }
@@ -365,32 +449,38 @@ module.exports = function agentToolsRouter({
       }
       contact = match.contact;
     } else {
-      return res.json({ found: false, message: 'The registered mobile number is needed, or the full name with the six digit PIN code.' });
+      return res.json({
+        found: false,
+        message: `${NUMBER_OF_CALL_UNKNOWN} When the customer does not know the registered number, the first and last name with the six digit PIN code finds the customer instead.`,
+      });
     }
 
-    const { named, requests, orderLine, requestLine } = await recordsOf(contact);
+    const { named, requests, orderLine, requestLine } = await recordsOf([...new Set([contact.accountId, ...accounts].filter(Boolean))]);
     const firstName = contact.firstName || String(contact.name || '').trim().split(/\s+/)[0] || null;
+    const byCall = ofCall ? `The number for this call, ending ${spokenDigits(phoneEnding(phone))}, is registered to ${contact.name || 'a customer with no name saved'}. ` : '';
     return res.json({
       found: true,
       verified_by: phone ? 'mobile' : 'name_and_pin',
+      number_ending: phone ? phoneEnding(phone) : null,
       customer_name: contact.name,
       first_name: firstName,
       city: contact.city,
-      recent_orders: named.map((o) => `${o.erpOrderId} (${o.deliveryStatus || 'status unknown'})`).join(', '),
-      latest_order_id: named[0]?.erpOrderId || null,
+      recent_orders: named.map((o) => `${o.erpOrderId || o.orderNumber} (${o.deliveryStatus || 'status unknown'})`).join(', '),
+      latest_order_id: named[0] ? named[0].erpOrderId || named[0].orderNumber : null,
       open_requests: requests.length,
-      message: !contact.name
+      message: byCall + (!contact.name
         ? `A customer record with no name saved is on this number; ask for the full name before registering anything. ${orderLine}${requestLine}`
         : phone
           ? `Customer ${contact.name} found; first name ${firstName}. ${orderLine}${requestLine}`
-          : `Customer ${contact.name} found by name and PIN code. ${orderLine}${requestLine}`,
+          : `Customer ${contact.name} found by name and PIN code. ${orderLine}${requestLine}`),
     });
   });
 
-  // The numbers a caller has given for an order: the mobile number passed to the tool, the number the caller said the
-  // order was placed with (order_phone, which find_order saves to the agent variable of that name), and the number of
-  // the call (caller_phone, from customer_phone).
-  const numbersGiven = (body) => [body.phone, body.order_phone, body.caller_phone];
+  // The numbers that can confirm an order as the caller's: the number the caller said the order was placed with
+  // (order_phone, which find_order asks for and saves to the agent variable of that name) and the number of the call
+  // (caller_phone, from customer_phone). A phone the model passes on its own is not one of them, so a number it made
+  // up or misheard never unlocks an order.
+  const numbersGiven = (body) => [body.order_phone, body.caller_phone];
 
   // What the agent hears about an order it may not share yet: an order matches, and how to confirm it as the caller's.
   function unconfirmed(check, body) {
@@ -456,7 +546,7 @@ module.exports = function agentToolsRouter({
   // Returns { order }, { problem } to say, or {} when no reference was given. The request tools find it the same way.
   function orderFromReferences(body) {
     return findOrderFromReferences(crm, {
-      orderId: body.order_id, orderNumber: body.order_number, invoiceNumber: body.invoice_number, phone: normalizePhone(body.phone),
+      orderId: body.order_id, orderNumber: body.order_number, invoiceNumber: body.invoice_number, phone: lookupPhone(body).phone,
     });
   }
 
@@ -468,7 +558,7 @@ module.exports = function agentToolsRouter({
   // get_details_on_file gives only the parts needed to confirm them.
   router.post('/order-lookup', async (req, res) => {
     const body = req.body || {};
-    const phone = normalizePhone(body.phone);
+    const { phone } = lookupPhone(body);
     const { order, problem, notFound } = await orderFromReferences(body);
     if (problem) {
       return res.json({
@@ -493,21 +583,83 @@ module.exports = function agentToolsRouter({
       });
     }
 
-    if (!phone) {
-      return res.json({ found: false, message: 'An order id, order number or invoice number, or the registered mobile number, is needed.' });
+    const names = namesOf(body);
+    const customerName = names[0] || '';
+    const postalCode = String(body.postal_code || '').trim();
+    const noOrder ='When the customer has none of them, or they find nothing either, tell the customer the order could not be found '
+      + 'and offer to send a link on WhatsApp to upload a photo, screenshot or PDF of the invoice.';
+
+    // Without a reference: every order on the number, on every customer record the number is on, narrowed to the
+    // customer the name belongs to when the caller gave one. The number is on each of these orders' records, so it
+    // confirms them all: one order is answered in full, several are named for the caller to choose from.
+    let nameElsewhere = false;
+    if (phone) {
+      const contacts = await crm.findContactsByPhone(phone);
+      const named = names.length ? contacts.filter((c) => anyNameMatches(names, c.name)) : contacts;
+      nameElsewhere = Boolean(customerName) && contacts.length > 0 && !named.length;
+      const accounts = [...new Set(named.map((c) => c.accountId).filter(Boolean))];
+      const orders = accounts.length ? await crm.findRecentOrdersForAccounts(accounts, MAX_ORDERS_LISTED) : [];
+      if (orders.length === 1) return res.json(await orderAnswer(await crm.getOrderById(orders[0].id), phone, 'The order on this number: '));
+      if (orders.length > 1) {
+        return res.json({
+          found: true,
+          number_confirmed: true,
+          several_orders: true,
+          order_phone: phone,
+          order_id: null,
+          order_number: null,
+          orders: orders.map((o) => ({ order_id: o.erpOrderId || null, order_number: o.orderNumber || null, products: o.productSummary || '', delivery_status: o.deliveryStatus || null })),
+          message: `${orders.length === MAX_ORDERS_LISTED ? `The latest ${orders.length}` : orders.length} orders on this number: ${orders.map(orderWords).join('; ')}. `
+            + 'Unless the customer already said which order it is about, ask which one, naming two or three of them by their products. '
+            + 'Then call tool:find_order again with its order id, or its order number when it has no order id.',
+        });
+      }
     }
-    // The latest order of the customer this number belongs to, so the number confirms it.
-    const contact = await crm.findContactByPhone(phone);
-    const [latest] = contact?.accountId ? await crm.findRecentOrdersForAccount(contact.accountId, 1) : [];
-    if (!latest) {
+
+    // By full name and PIN code, for a caller whose number is not on the order: the customer's orders are named, and
+    // nothing more is given until a number confirms the order, as for any order found by its reference.
+    if (customerName && postalCode) {
+      const match = await findByNameAndPin(names, postalCode);
+      if (match.status === 'invalid') {
+        return res.json({ found: false, message: 'To find orders by name, the first and last name and the six digit PIN code of the address are needed. Ask for what is missing.' });
+      }
+      // Unknown and ambiguous give the same answer, so names cannot be probed.
+      const orders = match.status === 'found' ? await crm.findRecentOrdersForAccounts([match.contact.accountId], MAX_ORDERS_LISTED) : [];
+      if (!orders.length) {
+        return res.json({ found: false, message: `No order matches this name and PIN code. Ask for the order id, order number or invoice number. ${noOrder}` });
+      }
+      const listed = orders.map((o) => {
+        const products = [...new Set(String(o.productSummary || '').split(', ').map(shortProduct).filter(Boolean))].join(' and ');
+        return `${orderName(o)}${products ? ` for ${products}` : ''}`;
+      });
       return res.json({
-        found: false,
-        message: 'No order is linked to this phone number. Ask for the order id, order number or invoice number. When the customer has '
-          + 'none of them, or they find nothing either, tell the customer the order could not be found and offer to send a link on '
-          + 'WhatsApp to upload a photo, screenshot or PDF of the invoice.',
+        found: true,
+        number_confirmed: false,
+        several_orders: orders.length > 1,
+        orders: orders.map((o) => ({ order_id: o.erpOrderId || null, order_number: o.orderNumber || null })),
+        message: `Orders found by name and PIN code: ${listed.join('; ')}. Nothing more about them can be shared until a number confirms the `
+          + 'order. Ask which order the customer means and which mobile number it was placed with, then call tool:find_order again with its '
+          + 'order id, or its order number when it has no order id, and that number as order_phone.',
       });
     }
-    return res.json(await orderAnswer(await crm.getOrderById(latest.id), phone, 'The latest order on this number: '));
+
+    if (nameElsewhere) {
+      return res.json({
+        found: false,
+        message: 'The orders on this number are under another name. Ask for the order id, order number or invoice number, or for the six '
+          + 'digit PIN code of the address the order went to, and call this tool again with it and the full name.',
+      });
+    }
+    if (customerName && !phone) {
+      return res.json({ found: false, message: 'To find orders by name, the six digit PIN code of the address the order went to is needed too, or the order id, order number or invoice number. Ask for one.' });
+    }
+    if (!phone) {
+      return res.json({ found: false, message: `An order id, order number or invoice number is needed. ${NUMBER_OF_CALL_UNKNOWN}` });
+    }
+    return res.json({
+      found: false,
+      message: `No order is linked to this phone number. Ask for the order id, order number or invoice number, or the full name with the six digit PIN code. ${noOrder}`,
+    });
   });
 
   // The mobile number and address on file for an order (its customer and delivery address) or for a caller's own
@@ -525,9 +677,9 @@ module.exports = function agentToolsRouter({
       if (!check.confirmed) return res.json({ found: false, message: notConfirmed(check) });
       details = await crm.getDetailsOnFile({ order });
     } else {
-      const phone = normalizePhone(body.phone);
+      const { phone } = lookupPhone(body);
       if (!phone) {
-        return res.json({ found: false, message: 'An order id, order number or invoice number, or the registered mobile number, is needed.' });
+        return res.json({ found: false, message: `An order id, order number or invoice number is needed. ${NUMBER_OF_CALL_UNKNOWN}` });
       }
       const contact = await crm.findContactByPhone(phone);
       if (!contact) {
@@ -692,7 +844,7 @@ module.exports = function agentToolsRouter({
         order_number: order.orderNumber,
         invoice_number: order.invoiceNumber,
         message: `The invoice is received${order.added ? ', and as no order matched it, an order was added from it' : ' and matched to its order, which was updated from it'}. `
-          + `Call tool:find_order now with ${reference} and the WhatsApp number as the mobile number, and follow its message. Once the order is `
+          + `Call tool:find_order now with ${reference}, and with the WhatsApp number as order_phone unless it is the number of this call, and follow its message. Once the order is `
           + "confirmed, carry on with the customer's concern from where it stopped, without asking again for anything the customer already gave.",
       });
     }
@@ -863,42 +1015,68 @@ module.exports = function agentToolsRouter({
     return caseResponse(res, result, (n) => `Request ${n} is flagged for a service team member to call back.`);
   });
 
+  // A caller's requests and what each one says: by the number of the call (or a number the caller said), on every
+  // customer record the number is on, the open ones, or the latest ones when none is open; or one request by its
+  // number with the full name on it or the order id it is about. Each comes with what was registered, so a caller who
+  // rings again can be told what the request noted: the issue, the part and how many, the product, the order and the
+  // slot asked for, and how far it has got.
   router.post('/case-status', async (req, res) => {
-    const phone = normalizePhone(req.body?.phone);
-    const { case_number: caseNumber, customer_name: customerName, order_id: orderId } = req.body || {};
-    let own;
+    const { phone } = lookupPhone(req.body || {});
+    const { case_number: caseNumber, order_id: orderId } = req.body || {};
+    const names = namesOf(req.body || {});
+    const customerName = names[0] || '';
+    let own = [];
+    let accounts = [];
+    let noneOpen = false;
     if (phone) {
-      const contact = await crm.findContactByPhone(phone);
-      if (!contact?.accountId) {
-        return res.json({ found: false, message: 'No customer record matches this number. Ask for the request number with the full name, or with the order id the request is about.' });
+      accounts = await accountsFor(null, phone);
+      if (accounts.length) {
+        const mine = (cases) => cases.filter((c) => accounts.includes(c.accountId));
+        own = mine(await crm.getCaseStatus(caseNumber ? { caseNumber } : { accountIds: accounts }));
+        if (!own.length && !caseNumber) {
+          own = mine(await crm.getCaseStatus({ accountIds: accounts, recent: true }));
+          noneOpen = own.length > 0;
+        }
       }
-      const cases = await crm.getCaseStatus(caseNumber ? { caseNumber } : { accountId: contact.accountId });
-      own = cases.filter((c) => c.accountId === contact.accountId);
-      if (!own.length) {
-        return res.json({
-          found: false,
-          message: caseNumber
-            ? 'No request with that number is on record for this customer. Ask the customer to say the request number again.'
-            : 'No open service request was found for this customer. For closed or earlier requests, use tool:get_service_history.',
-        });
-      }
-    } else {
-      // Without the mobile: the request number, plus the full name on the request or the order id it is about.
-      if (!caseNumber || (!customerName && !orderId)) {
-        return res.json({ found: false, message: 'The registered mobile number is needed, or the request number with the full name or the order id.' });
-      }
-      const cases = await crm.getCaseStatus({ caseNumber });
-      own = cases.filter((c) => (customerName && (namesMatch(customerName, c.contactName) || namesMatch(customerName, c.accountName)))
-        || (orderId && sameReference(orderId, c.erpOrderId)));
-      if (!own.length) return res.json({ found: false, message: 'No request matches these details.' });
+    }
+    // The request number with the full name on the request or the order id it is about, also when the caller rings
+    // from a number that is not on it.
+    if (!own.length && caseNumber && (customerName || orderId)) {
+      own = (await crm.getCaseStatus({ caseNumber })).filter((c) => (names.length && (anyNameMatches(names, c.contactName) || anyNameMatches(names, c.accountName)))
+        || (orderId && (sameReference(orderId, c.erpOrderId) || sameReference(orderId, c.orderNumber))));
     }
 
+    if (!own.length) {
+      let message;
+      if (!phone && (!caseNumber || (!customerName && !orderId))) message = 'The registered mobile number is needed, or the request number with the full name or the order id.';
+      else if (caseNumber && (customerName || orderId)) message = 'No request matches these details.';
+      else if (caseNumber) message = 'No request with that number is on record for this customer. Ask the customer to say the request number again, or for the full name on the request.';
+      else if (!accounts.length) message = 'No customer record matches this number. Ask for the request number with the full name, or with the order id the request is about.';
+      else message = 'No service request is on record for this customer. Ask for the request number, with the full name on it, when the customer has one.';
+      return res.json({ found: false, message });
+    }
+
+    const openCount = own.filter((c) => !c.closed).length;
     return res.json({
       found: true,
       case_number: own[0].caseNumber,
       status: own[0].status,
-      open_requests: own.length,
-      message: own.map(caseSummary).join(' '),
+      open_requests: openCount,
+      requests: own.map((c) => ({
+        case_number: c.caseNumber,
+        service_type: c.serviceType,
+        sub_type: c.subType || null,
+        status: c.status,
+        closed: Boolean(c.closed),
+        registered_on: c.createdDate || null,
+        order_id: c.erpOrderId || null,
+        order_number: c.orderNumber || null,
+        issue: c.details?.issue || null,
+        part: c.details?.part || c.damagedPart?.name || null,
+        quantity: c.details?.quantity || null,
+      })),
+      message: `${noneOpen ? 'No request is open now; the latest ones are these. ' : ''}${own.map(caseSummary).join(' ')} `
+        + 'Answer what the customer asked from this, in short sentences, one request at a time; say a request number digit by digit.',
     });
   });
 
@@ -975,8 +1153,8 @@ module.exports = function agentToolsRouter({
 
   // Module 14: the customer's recent requests, closed ones included, and their recent calls.
   router.post('/history', async (req, res) => {
-    const phone = normalizePhone(req.body?.phone);
-    if (!phone) return res.json({ found: false, message: 'The registered 10 digit mobile number is needed. Ask for it.' });
+    const { phone } = lookupPhone(req.body || {});
+    if (!phone) return res.json({ found: false, message: NUMBER_OF_CALL_UNKNOWN });
     const contact = await crm.findContactByPhone(phone);
     if (!contact) return res.json({ found: false, message: 'No customer record matches this number. Ask the customer to check the registered mobile number.' });
 

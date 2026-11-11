@@ -70,3 +70,11 @@ test('a spoken name matches only with a first and a last name, allowing one wron
   assert.equal(namesMatch('', 'Aarav Sharma'), false);
   assert.equal(namesMatch('Aarav Sharma', null), false);
 });
+
+test('names in Hindi script match names in Hindi script, and English letters match English letters', () => {
+  assert.equal(namesMatch('प्रदीप चौधरी', 'प्रदीप चौधरी'), true);
+  assert.equal(namesMatch('श्री प्रदीप चौधरी जी', 'प्रदीप कुमार चौधरी'), true, 'titles are ignored and a middle name on the record is fine');
+  assert.equal(namesMatch('प्रदीप', 'प्रदीप चौधरी'), false, 'a first name alone is not enough');
+  assert.equal(namesMatch('मीरा अय्यर', 'Meera Iyer'), false, 'scripts are not mixed; the agent sends both forms');
+  assert.equal(namesMatch('Arav Sharma', 'Demo Customer - Aarav Sharma'), true);
+});

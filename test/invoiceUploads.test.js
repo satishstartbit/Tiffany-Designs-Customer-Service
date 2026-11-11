@@ -199,11 +199,11 @@ test('check_invoice_upload tells the agent, once the caller says the invoice is 
   assert.deepEqual({ ...added, message: undefined }, {
     link_sent: true, uploaded: true, accepted: true, order_found: true, order_added: true, order_id: null, order_number: '00000130', invoice_number: 'INV-2010', message: undefined,
   });
-  assert.match(added.message, /^The invoice is received, and as no order matched it, an order was added from it\. Call tool:find_order now with order number 00000130 and the WhatsApp number as the mobile number/);
+  assert.match(added.message, /^The invoice is received, and as no order matched it, an order was added from it\. Call tool:find_order now with order number 00000130, and with the WhatsApp number as order_phone unless it is the number of this call/);
   assert.doesNotMatch(added.message, /801Z/, 'no record id');
 
   status = { sent: true, uploaded: true, order: { id: '801Z', orderNumber: '00000130', erpOrderId: 'TD-ORD-2010', invoiceNumber: 'INV-2010', added: false } };
-  assert.match((await check()).message, /matched to its order, which was updated from it\. Call tool:find_order now with order id TD-ORD-2010 /);
+  assert.match((await check()).message, /matched to its order, which was updated from it\. Call tool:find_order now with order id TD-ORD-2010, /);
 
   status = { sent: true, uploaded: true, caseNumber: '00001290' };
   const team = await check();

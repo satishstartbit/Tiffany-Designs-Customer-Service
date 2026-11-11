@@ -2,7 +2,7 @@ const { createApp } = require('../src/app');
 const { createScheduler, createMemoryJobStore } = require('../src/scheduler');
 const { createJobHandlers } = require('../src/callFlows');
 const {
-  lastTenDigits, phoneEnding, numberToConfirm, nameWords, namesMatch, sameReference,
+  lastTenDigits, phoneEnding, numberToConfirm, searchNameWords, namesMatch, sameReference,
 } = require('../src/rules');
 const { SERVICE_TYPES, requestKind, findOrderFromReferences } = require('../src/crm/crm');
 
@@ -135,6 +135,19 @@ function createFakeCrm({ now = () => Date.now() } = {}) {
     async findContactByPhone(phone) {
       return contacts.find((c) => [c.mobile, c.phone].some((p) => p && lastTenDigits(p) === lastTenDigits(phone))) || null;
     },
+    // Like the real one: every contact with the number, on whichever account.
+    async findContactsByPhone(phone) {
+      return contacts.filter((c) => [c.mobile, c.phone].some((p) => p && lastTenDigits(p) === lastTenDigits(phone)));
+    },
+    async findAccountIdsByPhone(phone) {
+      return [...new Set((await this.findContactsByPhone(phone)).map((c) => c.accountId).filter(Boolean))];
+    },
+    async findRecentOrdersForAccounts(accountIds, limit = 5) {
+      return orders.filter((o) => accountIds.includes(o.accountId)).slice(0, limit);
+    },
+    contacts,
+    orders,
+    serviceCases,
     async getContactById(id) {
       return contacts.find((c) => c.id === id) || null;
     },
@@ -186,7 +199,7 @@ function createFakeCrm({ now = () => Date.now() } = {}) {
     },
     async findCustomerByNameAndPin(customerName, postalCode) {
       const pin = String(postalCode || '').replace(/\D/g, '');
-      if (nameWords(customerName).length < 2 || !/^[1-9]\d{5}$/.test(pin)) return { status: 'invalid' };
+      if (searchNameWords(customerName).length < 2 || !/^[1-9]\d{5}$/.test(pin)) return { status: 'invalid' };
       const matches = contacts.filter((c) => namesMatch(customerName, c.name) && c.postalCode === pin);
       if (matches.length !== 1) return { status: matches.length ? 'ambiguous' : 'none' };
       return { status: 'found', contact: matches[0] };
@@ -258,9 +271,11 @@ function createFakeCrm({ now = () => Date.now() } = {}) {
         contactNumberEnding: phoneEnding(mobile), orderVerified: verified,
       };
     },
-    async getCaseStatus({ caseNumber, accountId }) {
+    // Like the real one: by number, or the open requests on these accounts (with `recent`, closed ones too).
+    async getCaseStatus({ caseNumber, accountId, accountIds = [], recent = false }) {
       if (caseNumber) return serviceCases.filter((c) => c.caseNumber === String(caseNumber).padStart(8, '0'));
-      return serviceCases.filter((c) => c.accountId === accountId);
+      const owners = [accountId, ...accountIds].filter(Boolean);
+      return serviceCases.filter((c) => owners.includes(c.accountId) && (recent || !c.closed)).slice(0, 3);
     },
     async getCaseNotice({ caseId, caseNumber }) {
       return serviceCases.find((c) => c.id === caseId || (caseNumber && c.caseNumber === String(caseNumber).padStart(8, '0'))) || null;

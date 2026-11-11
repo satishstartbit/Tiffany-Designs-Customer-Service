@@ -132,10 +132,19 @@ function sameWord(a, b) {
   return edits + (a.length - i) + (b.length - j) <= 1;
 }
 
-// A caller's spoken name counts as a match only with a first and a last name, each found on the record.
+// The words a name is searched and compared by: in English letters when it has a first and a last name in them, else
+// as written in its own script ("प्रदीप चौधरी"), which English letters alone would drop.
+function searchNameWords(name) {
+  const latin = nameWords(name);
+  return latin.length >= 2 ? latin : personNameWords(name).map((w) => w.toLowerCase());
+}
+
+// A caller's spoken name counts as a match only with a first and a last name, each found on the record. A name in
+// English letters is compared with the record's English letters, and one in Hindi script with its Hindi words.
 function namesMatch(spoken, recorded) {
-  const said = nameWords(spoken);
-  const known = nameWords(recorded);
+  const latin = nameWords(spoken);
+  const said = latin.length >= 2 ? latin : personNameWords(spoken).map((w) => w.toLowerCase());
+  const known = latin.length >= 2 ? nameWords(recorded) : personNameWords(recorded).map((w) => w.toLowerCase());
   return said.length >= 2 && said.every((w) => known.some((k) => sameWord(w, k)));
 }
 
@@ -169,6 +178,6 @@ function sameReference(said, stored) {
 }
 
 module.exports = {
-  ISSUE_TYPES, normalizePhone, lastTenDigits, phoneEnding, numberToConfirm, normalizeIssueType, nameWords, personNameWords, fullName,
+  ISSUE_TYPES, normalizePhone, lastTenDigits, phoneEnding, numberToConfirm, normalizeIssueType, nameWords, personNameWords, searchNameWords, fullName,
   hasName, namesMatch, joinDigits, trailingNumber, sameReference,
 };

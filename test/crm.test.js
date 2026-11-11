@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { createCrm, SERVICE_TYPES, escapeSoql, escapeSosl } = require('../src/crm/crm');
+const { createCrm, requestDetails, SERVICE_TYPES, escapeSoql, escapeSosl } = require('../src/crm/crm');
 
 function fakeSalesforce({ queries = {}, search = [], describe = {} } = {}) {
   const log = { queries: [], searches: [], creates: [], updates: [], batches: [], deletes: [], describes: [] };
@@ -1082,4 +1082,32 @@ test('findCustomerByNameAndPin gives nothing when two customers share the name a
   const twin = (id, accountId) => ({ Id: id, FirstName: 'Aarav', LastName: 'Sharma', AccountId: accountId, MailingPostalCode: '110001', Account: { Name: 'Aarav Sharma' } });
   const crm = createCrm({ salesforce: fakeSalesforce({ search: [twin('003A', '001A'), twin('003B', '001B')] }) });
   assert.deepEqual(await crm.findCustomerByNameAndPin('Aarav Sharma', '110001'), { status: 'ambiguous' });
+});
+
+test('requestDetails keeps what the customer reported and leaves out the address, the contact and any number', () => {
+  const description = [
+    '[Received outside business hours]',
+    'The side panel arrived cracked.',
+    'Part / component: Side organizer end panel (sticker 3)',
+    'Part number: KIS-WALKY-12',
+    'Quantity: 1',
+    'Product: Rocco Walky Kitchen Island',
+    'Order id given: TD-ORD-1001',
+    'Address: 20 by 30 Bhrugupath Mansarovar',
+    'Preferred slot: 2026-10-17 11 am',
+    'The customer confirmed the mobile number and address on file.',
+    'Contact for this request: Pradeep Kumar, on +919876543210, a number that is not on the customer record.',
+    'Call me on 98765 43210 or at a@b.com.',
+    'Captured by the AI voice agent.',
+  ].join('\r\n');
+  assert.deepEqual(requestDetails(description), {
+    issue: 'The side panel arrived cracked. Call me on or at',
+    part: 'Side organizer end panel (sticker 3)',
+    partNumber: 'KIS-WALKY-12',
+    quantity: '1',
+    product: 'Rocco Walky Kitchen Island',
+    preferredSlot: '2026-10-17 11 am',
+  });
+  assert.equal(requestDetails('Reason: wants a call back about the delivery').issue, 'wants a call back about the delivery');
+  assert.deepEqual(requestDetails(null), { issue: null, part: null, partNumber: null, quantity: null, product: null, preferredSlot: null });
 });

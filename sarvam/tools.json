@@ -1,9 +1,9 @@
 {
   "agent_id": "Tiffany-Des-4ab4474a-620f",
   "agent_note": "The stage agent named by SARVAM_AGENT_ID in .env (Tiffany Designs Customer Service Stage). The earlier agent Tiffany-Des-0db8e21d-e099 still exists, with its own older tools calling https://tiffany-designs-customer-service.onrender.com/.",
-  "committed_version": 18,
-  "draft_version": 19,
-  "draft_note": "Draft 19 (2026-10-30, not committed) has every tool below as written here and the prompt in agent-prompt.md: book_installation, register_service_request, request_human_callback, place_order and save_customer_details take use_calling_number (the server puts the number of the call, from caller_phone, on the record, so the model never types the caller's digits) and contact_number_ending (the last four digits the caller confirmed; the server saves nothing on any other number and answers with the number to say back), and send_invoice_upload_link takes use_calling_number; check_invoice_upload (new) tells the agent, once the caller says the invoice is uploaded, which order the upload found or added, so the request goes on in the same call; identify_caller times out after 3 seconds (was 6) and the server answers it within CALL_START_BUDGET_MS; the default opening_line is the Hindi welcome; the silence nudges wait 10, 15, 20 and 15 seconds (a minute before the call ends). Version 18 (committed 2026-10-30) is the same without those. Version 18 and draft 19: find_order gives an order's details only once a number given in the call is the mobile number the order was placed with (number_confirmed), asks for that number otherwise (order_phone), and saves it to the agent variable order_phone; get_details_on_file, get_installation_address and the three request tools send order_phone and caller_phone (from customer_phone), and the server registers installation, damage and replacement requests only for a confirmed order. The invoice upload takes only invoices sold by Tiffany Designs Private Limited and adds the order from the invoice when none matches. Version 17 added order_number to the request tools; versions 14 to 16 had earlier copies of them. identify_caller runs at call start (lifecycle on_start) and saves customer_phone, customer_name, opening_line and caller_details. The live phone deployment answers with the version it names.",
+  "committed_version": 23,
+  "draft_version": 24,
+  "draft_note": "Version 23 (committed 2026-11-11) is version 22 with the order search and request details change, and needs the server of the same change deployed first: find_order without an order reference finds the orders on the number on every customer record the number is on (one is answered in full, several are named to choose from), narrowed by customer_name (in English letters, with customer_name_local in Hindi script, on find_order, find_customer and check_request_status), and finds them by customer_name with postal_code for a caller whose number is not on the order (named only, until a number confirms one); check_request_status tells what each request noted (the issue, the part and quantity, the order and product, the slot asked for) and gives the latest requests when none is open; after an invoice upload, find_order gets the WhatsApp number as order_phone. Version 22 (committed 2026-11-11) is version 21 with the caller number fix, and needs the server of the same change deployed first: find_customer, find_order, get_details_on_file, check_request_status and get_service_history are called with phone left empty for the number of this call, which the server takes from caller_phone (customer_phone); find_customer, check_request_status and get_service_history send caller_phone for the first time; a phone the model passes no longer confirms an order (only caller_phone and order_phone do); and the prompt has the agent never write, guess or say the digits of the number of this call. Version 21 (committed 2026-11-11) is version 20 with automatic language detection on for Hindi and English. Earlier: Draft 19 (2026-10-30, not committed) has every tool below as written here and the prompt in agent-prompt.md: book_installation, register_service_request, request_human_callback, place_order and save_customer_details take use_calling_number (the server puts the number of the call, from caller_phone, on the record, so the model never types the caller's digits) and contact_number_ending (the last four digits the caller confirmed; the server saves nothing on any other number and answers with the number to say back), and send_invoice_upload_link takes use_calling_number; check_invoice_upload (new) tells the agent, once the caller says the invoice is uploaded, which order the upload found or added, so the request goes on in the same call; identify_caller times out after 3 seconds (was 6) and the server answers it within CALL_START_BUDGET_MS; the default opening_line is the Hindi welcome; the silence nudges wait 10, 15, 20 and 15 seconds (a minute before the call ends). Version 18 (committed 2026-10-30) is the same without those. Version 18 and draft 19: find_order gives an order's details only once a number given in the call is the mobile number the order was placed with (number_confirmed), asks for that number otherwise (order_phone), and saves it to the agent variable order_phone; get_details_on_file, get_installation_address and the three request tools send order_phone and caller_phone (from customer_phone), and the server registers installation, damage and replacement requests only for a confirmed order. The invoice upload takes only invoices sold by Tiffany Designs Private Limited and adds the order from the invoice when none matches. Version 17 added order_number to the request tools; versions 14 to 16 had earlier copies of them. identify_caller runs at call start (lifecycle on_start) and saves customer_phone, customer_name, opening_line and caller_details. The live phone deployment answers with the version it names.",
   "current_base_url": "https://tiffany-designs-customer-service-1.onrender.com/",
   "base_url_note": "The server is deployed on Render. Every tool calls current_base_url + path with POST and a JSON body; change all of them together if the server moves.",
   "auth_header": "x-agent-secret (AGENT_TOOL_SECRET in .env and on Render)",
@@ -85,31 +85,44 @@
       "modules": [
         3
       ],
-      "description": "Finds the customer by mobile number or, when the customer does not know the registered mobile, by full name and the six digit PIN code of their address. On an inbound call where customer_phone is set, call it with that number before the first reply, without asking. The answer has a message with the customer's name, recent orders and open requests, and the fields found, first_name (the name to address the customer by), customer_name, latest_order_id and open_requests (how many requests are open). When nothing is found, carry on without saying so.",
+      "description": "Finds the customer by the number of this call, by a mobile number the customer says, or, when the customer does not know the registered mobile, by full name and the six digit PIN code of their address. On an inbound call where caller_details is empty, call it with phone left empty before the first reply, without asking: the service system looks up the number the customer is calling from. The answer has a message with the customer's name, recent orders and open requests, and the fields found, first_name (the name to address the customer by), customer_name, number_ending (the last four digits of the number looked up), latest_order_id and open_requests (how many requests are open). When nothing is found, carry on without saying so. When the message says the number of this call is not known, ask the customer for the number and never guess or say any digits of it.",
       "parameters": [
         {
           "name": "phone",
           "type": "string",
           "required": false,
-          "description": "The customer's mobile number: the value of customer_phone when it is set, otherwise the 10 digit number the customer gave. Leave empty when the customer does not know it."
+          "description": "A 10 digit mobile number the customer said in this call that is not the number they are calling from. Leave empty for the customer's own number, the number of this call: the service system fills it in from the call. Never write digits the customer did not say in this call."
         },
         {
           "name": "customer_name",
           "type": "string",
           "required": false,
-          "description": "The customer's full name, first and last, when searching without the mobile number."
+          "description": "The customer's full name, first and last, written in English letters, for example Meera Iyer, when searching without the mobile number."
+        },
+        {
+          "name": "customer_name_local",
+          "type": "string",
+          "required": false,
+          "description": "The same full name written in Hindi script, for example मीरा अय्यर, whenever customer_name is given, since some records hold the name in Hindi script. Leave empty otherwise."
         },
         {
           "name": "postal_code",
           "type": "string",
           "required": false,
           "description": "The six digit PIN code of the customer's address, when searching without the mobile number."
+        },
+        {
+          "name": "caller_phone",
+          "from_agent_variable": "customer_phone",
+          "type": "string",
+          "required": false
         }
       ],
       "response_fields": {
         "found": "true when exactly one customer matches.",
         "verified_by": "mobile or name_and_pin.",
         "customer_name": "Full name on record.",
+        "number_ending": "The last four digits of the number looked up, or null for a search by name and PIN code.",
         "first_name": "First name to address the customer by.",
         "city": "City on the customer record.",
         "recent_orders": "Recent order ids with their delivery status.",
@@ -121,11 +134,12 @@
         "found",
         "first_name",
         "customer_name",
+        "number_ending",
         "latest_order_id",
         "open_requests",
         "error"
       ],
-      "resp_template": "{{ message }}\nFields: found={{ found | default('') }}, first_name={{ first_name | default('') }}, customer_name={{ customer_name | default('') }}, latest_order_id={{ latest_order_id | default('') }}, open_requests={{ open_requests | default('') }}{% if error is defined %}, error={{ error }}{% endif %}",
+      "resp_template": "{{ message }}\nFields: found={{ found | default('') }}, first_name={{ first_name | default('') }}, customer_name={{ customer_name | default('') }}, number_ending={{ number_ending | default('') }}, latest_order_id={{ latest_order_id | default('') }}, open_requests={{ open_requests | default('') }}{% if error is defined %}, error={{ error }}{% endif %}",
       "on_failure": "The customer lookup did not answer. Call tool:find_customer once more. When it fails again, carry on without the customer record and without saying so, and ask for the order id, order number or invoice number when the concern needs an order.",
       "save_to_variables": {},
       "timeout_seconds": 10
@@ -138,7 +152,7 @@
         4,
         15
       ],
-      "description": "Finds an order and, once it is confirmed as the customer's, gives its products, delivery status and delivery date, the kinds of request already open on it, and whether the order has a delivery address on record. Call it as soon as the customer gives any one of: the order id (for example TD-ORD-1001, ORD-010, or only the number at its end such as 1001), the order number of a phone order (digits, for example 122), or the invoice number (for example INV-2001, or only its digits). The order is confirmed when the number of this call, or a mobile number the customer says, is the mobile number the order was placed with; then number_confirmed is true and order_phone is saved for the other tools. When an order matches but is not confirmed, nothing about it is given: ask which mobile number the order was placed with and call this tool again with the same reference and that number as order_phone. With only a mobile number it gives the latest order on that number. The answer has a message with the facts and what to do next, and the fields found, number_confirmed, order_id, order_number, delivery_status, products, open_requests (installation, installation_followup, damage or replacement), mobile_on_order, address_on_order and details_missing. When no order is found after a second try, or no mobile number is on record for it, or details_missing is true, offer the WhatsApp invoice upload link with tool:send_invoice_upload_link.",
+      "description": "Finds a customer's order by any of: the order id (for example TD-ORD-1001, ORD-010, or only the number at its end such as 1001), the order number of a phone order (digits, for example 122), the invoice number (for example INV-2001, or only its digits), the mobile number, or the full name with the six digit PIN code. Call it as soon as the customer gives one of them. Once an order is confirmed as the customer's, it gives its products, delivery status and delivery date, the kinds of request already open on it, and whether it has a delivery address on record. An order is confirmed when the number of this call, which the service system fills in, or the number the customer says the order was placed with, passed as order_phone, is the mobile number the order was placed with; then number_confirmed is true and order_phone is saved for the other tools. When an order matches but is not confirmed, nothing about it is given: ask which mobile number the order was placed with and call this tool again with the same reference and that number as order_phone. Without an order reference it finds the orders on the number of this call, or on a mobile number the customer said, on every customer record the number is on, narrowed to one customer when customer_name is given: one order is answered in full, and several are named (several_orders true) so the customer can say which one; then call this tool again with that order id, or its order number when it has no order id. With the full name and the PIN code, for a caller whose number is not on the order, it names the customer's orders without their details; ask which order and the number it was placed with, and call this tool again with that reference and that number as order_phone. The answer has a message with the facts and what to do next, and the fields found, number_confirmed, several_orders, order_id, order_number, delivery_status, products, open_requests (installation, installation_followup, damage or replacement), mobile_on_order, address_on_order and details_missing. When no order is found after a second try, or no mobile number is on record for it, or details_missing is true, offer the WhatsApp invoice upload link with tool:send_invoice_upload_link.",
       "parameters": [
         {
           "name": "order_id",
@@ -162,13 +176,31 @@
           "name": "phone",
           "type": "string",
           "required": false,
-          "description": "The customer's 10 digit mobile number when it is already known: customer_phone when it is set, otherwise the number the customer gave. Leave empty when not known; it is not needed to find an order by its number."
+          "description": "A 10 digit mobile number the customer said in this call, to find the orders on it when no order reference is known. Leave empty for the number of this call, which the service system fills in, and whenever an order reference is given. Never write digits the customer did not say in this call. It does not confirm an order: the number the order was placed with goes in order_phone."
+        },
+        {
+          "name": "customer_name",
+          "type": "string",
+          "required": false,
+          "description": "The full name, first and last, the order is under, when the customer gives it, written in English letters, for example Meera Iyer: with the number it picks that customer's orders, and with postal_code it finds them when the number is not on the order. Leave empty otherwise."
+        },
+        {
+          "name": "customer_name_local",
+          "type": "string",
+          "required": false,
+          "description": "The same full name written in Hindi script, for example मीरा अय्यर, whenever customer_name is given, since some records hold the name in Hindi script. Leave empty otherwise."
+        },
+        {
+          "name": "postal_code",
+          "type": "string",
+          "required": false,
+          "description": "The six digit PIN code of the address the order went to, with customer_name, when the order cannot be found by its reference or the number. Leave empty otherwise."
         },
         {
           "name": "order_phone",
           "type": "string",
           "required": false,
-          "description": "The 10 digit mobile number the customer says the order was placed with, only after this tool asked for it. Leave empty otherwise."
+          "description": "The 10 digit mobile number the customer says the order was placed with, only after this tool or check_invoice_upload asked for it. Leave empty otherwise."
         },
         {
           "name": "caller_phone",
@@ -180,6 +212,8 @@
       "response_fields": {
         "found": "true when one order matches.",
         "number_confirmed": "true when a number given (phone, order_phone or the number of the call) is a mobile on the order's customer record; only then are the order's details given.",
+        "several_orders": "True when no order reference was given and several orders were found; the message names them to choose from.",
+        "orders": "Those orders: order_id, order_number, and for a number that confirms them, products and delivery_status.",
         "order_phone": "The number that confirmed the order, +91 form; left out when the order is not confirmed, so a number confirmed earlier in the call stays saved. Saved to the agent variable order_phone, which the other order tools send.",
         "order_id": "The order id, or null for a phone order.",
         "order_number": "The Salesforce order number.",
@@ -197,6 +231,7 @@
         "message",
         "found",
         "number_confirmed",
+        "several_orders",
         "order_id",
         "order_number",
         "delivery_status",
@@ -207,7 +242,7 @@
         "details_missing",
         "error"
       ],
-      "resp_template": "{{ message }}\nFields: found={{ found | default('') }}, number_confirmed={{ number_confirmed | default('') }}, order_id={{ order_id | default('') }}, order_number={{ order_number | default('') }}, delivery_status={{ delivery_status | default('') }}, products={{ products | default('') }}, open_requests={{ open_requests | default('') }}{% if details_missing is defined %}, mobile_on_order={{ mobile_on_order }}, address_on_order={{ address_on_order }}, details_missing={{ details_missing }}{% endif %}{% if error is defined %}, error={{ error }}{% endif %}",
+      "resp_template": "{{ message }}\nFields: found={{ found | default('') }}, number_confirmed={{ number_confirmed | default('') }}, several_orders={{ several_orders | default('') }}, order_id={{ order_id | default('') }}, order_number={{ order_number | default('') }}, delivery_status={{ delivery_status | default('') }}, products={{ products | default('') }}, open_requests={{ open_requests | default('') }}{% if details_missing is defined %}, mobile_on_order={{ mobile_on_order }}, address_on_order={{ address_on_order }}, details_missing={{ details_missing }}{% endif %}{% if error is defined %}, error={{ error }}{% endif %}",
       "on_failure": "The order lookup did not answer. Apologise briefly and call tool:find_order once more. When it fails again, note the order id as the customer gave it and carry on without the order.",
       "save_to_variables": {
         "order_phone": "order_phone"
@@ -249,7 +284,7 @@
           "name": "phone",
           "type": "string",
           "required": false,
-          "description": "The customer's registered 10 digit mobile number when no order is known: customer_phone when it is set, otherwise the number the customer gave. Leave empty when an order reference is given."
+          "description": "A 10 digit mobile number the customer said in this call, when no order is known and it is not the number they are calling from. Leave empty for the number of this call, which the service system fills in, and when an order reference is given. Never write digits the customer did not say in this call."
         },
         {
           "name": "order_phone",
@@ -1099,47 +1134,61 @@
         11,
         13
       ],
-      "description": "Gives the status of the customer's open service requests, with any scheduled technician visit and replacement part shipment. With the registered mobile number it gives that customer's open requests. Without the mobile, it needs the request number plus the full name on the request or the order id it is about. The answer has a message with the status to give, and the fields found, status (of the newest request) and open_requests (how many the answer covers).",
+      "description": "Tells the agent what the customer's service requests say and how far they have got: for each request, its kind, the day it was registered, the order and product it is for, what was noted (the issue in the customer's words), the part reported and how many, the preferred slot asked for, its status, and any scheduled technician visit or replacement part shipment. Use it whenever the customer asks about a request they registered earlier, on this call or another one: what was noted, which part, for which order, why it was raised, or its status. With phone left empty it gives the requests of the customer the number of this call belongs to, filled in by the service system, on every customer record the number is on: the open ones, or the latest ones, closed included, when none is open. With a mobile number the customer said, that customer's. Without a mobile number, it needs the request number plus the full name on the request or the order id it is about. The answer has a message with what to tell the customer, and the fields found, case_number (the newest request), status (of the newest request) and open_requests (how many are open). Addresses and contact numbers are never in it.",
       "parameters": [
         {
           "name": "phone",
           "type": "string",
           "required": false,
-          "description": "The customer's mobile number: customer_phone when it is set, otherwise the 10 digit number the customer gave. Leave empty when the customer does not know it."
+          "description": "A 10 digit mobile number the customer said in this call that is not the number they are calling from. Leave empty for the number of this call, which the service system fills in. Never write digits the customer did not say in this call."
         },
         {
           "name": "case_number",
           "type": "string",
           "required": false,
-          "description": "The service request number the customer gave, digits only. Leave empty to list all open requests on the mobile number."
+          "description": "The service request number the customer gave, digits only. Leave empty to get the customer's requests by the mobile number."
         },
         {
           "name": "customer_name",
           "type": "string",
           "required": false,
-          "description": "The customer's full name, first and last, when the mobile number is not known."
+          "description": "The customer's full name, first and last, written in English letters, for example Meera Iyer, with the request number when the mobile number is not known."
+        },
+        {
+          "name": "customer_name_local",
+          "type": "string",
+          "required": false,
+          "description": "The same full name written in Hindi script, for example मीरा अय्यर, whenever customer_name is given, since some records hold the name in Hindi script. Leave empty otherwise."
         },
         {
           "name": "order_id",
           "type": "string",
           "required": false,
-          "description": "The order id the request is about, for example TD-ORD-1001, when the mobile number is not known."
+          "description": "The order id or order number the request is about, for example TD-ORD-1001, with the request number when the mobile number is not known."
+        },
+        {
+          "name": "caller_phone",
+          "from_agent_variable": "customer_phone",
+          "type": "string",
+          "required": false
         }
       ],
       "response_fields": {
         "found": "true when a matching request was found.",
         "case_number": "Salesforce number of the newest request; the message has it as spoken.",
         "status": "Status of the newest request.",
-        "open_requests": "How many requests the answer covers."
+        "open_requests": "How many requests the answer covers.",
+        "requests": "Each request: case_number, service_type, sub_type, status, closed, registered_on, order_id, order_number, issue, part and quantity."
       },
       "send_to_agent": [
         "message",
         "found",
+        "case_number",
         "status",
         "open_requests",
         "error"
       ],
-      "resp_template": "{{ message }}\nFields: found={{ found | default('') }}, status={{ status | default('') }}, open_requests={{ open_requests | default('') }}{% if error is defined %}, error={{ error }}{% endif %}",
+      "resp_template": "{{ message }}\nFields: found={{ found | default('') }}, case_number={{ case_number | default('') }}, status={{ status | default('') }}, open_requests={{ open_requests | default('') }}{% if error is defined %}, error={{ error }}{% endif %}",
       "on_failure": "The request status did not answer. Apologise briefly and call tool:check_request_status once more. When it fails again, offer a call back from the service team.",
       "save_to_variables": {},
       "timeout_seconds": 10
@@ -1151,13 +1200,19 @@
       "modules": [
         14
       ],
-      "description": "Lists the customer's latest service requests, closed ones included, and their latest calls with Tiffany Designs, by the registered mobile number. Use it when the customer asks about earlier calls or past requests. The answer has a message with the history, most recent first, and the fields found and open_requests (how many are still open).",
+      "description": "Lists the customer's latest service requests, closed ones included, and their latest calls with Tiffany Designs, by the number of this call, filled in by the service system, or by a mobile number the customer said. Use it when the customer asks about earlier calls or past requests. The answer has a message with the history, most recent first, and the fields found and open_requests (how many are still open).",
       "parameters": [
         {
           "name": "phone",
           "type": "string",
-          "required": true,
-          "description": "The customer's mobile number: customer_phone when it is set, otherwise the 10 digit number the customer gave."
+          "required": false,
+          "description": "A 10 digit mobile number the customer said in this call that is not the number they are calling from. Leave empty for the number of this call, which the service system fills in. Never write digits the customer did not say in this call."
+        },
+        {
+          "name": "caller_phone",
+          "from_agent_variable": "customer_phone",
+          "type": "string",
+          "required": false
         }
       ],
       "response_fields": {

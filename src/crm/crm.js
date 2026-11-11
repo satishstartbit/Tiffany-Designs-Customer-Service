@@ -1,6 +1,6 @@
 const {
-  lastTenDigits, phoneEnding, numberToConfirm, normalizePhone, nameWords, fullName, hasName, namesMatch, joinDigits, trailingNumber,
-  sameReference,
+  lastTenDigits, phoneEnding, numberToConfirm, normalizePhone, nameWords, searchNameWords, fullName, hasName, namesMatch, joinDigits,
+  trailingNumber, sameReference,
 } = require('../rules');
 const { todayInIst } = require('../dates');
 const { createBusinessHours } = require('./businessHours');
@@ -192,6 +192,34 @@ function indianStatesOf(described, address = 'Shipping') {
     .map((state) => ({ value: state.value, label: state.label }));
 }
 
+// What a request's description says the customer reported, from the lines createServiceCase writes (and the free
+// text the site chat or staff write): the issue in the customer's words, the part, its number and quantity, the
+// product and the preferred slot. The address, the contact person and their number, and the internal notes are left
+// out, and phone numbers and email addresses are removed from what is kept, so the agent can read it to the caller.
+const DETAIL_LINES = {
+  'part / component': 'part',
+  'part number': 'partNumber',
+  quantity: 'quantity',
+  product: 'product',
+  'preferred slot': 'preferredSlot',
+};
+const SKIPPED_LINE = /^(\[|address:|contact for this request:|order id given:|order number given:|captured by|the order given is not linked|the customer (confirmed|gave a new|chose)|customer requested installation\.$)/i;
+function requestDetails(description) {
+  const details = { issue: null, part: null, partNumber: null, quantity: null, product: null, preferredSlot: null };
+  const issue = [];
+  for (const raw of String(description || '').split(/\r?\n/)) {
+    const line = raw.replace(/(?:\+91[\s-]?)?\b\d(?: ?\d){9,}\b/g, '').replace(/[^\s@]+@[^\s@]+\.[^\s@]+/g, '').replace(/\s{2,}/g, ' ').trim();
+    if (!line || SKIPPED_LINE.test(line)) continue;
+    const labelled = /^([^:]{3,20}):\s*(.+)$/.exec(line);
+    const key = labelled && DETAIL_LINES[labelled[1].trim().toLowerCase()];
+    if (key) details[key] = labelled[2].trim();
+    else issue.push(line.replace(/^reason:\s*/i, ''));
+  }
+  const text = issue.join(' ');
+  details.issue = text ? (text.length > 300 ? `${text.slice(0, 297).replace(/\s+\S*$/, '')}…` : text) : null;
+  return details;
+}
+
 function compact(fields) {
   return Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined && v !== null && v !== ''));
 }
@@ -211,8 +239,10 @@ async function findOrderFromReferences(lookups, { orderId, orderNumber, invoiceN
   // theirs, otherwise more is needed.
   const narrow = async (matches) => {
     if (matches.length > 1 && phone) {
-      const contact = await lookups.findContactByPhone(phone);
-      const own = matches.filter((o) => contact?.accountId && o.accountId === contact.accountId);
+      const accounts = lookups.findAccountIdsByPhone
+        ? await lookups.findAccountIdsByPhone(phone)
+        : [(await lookups.findContactByPhone(phone))?.accountId].filter(Boolean);
+      const own = matches.filter((o) => accounts.includes(o.accountId));
       if (own.length) return own;
     }
     return matches;
@@ -284,6 +314,29 @@ function createCrm({
     return toContact(rows[0] || null);
   }
 
+  // Every contact with this number. One mobile can sit on several customers' records (the org has numbers on two to
+  // four accounts), so a caller's orders and requests are looked up on all of them, not only the first contact's.
+  async function findContactsByPhone(phone) {
+    const digits = lastTenDigits(phone);
+    if (!digits) return [];
+    const forms = [`+91${digits}`, digits].map((f) => `'${f}'`).join(', ');
+    const [searched, exact] = await Promise.all([
+      salesforce.search(`FIND {${escapeSosl(digits)}} IN PHONE FIELDS RETURNING Contact(${CONTACT_FIELDS} ORDER BY CreatedDate) LIMIT 20`),
+      // Search indexing lags behind new records, so a contact created moments ago is matched exactly too.
+      salesforce.query(`SELECT ${CONTACT_FIELDS} FROM Contact WHERE MobilePhone IN (${forms}) OR Phone IN (${forms}) ORDER BY CreatedDate LIMIT 20`),
+    ]);
+    const seen = new Set();
+    return [...searched, ...exact]
+      .filter((r) => [r.MobilePhone, r.Phone].some((p) => lastTenDigits(p) === digits))
+      .filter((r) => !seen.has(r.Id) && seen.add(r.Id))
+      .map(toContact);
+  }
+
+  // The accounts of every contact with this number.
+  async function findAccountIdsByPhone(phone) {
+    return [...new Set((await findContactsByPhone(phone)).map((c) => c.accountId).filter(Boolean))];
+  }
+
   async function getContactById(contactId) {
     const rows = await salesforce.query(`SELECT ${CONTACT_FIELDS} FROM Contact WHERE Id = '${escapeSoql(contactId)}' LIMIT 1`);
     return toContact(rows[0]);
@@ -331,10 +384,18 @@ function createCrm({
   }
 
   async function findRecentOrdersForAccount(accountId, limit = 5) {
+    return findRecentOrdersForAccounts([accountId], limit);
+  }
+
+  // The newest orders across these accounts, with their products, so the agent can name each order.
+  async function findRecentOrdersForAccounts(accountIds, limit = 5) {
+    const ids = [...new Set([].concat(accountIds).filter(Boolean))];
+    if (!ids.length) return [];
     const rows = await salesforce.query(
-      `SELECT ${ORDER_FIELDS} FROM Order WHERE AccountId = '${escapeSoql(accountId)}' ORDER BY EffectiveDate DESC NULLS LAST LIMIT ${limit}`,
+      `SELECT ${ORDER_FIELDS} FROM Order WHERE AccountId IN (${ids.map((id) => `'${escapeSoql(id)}'`).join(', ')}) `
+      + `ORDER BY EffectiveDate DESC NULLS LAST, CreatedDate DESC LIMIT ${limit}`,
     );
-    return rows.map((r) => toOrder(r));
+    return Promise.all(rows.map(async (r) => toOrder(r, await getOrderItems(r.Id))));
   }
 
   // Customer to call about an order: the authorising contact, else the account's first contact with a number.
@@ -437,7 +498,7 @@ function createCrm({
   // not know the registered mobile. Only one customer may match; otherwise nothing is returned.
   async function findCustomerByNameAndPin(customerName, postalCode) {
     const pin = String(postalCode || '').replace(/\D/g, '');
-    const words = nameWords(customerName);
+    const words = searchNameWords(customerName);
     if (words.length < 2 || !/^[1-9]\d{5}$/.test(pin)) return { status: 'invalid' };
 
     const terms = words.map((w) => escapeSosl(w)).join(' OR ');
@@ -727,7 +788,7 @@ function createCrm({
 
     const needsOrder = mapping.serviceType !== 'General Query';
     const found = await findOrderFromReferences(
-      { findOrdersByReference, findOrdersByInvoice, findContactByPhone, getOrderById },
+      { findOrdersByReference, findOrdersByInvoice, findContactByPhone, findAccountIdsByPhone, getOrderById },
       { orderId: input.erpOrderId, orderNumber: input.orderNumber, invoiceNumber: input.invoiceNumber, phone: input.phone },
     );
     let { order } = found;
@@ -898,14 +959,23 @@ function createCrm({
     return null;
   }
 
-  async function getCaseStatus({ caseNumber, accountId }) {
+  // Requests by number, or the customer's requests on these accounts: the open ones, or with `recent` the newest ones
+  // closed included. Each comes with what was registered (requestDetails) and the products of its order, so a caller
+  // who rings again can be told what the request says.
+  async function getCaseStatus({ caseNumber, accountId, accountIds, recent = false }) {
     let where = caseWhere({ caseNumber });
-    if (!where && accountId) where = `AccountId = '${escapeSoql(accountId)}' AND IsClosed = false`;
+    const owners = [...new Set([accountId, ...[].concat(accountIds || [])].filter(Boolean))];
+    if (!where && owners.length) {
+      where = `AccountId IN (${owners.map((id) => `'${escapeSoql(id)}'`).join(', ')})${recent ? '' : ' AND IsClosed = false'}`;
+    }
     if (!where) return [];
     const rows = await salesforce.query(
-      `SELECT Id, CaseNumber, Service_Type__c, Service_Sub_Type__c, Status, CreatedDate, AccountId, Account.Name, Contact.Name, Order__r.ERP_Order_Id__c, `
-      + `${VISIT_SUBQUERY}, ${SHIPMENT_SUBQUERY} FROM Case WHERE ${where} ORDER BY CreatedDate DESC LIMIT 3`,
+      'SELECT Id, CaseNumber, Service_Type__c, Service_Sub_Type__c, Status, IsClosed, CreatedDate, ClosedDate, Description, AccountId, Account.Name, '
+      + 'Contact.Name, Order__c, Order__r.ERP_Order_Id__c, Order__r.OrderNumber, Invoice_Number__c, Damaged_Component__r.Name, '
+      + `Damaged_Component__r.Part_Number__c, ${VISIT_SUBQUERY}, ${SHIPMENT_SUBQUERY} FROM Case WHERE ${where} ORDER BY CreatedDate DESC LIMIT 3`,
     );
+    const items = Object.fromEntries(await Promise.all([...new Set(rows.map((r) => r.Order__c).filter(Boolean))]
+      .map(async (id) => [id, await getOrderItems(id)])));
     return rows.map((r) => ({
       id: r.Id,
       caseNumber: r.CaseNumber,
@@ -915,8 +985,15 @@ function createCrm({
       serviceType: r.Service_Type__c,
       subType: r.Service_Sub_Type__c,
       status: r.Status,
+      closed: Boolean(r.IsClosed),
       createdDate: r.CreatedDate,
+      closedDate: r.ClosedDate || null,
       erpOrderId: r.Order__r?.ERP_Order_Id__c || null,
+      orderNumber: r.Order__r?.OrderNumber || null,
+      invoiceNumber: r.Invoice_Number__c || null,
+      products: (items[r.Order__c] || []).map((i) => i.productName).filter(Boolean),
+      damagedPart: r.Damaged_Component__r ? { name: String(r.Damaged_Component__r.Name || '').split(' - ').pop(), partNumber: r.Damaged_Component__r.Part_Number__c || null } : null,
+      details: requestDetails(r.Description),
       visit: toVisit(r.Service_Visits__r?.records?.[0]),
       shipment: toShipment(r.Replacement_Shipments__r?.records?.[0]),
     }));
@@ -1102,6 +1179,9 @@ function createCrm({
 
   return {
     findContactByPhone,
+    findContactsByPhone,
+    findAccountIdsByPhone,
+    findRecentOrdersForAccounts,
     getContactById,
     getOrderById,
     getOrderByErpId,
@@ -1136,6 +1216,6 @@ function createCrm({
 }
 
 module.exports = {
-  createCrm, findOrderFromReferences, SERVICE_TYPES, AGENT_LANGUAGES, requestKind, escapeSoql, escapeSoqlLike, escapeSosl, soqlDateTime,
+  createCrm, findOrderFromReferences, requestDetails, SERVICE_TYPES, AGENT_LANGUAGES, requestKind, escapeSoql, escapeSoqlLike, escapeSosl, soqlDateTime,
   indianStatesOf,
 };
