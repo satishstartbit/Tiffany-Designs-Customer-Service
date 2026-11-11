@@ -88,6 +88,11 @@ module.exports = {
     baseUrl: (env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1').replace(/\/+$/, ''),
   },
 
+  // The website chat's text models on Groq, tried in this order (each has its own per-minute limit).
+  chat: {
+    models: String(env.CHAT_MODELS || '').split(',').map((m) => m.trim()).filter(Boolean),
+  },
+
   followUpDelayMinutes: int(env.FOLLOWUP_DELAY_MINUTES, 60),
   schedulerIntervalSeconds: int(env.SCHEDULER_INTERVAL_SECONDS, 30),
   jobStorePath: env.JOB_STORE_PATH || 'data/jobs.json',

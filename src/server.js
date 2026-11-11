@@ -16,6 +16,9 @@ const { createWhatsApp } = require('./whatsapp');
 const { createInvoiceReader } = require('./invoiceReader');
 const { createInvoiceUploads } = require('./crm/invoiceUploads');
 const { createApp } = require('./app');
+const { createGroqChat } = require('./chat/groqChat');
+const { createChatTools } = require('./chat/chatTools');
+const { createChatAgent } = require('./chat/chatAgent');
 
 function createJobStore(redis) {
   if (redis) return createRedisJobStore({ redis, prefix: config.redis.prefix });
@@ -82,6 +85,12 @@ function buildServer() {
   if (!reader.configured) console.warn('Invoice uploads are off until GROQ_API_KEY is set');
   if (!whatsapp.configured) console.warn('Invoice upload links are not sent on WhatsApp until WHATSAPP_API_KEY is set');
 
+  // The website chat: a Groq text model with the voice agent's tools (Sarvam has no text chat for the voice agent).
+  const chat = config.groq.apiKey && config.agentToolSecret
+    ? createChatAgent({ llm: createGroqChat({ apiKey: config.groq.apiKey, baseUrl: config.groq.baseUrl, models: config.chat.models }), tools: createChatTools() })
+    : null;
+  if (!chat) console.warn('The website chat is off until GROQ_API_KEY and AGENT_TOOL_SECRET are set');
+
   const app = createApp({
     crm,
     sarvam,
@@ -94,6 +103,7 @@ function buildServer() {
     invoices,
     productGuides: createProductGuides({ salesforce }),
     customers,
+    chat,
     checkSalesforce: async () => {
       const limits = await sfRequest('/limits');
       return { dailyApiRequests: limits.DailyApiRequests };

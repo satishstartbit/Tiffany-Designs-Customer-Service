@@ -65,6 +65,35 @@ const asList = (text) => String(text || '').split('\n')
   .filter(Boolean)
   .join('; ');
 
+const sentence = (text) => String(text).trim().replace(/[.\s]+$/, '');
+
+// The parts list as parts, each with its sticker number and the box it is listed under: a line of its own starting
+// with Box, or ending with a colon, heads a box ("Box 1 of 3"); "9. Fluted doors x 2, KIS-WALKY-10" is a part; a line
+// with a quantity but no number is a part without one; any other line continues the part before it.
+function partsOf(text) {
+  const parts = [];
+  let box = null;
+  for (const raw of String(text || '').split('\n')) {
+    const line = raw.trim().replace(/^[-*•]\s*/, '');
+    if (!line) continue;
+    const m = /^(\d{1,3})[.)]\s*(.+)$/.exec(line);
+    if (m) parts.push({ n: Number(m[1]), text: sentence(m[2]), box });
+    else if (/^box\b/i.test(line) || /:$/.test(line)) box = line.replace(/[\s:.]+$/, '');
+    else if (/\bx\s*\d/i.test(line)) parts.push({ n: null, text: sentence(line), box });
+    else if (parts.length) parts[parts.length - 1].text += ` ${sentence(line)}`;
+  }
+  return parts;
+}
+
+// Staff list the parts by box and drop the sticker numbers; the agent then cannot tell which part a sticker is.
+function stickerProblem(partsList, partsHaveNumberStickers) {
+  if (!partsHaveNumberStickers || !partsList) return null;
+  const parts = partsOf(partsList);
+  if (!parts.length || parts.some((p) => p.n !== null)) return null;
+  return 'Start each part with its sticker number, for example 9. Fluted doors x 2, so the voice agent can find a part by its sticker. '
+    + 'A line such as Box 1 of 3 can head the parts in each box.';
+}
+
 function createProductGuides({ salesforce, now = () => Date.now(), logger = console }) {
   let schemaCache = null;
 
@@ -182,6 +211,12 @@ function createProductGuides({ salesforce, now = () => Date.now(), logger = cons
       changed.push({ field: key, label, from: before, to: checked.value });
     }
 
+    if (changed.some((c) => c.field === 'partsList' || c.field === 'partsHaveNumberStickers')) {
+      const after = (key) => (Object.hasOwn(fields, GUIDE_FIELDS[key][0]) ? fields[GUIDE_FIELDS[key][0]] : row?.[GUIDE_FIELDS[key][0]] ?? null);
+      const problem = stickerProblem(after('partsList'), after('partsHaveNumberStickers'));
+      if (problem) return { error: 'invalid', field: 'partsList', message: problem };
+    }
+
     if (!row) {
       const missing = Object.keys(GUIDE_FIELDS).find((key) => {
         const meta = metas[GUIDE_FIELDS[key][0]];
@@ -261,7 +296,71 @@ function createProductGuides({ salesforce, now = () => Date.now(), logger = cons
   return { getGuide, saveGuide, findProductIds, publishedFor };
 }
 
-const sentence = (text) => String(text).trim().replace(/[.\s]+$/, '');
+// "Rocco Walky Kitchen Island Storage Cabinet with Wheels, Solid Rubber Wood Top, … (Grey, Large & Extendable)" ->
+// "Rocco Walky Kitchen Island Storage Cabinet with Wheels (Grey, Large & Extendable)": the name up to its first comma
+// and the variant in brackets at its end, which tells two sizes of a product apart.
+function shortName(name) {
+  const text = String(name || '').trim();
+  const variant = /\s*\(([^()]*)\)\s*$/.exec(text);
+  const head = (variant ? text.slice(0, variant.index) : text).split(',')[0].trim();
+  return variant ? `${head} (${variant[1].trim()})` : head;
+}
+
+const listed = (items) => (items.length > 1 ? `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}` : items[0] || '');
+const partLine = (p) => (p.n === null ? p.text : `${p.n}. ${p.text}`);
+
+// The parts as the agent hears them, box by box: "Box Common: 1. Left side panel x 1, KIS-WALKY-03; 2. …. Box 2 of 3: …".
+function partsText(text) {
+  const parts = partsOf(text);
+  if (!parts.length) return asList(text);
+  const groups = [];
+  for (const p of parts) {
+    const last = groups[groups.length - 1];
+    if (last && last.box === p.box) last.items.push(partLine(p));
+    else groups.push({ box: p.box, items: [partLine(p)] });
+  }
+  return groups.map((g) => (g.box ? `${g.box}: ${g.items.join('; ')}` : g.items.join('; '))).join('. ');
+}
+
+// "B. Minifix (minifix bolt or cam bolt) x 68" -> { letter: 'B', text: 'Minifix (minifix bolt or cam bolt) x 68' }
+function hardwareOf(text) {
+  const items = [];
+  for (const line of String(text || '').split('\n')) {
+    const m = /^\s*(?:[-*•]\s*)?([A-Z])[.)]\s*(.+?)\s*$/.exec(line);
+    if (m) items.push({ letter: m[1], text: sentence(m[2]) });
+  }
+  return items;
+}
+
+// Which steps use each piece of hardware, and how many: "1. Prepare the panels: B x 32, A x 1 pair" -> { B: ['1 (32)'], A: ['1 (1 pair)'] }
+function hardwareUse(text) {
+  const use = {};
+  for (const step of numbered(text)) {
+    const seen = new Set();
+    for (const m of step.text.replace(/^[^:]*:\s*/, '').matchAll(/\b([A-Z])\b(?:\s*x\s*(\d+(?:\s*pairs?)?))?/g)) {
+      if (seen.has(m[1])) continue;
+      seen.add(m[1]);
+      (use[m[1]] ||= []).push(m[2] ? `${step.n} (${m[2]})` : String(step.n));
+    }
+  }
+  return use;
+}
+
+const STOP_WORDS = ['the', 'a', 'an', 'of', 'for', 'and', 'with', 'my', 'is', 'in', 'on', 'part', 'parts', 'piece', 'pieces', 'number', 'no',
+  'hardware', 'item', 'letter', 'sticker'];
+// Enough of a stem that "shelves" finds "shelf" and "wheels" finds "Wheel".
+function stem(word) {
+  if (/ves$/.test(word)) return word.replace(/ves$/, 'f');
+  if (/ies$/.test(word)) return word.replace(/ies$/, 'y');
+  if (/(s|x|ch|sh)es$/.test(word)) return word.replace(/es$/, '');
+  if (/[^s]s$/.test(word)) return word.slice(0, -1);
+  return word;
+}
+const wordsOf = (text) => (String(text).toLowerCase().match(/[a-z0-9]+/g) || []).map(stem);
+const STOP = new Set(STOP_WORDS.map(stem));
+// "Box 2 of 3" and "box 2" -> "2"; "Box Common" and "the box marked common" -> "common".
+const boxKey = (text) => (String(text).toLowerCase().replace(/\bof\s+\d+\b/g, ' ').replace(/\b(boxes|box|the|marked|number|no)\b/g, ' ')
+  .match(/[a-z0-9]+/g) || []).join(' ');
 
 // Numbered lines ("1. Fit the wheels. Turn…") by their number; a line without a number continues the one before it.
 function numbered(text) {
@@ -276,14 +375,10 @@ function numbered(text) {
 
 const assemblyStepCount = (guide) => numbered(guide.assemblySteps).length;
 
-// "A. Cam bolts, for joining panels" -> { A: 'cam bolts' }
+// "A. Cam bolts, for joining panels" -> { A: 'Cam bolts' }; "B. Minifix x 68" -> { B: 'Minifix' }: the name without the
+// total count, which would read as the count a step needs.
 function hardwareNames(text) {
-  const names = {};
-  for (const line of String(text || '').split('\n')) {
-    const m = /^\s*([A-Z])[.)]\s*([^,\n]+)/.exec(line);
-    if (m) names[m[1]] = sentence(m[2]);
-  }
-  return names;
+  return Object.fromEntries(hardwareOf(text).map((h) => [h.letter, sentence(h.text.split(',')[0].replace(/\s+x\s*\d+.*$/i, ''))]));
 }
 
 // Each step with the hardware it uses named in it, so a step can be given without looking anything up:
@@ -315,7 +410,8 @@ function stepsWithHardware(guide) {
 // (purpose 'assembly'): the complete guide, with each step carrying its own hardware, to give one step at a time.
 function guideMessage(guide, purpose = 'parts') {
   const brand = guide.brand ? ` by ${guide.brand}` : '';
-  const lines = [`Product guide for the ${guide.productName}${brand}.`];
+  const lines = [`Product guide for the ${shortName(guide.productName)}${brand}.`];
+  if (guide.modelCode) lines.push(`Model: ${sentence(guide.modelCode)}.`);
   const stickers = guide.partsHaveNumberStickers ? 'Every part carries a number sticker.' : null;
 
   if (purpose === 'assembly') {
@@ -333,7 +429,7 @@ function guideMessage(guide, purpose = 'parts') {
     else if (guide.totalParts) lines.push(`The set has ${guide.totalParts} parts.`);
     if (stickers) lines.push(stickers);
     if (guide.toolsNeeded) lines.push(`Tools needed: ${sentence(guide.toolsNeeded)}.`);
-    if (guide.partsList) lines.push(`Parts by sticker number: ${asList(guide.partsList)}.`);
+    if (guide.partsList) lines.push(`Parts by sticker number: ${partsText(guide.partsList)}.`);
     if (guide.hardwareList) lines.push(`Hardware by letter: ${asList(guide.hardwareList)}.`);
     if (guide.deliveryCheckScript) lines.push(`Parts check before starting: ${asList(guide.deliveryCheckScript)}.`);
     const steps = stepsWithHardware(guide);
@@ -352,9 +448,10 @@ function guideMessage(guide, purpose = 'parts') {
   if (guide.setContents) lines.push(`In the set: ${sentence(guide.setContents)}.`);
   else if (guide.totalParts) lines.push(`The set has ${guide.totalParts} parts.`);
   if (stickers) lines.push(stickers);
-  if (guide.partsList) lines.push(`Parts: ${asList(guide.partsList)}.`);
-  const listed = `${guide.partsList || ''}\n${guide.hardwareList || ''}`;
-  const unlisted = guide.parts.filter((p) => p.partNumber && !listed.includes(p.partNumber));
+  if (guide.partsList) lines.push(`Parts: ${partsText(guide.partsList)}.`);
+  // Spare parts whose part number the guide gives nowhere, not even in its rules.
+  const inGuide = [guide.partsList, guide.hardwareList, guide.agentRules].join('\n');
+  const unlisted = guide.parts.filter((p) => p.partNumber && !inGuide.includes(p.partNumber));
   if (unlisted.length) lines.push(`Part numbers on record: ${unlisted.map((p) => `${p.name}, ${p.partNumber}`).join('; ')}.`);
   if (guide.hardwareList) lines.push(`Hardware: ${asList(guide.hardwareList)}.`);
   if (guide.deliveryCheckScript) lines.push(`Delivery check: ${asList(guide.deliveryCheckScript)}.`);
@@ -362,4 +459,90 @@ function guideMessage(guide, purpose = 'parts') {
   return lines.join(' ');
 }
 
-module.exports = { createProductGuides, guideMessage, assemblyStepCount, GUIDE_FIELDS };
+// What the agent hears about one item of a guide: a sticker number ("9", "part 9"), a hardware letter ("K"), several of
+// them ("12, 13 and 14"), an assembly step ("step 3"), a box ("box 2"), "hardware", "parts" or a part's name ("drawer
+// side", "cam bolt"). Short, so the agent can look a detail up again whenever it needs it: on long calls the full guide
+// an earlier turn gave drops out of what the model sees, and it then made parts, letters and counts up.
+function guideItem(guide, item) {
+  const product = shortName(guide.productName);
+  const ask = String(item || '').trim().replace(/[.?!\s]+$/, '');
+  const parts = partsOf(guide.partsList);
+  const hardware = hardwareOf(guide.hardwareList);
+  const usage = hardwareUse(guide.hardwarePerStep);
+  const hasUsage = Object.keys(usage).length > 0;
+  const boxes = [...new Set(parts.map((p) => p.box).filter(Boolean))];
+  const numbers = parts.map((p) => p.n).filter((n) => n !== null);
+  const partRange = numbers.length ? `${Math.min(...numbers)} to ${Math.max(...numbers)}` : null;
+  const letterRange = hardware.length ? `${hardware[0].letter} to ${hardware[hardware.length - 1].letter}` : null;
+  const askFor = [partRange && `the sticker number (${partRange})`, letterRange && `the hardware letter (${letterRange})`].filter(Boolean).join(' or ')
+    || 'what the part looks like';
+
+  const describePart = (p) => (p.n === null ? `part: ${p.text}` : `part ${p.n}: ${p.text}`) + (p.box ? `, in ${p.box}` : '');
+  const describeHardware = (h) => {
+    const steps = usage[h.letter];
+    const use = steps ? `, used in step${steps.length > 1 ? 's' : ''} ${listed(steps)}` : hasUsage ? ', not used in any assembly step' : '';
+    return `hardware ${h.letter}: ${h.text}${use}`;
+  };
+
+  function box(text) {
+    const key = boxKey(text);
+    const matched = boxes.filter((b) => boxKey(b) === key);
+    if (matched.length === 1) {
+      const inBox = parts.filter((p) => p.box === matched[0]);
+      const counts = inBox.map((p) => Number((/\bx\s*(\d+)/i.exec(p.text) || [])[1]));
+      const pieces = counts.every((c) => c > 0) ? `, ${counts.reduce((a, b) => a + b, 0)} pieces` : '';
+      return `${matched[0]} has ${inBox.length} part${inBox.length === 1 ? '' : 's'}${pieces}: ${inBox.map(partLine).join('; ')}`;
+    }
+    const checked = String(guide.deliveryCheckScript || '').split('\n').find((l) => key && boxKey(l.split(':')[0]) === key);
+    if (checked) return sentence(checked);
+    return boxes.length ? `its boxes are ${listed(boxes)}; ask which one` : 'its guide does not list the parts by box';
+  }
+
+  function byName(text) {
+    const wanted = wordsOf(text).filter((w) => !STOP.has(w));
+    const candidates = [
+      ...parts.map((p) => ({ said: describePart(p), words: new Set(wordsOf(p.text)) })),
+      ...hardware.map((h) => ({ said: describeHardware(h), words: new Set(wordsOf(h.text)) })),
+    ].map((c) => ({ ...c, score: wanted.filter((w) => c.words.has(w)).length })).filter((c) => c.score > 0);
+    if (!candidates.length) return `nothing in its guide is called ${text}; ask for ${askFor}`;
+    const best = Math.max(...candidates.map((c) => c.score));
+    const top = candidates.filter((c) => c.score === best);
+    if (top.length === 1) return top[0].said;
+    const more = top.length > 6 ? `; ${top.length - 6} more match, so ask for ${askFor}` : '';
+    return `${top.length} match ${text}: ${top.slice(0, 6).map((c) => c.said).join('; ')}${more}`;
+  }
+
+  function one(text) {
+    let m = /^(?:part|sticker|number|no\.?|#)?\s*(\d{1,3})$/i.exec(text);
+    if (m) {
+      const found = parts.filter((p) => p.n === Number(m[1]));
+      if (found.length) return found.map(describePart).join('; ');
+      return partRange ? `no part ${m[1]} is in its guide; its parts are numbered ${partRange}` : 'its parts list has no sticker numbers';
+    }
+    m = /^step\s*(\d{1,3})$/i.exec(text);
+    if (m) {
+      const steps = stepsWithHardware(guide);
+      if (!steps) return 'its guide has no numbered assembly steps';
+      return steps.find((s) => s.startsWith(`Step ${Number(m[1])} of `)) || `no step ${m[1]} is in its guide; it has ${steps.length} steps`;
+    }
+    m = /^(?:letter|hardware|item)?\s*([a-z])$/i.exec(text);
+    if (m) {
+      const h = hardware.find((x) => x.letter === m[1].toUpperCase());
+      if (h) return describeHardware(h);
+      return letterRange ? `no hardware letter ${m[1].toUpperCase()} is in its guide; its hardware is lettered ${letterRange}` : 'its guide has no hardware list';
+    }
+    if (/^(?:all\s+)?(?:the\s+)?hardware(?:\s+(?:list|pack))?$/i.test(text)) {
+      return hardware.length ? `hardware: ${hardware.map((h) => `${h.letter}. ${h.text}`).join('; ')}` : 'its guide has no hardware list';
+    }
+    if (/^(?:all\s+)?(?:the\s+)?parts?(?:\s+list)?$/i.test(text)) return guide.partsList ? `parts: ${partsText(guide.partsList)}` : 'its guide has no parts list';
+    if (/\bbox(es)?\b/i.test(text)) return box(text);
+    return byName(text);
+  }
+
+  // Several sticker numbers or letters at once: "12, 13 and 14", "A, B, C".
+  const pieces = ask.split(/\s*(?:,|&|\band\b)\s*/i).filter(Boolean);
+  const several = pieces.length > 1 && pieces.every((p) => /^(?:part\s*|sticker\s*|letter\s*)?(?:\d{1,3}|[a-z])$/i.test(p));
+  return `${product}, ${several ? pieces.map((p) => sentence(one(p))).join('; ') : sentence(one(ask))}.`;
+}
+
+module.exports = { createProductGuides, guideMessage, guideItem, assemblyStepCount, GUIDE_FIELDS };

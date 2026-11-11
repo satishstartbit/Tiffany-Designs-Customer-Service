@@ -1,9 +1,9 @@
 {
   "agent_id": "Tiffany-Des-4ab4474a-620f",
   "agent_note": "The stage agent named by SARVAM_AGENT_ID in .env (Tiffany Designs Customer Service Stage). The earlier agent Tiffany-Des-0db8e21d-e099 still exists, with its own older tools calling https://tiffany-designs-customer-service.onrender.com/.",
-  "committed_version": 26,
-  "draft_version": 27,
-  "draft_note": "Version 26 (committed 2026-11-11) is version 23 with the context and token fixes: every tool description and input shortened (about 41,900 to 23,600 characters the model reads), because with token_based_truncation a long tool answer pushed the customer's words out and the agent replied with its greeting, and long calls lost the name and the order; the prompt keeps everything learned in the call (name, order, numbers, address, slot) and never asks for it again, answers product questions from get_product_guide, never invents counts, and never repeats the opening line; place_order no longer requires customer_name; find_order shows customer_name; temperature 0.5. Version 25 is version 24 (the same as 23) frozen; version 24 was committed from the dashboard and the phone deployment points at it. Version 23 (committed 2026-11-11) is version 22 with the order search and request details change, and needs the server of the same change deployed first: find_order without an order reference finds the orders on the number on every customer record the number is on (one is answered in full, several are named to choose from), narrowed by customer_name (in English letters, with customer_name_local in Hindi script, on find_order, find_customer and check_request_status), and finds them by customer_name with postal_code for a caller whose number is not on the order (named only, until a number confirms one); check_request_status tells what each request noted (the issue, the part and quantity, the order and product, the slot asked for) and gives the latest requests when none is open; after an invoice upload, find_order gets the WhatsApp number as order_phone. Version 22 (committed 2026-11-11) is version 21 with the caller number fix, and needs the server of the same change deployed first: find_customer, find_order, get_details_on_file, check_request_status and get_service_history are called with phone left empty for the number of this call, which the server takes from caller_phone (customer_phone); find_customer, check_request_status and get_service_history send caller_phone for the first time; a phone the model passes no longer confirms an order (only caller_phone and order_phone do); and the prompt has the agent never write, guess or say the digits of the number of this call. Version 21 (committed 2026-11-11) is version 20 with automatic language detection on for Hindi and English. Earlier: Draft 19 (2026-10-30, not committed) has every tool below as written here and the prompt in agent-prompt.md: book_installation, register_service_request, request_human_callback, place_order and save_customer_details take use_calling_number (the server puts the number of the call, from caller_phone, on the record, so the model never types the caller's digits) and contact_number_ending (the last four digits the caller confirmed; the server saves nothing on any other number and answers with the number to say back), and send_invoice_upload_link takes use_calling_number; check_invoice_upload (new) tells the agent, once the caller says the invoice is uploaded, which order the upload found or added, so the request goes on in the same call; identify_caller times out after 3 seconds (was 6) and the server answers it within CALL_START_BUDGET_MS; the default opening_line is the Hindi welcome; the silence nudges wait 10, 15, 20 and 15 seconds (a minute before the call ends). Version 18 (committed 2026-10-30) is the same without those. Version 18 and draft 19: find_order gives an order's details only once a number given in the call is the mobile number the order was placed with (number_confirmed), asks for that number otherwise (order_phone), and saves it to the agent variable order_phone; get_details_on_file, get_installation_address and the three request tools send order_phone and caller_phone (from customer_phone), and the server registers installation, damage and replacement requests only for a confirmed order. The invoice upload takes only invoices sold by Tiffany Designs Private Limited and adds the order from the invoice when none matches. Version 17 added order_number to the request tools; versions 14 to 16 had earlier copies of them. identify_caller runs at call start (lifecycle on_start) and saves customer_phone, customer_name, opening_line and caller_details. The live phone deployment answers with the version it names.",
+  "committed_version": 27,
+  "draft_version": 28,
+  "draft_note": "Version 27 (committed 2026-11-11) is version 26 with the parts and open request changes, and needs the server of the same change deployed first: get_product_guide takes item (one sticker number, hardware letter, step, box, hardware or a part name such as cam bolt) and answers with just that, so on a long call the agent looks a detail up again instead of giving it from memory (the full guide drops out of view and the agent made letters and counts up); the prompt never lets it give a part, letter or count from memory, goes through a delivery check box by box, says counts as one number (अड़सठ for 68) and no longer has the cam bolts, letter A example; book_installation and register_service_request lose new_request and answer updated: a request of the same kind as one open on the order is added to that one (a reschedule moves it), and a new one is registered only when none of that kind is open. Version 26 (committed 2026-11-11) is version 23 with the context and token fixes: every tool description and input shortened (about 41,900 to 23,600 characters the model reads), because with token_based_truncation a long tool answer pushed the customer's words out and the agent replied with its greeting, and long calls lost the name and the order; the prompt keeps everything learned in the call (name, order, numbers, address, slot) and never asks for it again, answers product questions from get_product_guide, never invents counts, and never repeats the opening line; place_order no longer requires customer_name; find_order shows customer_name; temperature 0.5. Version 25 is version 24 (the same as 23) frozen; version 24 was committed from the dashboard and the phone deployment points at it. Version 23 (committed 2026-11-11) is version 22 with the order search and request details change, and needs the server of the same change deployed first: find_order without an order reference finds the orders on the number on every customer record the number is on (one is answered in full, several are named to choose from), narrowed by customer_name (in English letters, with customer_name_local in Hindi script, on find_order, find_customer and check_request_status), and finds them by customer_name with postal_code for a caller whose number is not on the order (named only, until a number confirms one); check_request_status tells what each request noted (the issue, the part and quantity, the order and product, the slot asked for) and gives the latest requests when none is open; after an invoice upload, find_order gets the WhatsApp number as order_phone. Version 22 (committed 2026-11-11) is version 21 with the caller number fix, and needs the server of the same change deployed first: find_customer, find_order, get_details_on_file, check_request_status and get_service_history are called with phone left empty for the number of this call, which the server takes from caller_phone (customer_phone); find_customer, check_request_status and get_service_history send caller_phone for the first time; a phone the model passes no longer confirms an order (only caller_phone and order_phone do); and the prompt has the agent never write, guess or say the digits of the number of this call. Version 21 (committed 2026-11-11) is version 20 with automatic language detection on for Hindi and English. Earlier: Draft 19 (2026-10-30, not committed) has every tool below as written here and the prompt in agent-prompt.md: book_installation, register_service_request, request_human_callback, place_order and save_customer_details take use_calling_number (the server puts the number of the call, from caller_phone, on the record, so the model never types the caller's digits) and contact_number_ending (the last four digits the caller confirmed; the server saves nothing on any other number and answers with the number to say back), and send_invoice_upload_link takes use_calling_number; check_invoice_upload (new) tells the agent, once the caller says the invoice is uploaded, which order the upload found or added, so the request goes on in the same call; identify_caller times out after 3 seconds (was 6) and the server answers it within CALL_START_BUDGET_MS; the default opening_line is the Hindi welcome; the silence nudges wait 10, 15, 20 and 15 seconds (a minute before the call ends). Version 18 (committed 2026-10-30) is the same without those. Version 18 and draft 19: find_order gives an order's details only once a number given in the call is the mobile number the order was placed with (number_confirmed), asks for that number otherwise (order_phone), and saves it to the agent variable order_phone; get_details_on_file, get_installation_address and the three request tools send order_phone and caller_phone (from customer_phone), and the server registers installation, damage and replacement requests only for a confirmed order. The invoice upload takes only invoices sold by Tiffany Designs Private Limited and adds the order from the invoice when none matches. Version 17 added order_number to the request tools; versions 14 to 16 had earlier copies of them. identify_caller runs at call start (lifecycle on_start) and saves customer_phone, customer_name, opening_line and caller_details. The live phone deployment answers with the version it names.",
   "current_base_url": "https://tiffany-designs-customer-service-1.onrender.com/",
   "base_url_note": "The server is deployed on Render. Every tool calls current_base_url + path with POST and a JSON body; change all of them together if the server moves.",
   "auth_header": "x-agent-secret (AGENT_TOOL_SECRET in .env and on Render)",
@@ -500,12 +500,12 @@
     },
     {
       "name": "get_product_guide",
-      "id": "d2182130-c0b8-4a39-81fa-0e7f471a121c",
+      "id": "ac12cee6-649b-4175-9e1b-614cb6880656",
       "path": "/api/agent/product-guide",
       "modules": [
         7
       ],
-      "description": "Gets the product guide for an order's products or a product the customer names. With purpose parts (default): the parts by sticker number with quantity and part number, the hardware by letter with quantity, the delivery check and the product rules; use it for questions about parts and hardware and for damaged, missing or wrong parts. With purpose assembly: the complete guide with every step and its hardware, to guide self-assembly one step at a time. Answer only from its message. Fields: found, has_assembly_steps, step_count; when found is false, use tool:find_parts for parts or offer an installation visit for assembly.",
+      "description": "Gets the product guide for an order's products or a product the customer names. With purpose parts (default): the parts by sticker number with quantity and part number, the hardware by letter with quantity, the delivery check and the product rules; use it for questions about parts and hardware and for damaged, missing or wrong parts. With purpose assembly: the complete guide with every step and its hardware, to guide self-assembly one step at a time. With item: only that part, letter, step or box, short enough to ask again whenever a detail is needed. Answer only from its message. Fields: found, has_assembly_steps, step_count; when found is false, use tool:find_parts for parts or offer an installation visit for assembly.",
       "parameters": [
         {
           "name": "order_id",
@@ -540,6 +540,12 @@
             "assembly"
           ],
           "description": "parts (default) or assembly."
+        },
+        {
+          "name": "item",
+          "type": "string",
+          "required": false,
+          "description": "Only one sticker number, hardware letter, step, box or part name, in English, for example 9, K, step 3, box 2, hardware or cam bolt."
         }
       ],
       "response_fields": {
@@ -547,7 +553,8 @@
         "purpose": "parts (the default) or assembly, as the guide was asked for.",
         "has_assembly_steps": "true when the guide has assembly steps to walk the customer through.",
         "products": "Each product with parts_have_number_stickers and its parts (name, part_number).",
-        "step_count": "With purpose assembly, how many numbered assembly steps the guide has; 0 when it has none. Absent for parts."
+        "step_count": "With purpose assembly, how many numbered assembly steps the guide has; 0 when it has none. Absent for parts.",
+        "item": "With item, the item looked up; the message then has only that part, letter, step or box."
       },
       "send_to_agent": [
         "message",
@@ -556,7 +563,7 @@
         "step_count",
         "error"
       ],
-      "resp_template": "{{ message }}\n{% if found and not step_count and (purpose is not defined or purpose == 'assembly') %}This answer has no assembly steps. For help with assembly, the agent says that the assembly steps for this product are not on record, offers an installation visit by the service team, and gives no step, number of steps or tool of its own.\n{% endif %}Fields: found={{ found | default('') }}{% if has_assembly_steps is defined %}, has_assembly_steps={{ has_assembly_steps }}{% endif %}{% if step_count is defined %}, step_count={{ step_count }}{% endif %}{% if error is defined %}, error={{ error }}{% endif %}",
+      "resp_template": "{{ message }}\n{% if found and not step_count and item is not defined and (purpose is not defined or purpose == 'assembly') %}This answer has no assembly steps. For help with assembly, the agent says that the assembly steps for this product are not on record, offers an installation visit by the service team, and gives no step, number of steps or tool of its own.\n{% endif %}Fields: found={{ found | default('') }}{% if has_assembly_steps is defined %}, has_assembly_steps={{ has_assembly_steps }}{% endif %}{% if step_count is defined %}, step_count={{ step_count }}{% endif %}{% if error is defined %}, error={{ error }}{% endif %}",
       "on_failure": "The product guide did not answer. For a part, match it with tool:find_parts instead. For assembly help, offer an installation visit by the service team.",
       "save_to_variables": {},
       "timeout_seconds": 10
@@ -640,14 +647,14 @@
     },
     {
       "name": "book_installation",
-      "id": "5d8b3321-1e71-40fc-a9f3-9c7f69201540",
+      "id": "09853f2d-250e-4348-9725-43b8fcf1e275",
       "path": "/api/agent/installation",
       "modules": [
         6,
         8,
         9
       ],
-      "description": "Registers an installation request, or moves one (reschedule), for an order find_order found and confirmed, with the date and time from the latest resolve_date answer, after the customer confirmed the slot and the place. The slot must be Monday to Saturday, 10 am to 6 pm, and still ahead. The answer has a message with the request number and slot, or what to ask instead, and the fields created, spoken_case_number (say it digit by digit), existing_request (one is open: ask whether the customer wants an update, a new request or to move it) and within_business_hours.",
+      "description": "Registers an installation request, or moves one (reschedule), for an order find_order found and confirmed, with the date and time from the latest resolve_date answer, after the customer confirmed the slot and the place. The slot must be Monday to Saturday, 10 am to 6 pm, and still ahead. The answer has a message with the request number and slot, or what to ask instead, and the fields created, spoken_case_number (say it digit by digit), updated (one was open on the order and is updated with this slot instead; say that request is updated) and within_business_hours.",
       "parameters": [
         {
           "name": "preferred_date",
@@ -684,12 +691,6 @@
           "type": "boolean",
           "required": false,
           "description": "True when the customer agreed to the mobile number on file; the service system fills it in."
-        },
-        {
-          "name": "new_request",
-          "type": "boolean",
-          "required": false,
-          "description": "True only when one is already open and the customer wants a new one."
         },
         {
           "name": "phone",
@@ -794,24 +795,24 @@
         "created": "true when the request is registered.",
         "case_number": "Salesforce request number, for example 00001100.",
         "spoken_case_number": "The request number to say, digit by digit, for example 1100.",
-        "existing_request": "true when an installation request is already open on the order and nothing was registered.",
         "within_business_hours": "false when registered outside service hours.",
         "service_route": "Internal or External Provider.",
         "order_verified": "true when the order is linked: a number given in the call (the mobile for the request, the number of the call, or order_phone) is a mobile on the order's customer record. Installation, damage and replacement requests are registered only then.",
         "preferred_date": "The registered date, YYYY-MM-DD.",
         "preferred_time": "The registered time.",
         "case_id": "Salesforce record id; not sent to the agent.",
-        "contact_number_ending": "The last four digits of the number the service team will call; the message says them."
+        "contact_number_ending": "The last four digits of the number the service team will call; the message says them.",
+        "updated": "true when an installation request was already open on the order: it is updated with this slot (and marked a reschedule for one), and no new request is made; case_number is that request."
       },
       "send_to_agent": [
         "message",
         "created",
         "spoken_case_number",
-        "existing_request",
+        "updated",
         "within_business_hours",
         "error"
       ],
-      "resp_template": "{{ message }}\nFields: created={{ created | default('') }}, spoken_case_number={{ spoken_case_number | default('') }}, existing_request={{ existing_request | default('') }}, within_business_hours={{ within_business_hours | default('') }}{% if error is defined %}, error={{ error }}{% endif %}",
+      "resp_template": "{{ message }}\nFields: created={{ created | default('') }}, spoken_case_number={{ spoken_case_number | default('') }}, updated={{ updated | default('') }}, within_business_hours={{ within_business_hours | default('') }}{% if error is defined %}, error={{ error }}{% endif %}",
       "on_failure": "The installation request could not be registered because the service system did not answer. Apologise briefly and call tool:book_installation once more with the same details. When it fails again, tell the customer the details are noted for the service team, who will follow up.",
       "save_to_variables": {
         "case_number": "case_number"
@@ -820,7 +821,7 @@
     },
     {
       "name": "register_service_request",
-      "id": "76022215-55e3-4cb2-9326-0d05c77248aa",
+      "id": "e952d58c-0338-44a7-8f10-bd7b0152a60c",
       "path": "/api/agent/cases",
       "modules": [
         5,
@@ -829,7 +830,7 @@
         9,
         12
       ],
-      "description": "Registers a service request: a damaged, defective, missing or wrong part, a quality problem, a replacement, a return, an installation follow-up, a re-installation, or a general question. Except a general question, only for an order find_order found and confirmed. Call it once, after the customer confirmed the summary. The answer has a message with the request number (say it digit by digit) or what to do, and the fields created, spoken_case_number, existing_request (one of this kind is open: ask whether the customer wants an update or a new request) and within_business_hours.",
+      "description": "Registers a service request: a damaged, defective, missing or wrong part, a quality problem, a replacement, a return, an installation follow-up, a re-installation, or a general question. Except a general question, only for an order find_order found and confirmed. Call it once, after the customer confirmed the summary. The answer has a message with the request number (say it digit by digit) or what to do, and the fields created, spoken_case_number, updated (one of this kind was open on the order and is updated instead; say that request is updated) and within_business_hours.",
       "parameters": [
         {
           "name": "issue_type",
@@ -861,12 +862,6 @@
           "type": "boolean",
           "required": false,
           "description": "True when the customer agreed to the details on file; the service system fills them in."
-        },
-        {
-          "name": "new_request",
-          "type": "boolean",
-          "required": false,
-          "description": "True only when one of this kind is already open and the customer wants a new one."
         },
         {
           "name": "phone",
@@ -989,22 +984,22 @@
         "created": "true when the request is registered.",
         "case_number": "Salesforce request number.",
         "spoken_case_number": "The request number to say.",
-        "existing_request": "true when a request of this kind is already open on the order and nothing was registered.",
         "within_business_hours": "false when registered outside service hours.",
         "service_route": "Internal or External Provider.",
         "order_verified": "true when the order is linked: a number given in the call (the mobile for the request, the number of the call, or order_phone) is a mobile on the order's customer record. Installation, damage and replacement requests are registered only then.",
         "case_id": "Salesforce record id; not sent to the agent.",
-        "contact_number_ending": "The last four digits of the number the service team will call; the message says them."
+        "contact_number_ending": "The last four digits of the number the service team will call; the message says them.",
+        "updated": "true when a request of this kind was already open on the order: the details are added to it, and no new request is made; case_number is that request."
       },
       "send_to_agent": [
         "message",
         "created",
         "spoken_case_number",
-        "existing_request",
+        "updated",
         "within_business_hours",
         "error"
       ],
-      "resp_template": "{{ message }}\nFields: created={{ created | default('') }}, spoken_case_number={{ spoken_case_number | default('') }}, existing_request={{ existing_request | default('') }}, within_business_hours={{ within_business_hours | default('') }}{% if error is defined %}, error={{ error }}{% endif %}",
+      "resp_template": "{{ message }}\nFields: created={{ created | default('') }}, spoken_case_number={{ spoken_case_number | default('') }}, updated={{ updated | default('') }}, within_business_hours={{ within_business_hours | default('') }}{% if error is defined %}, error={{ error }}{% endif %}",
       "on_failure": "The service request could not be registered because the service system did not answer. Apologise briefly and call tool:register_service_request once more with the same details. When it fails again, tell the customer the details are noted for the service team, who will follow up.",
       "save_to_variables": {
         "case_number": "case_number"

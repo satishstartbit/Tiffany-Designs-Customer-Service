@@ -6,7 +6,7 @@ const { formatDate, formatDateTime, formatClock, describeWeek, spokenCaseNumber,
 const { resolveDate, todayInIst, MAX_DAYS_AHEAD } = require('../dates');
 const { checkInstallationDay, checkInstallationSlot, INSTALLATION_HOURS } = require('../installationSlots');
 const { formatRupees } = require('../crm/orderItems');
-const { guideMessage, assemblyStepCount } = require('../crm/productGuides');
+const { guideMessage, guideItem, assemblyStepCount } = require('../crm/productGuides');
 const { findOrderFromReferences } = require('../crm/crm');
 const { welcomeLine } = require('../callFlows');
 
@@ -15,6 +15,8 @@ const MAX_ORDERS_LISTED = 5;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const INDIAN_MOBILE = /^\+91[6-9]\d{9}$/;
 const LATE = Symbol('late');
+// Ends a full product guide answer, which drops out of what the model sees on a long call.
+const ITEM_AGAIN = 'To give a part, letter, box or step later in this call, call this tool again with item set to it.';
 
 // The promise's value, or LATE once `deadline` (epoch ms) has passed. A promise that loses keeps running; its failure
 // is not left unhandled.
@@ -226,7 +228,7 @@ function openRequestsLine(requests) {
   const newestOfKind = requests.filter((r) => !kinds.has(r.kind) && kinds.add(r.kind));
   if (!newestOfKind.length) return '';
   const listed = newestOfKind.map((r) => `${REQUEST_KINDS[r.kind]}, registered on ${formatDate(r.createdDate)}`).join('; ');
-  return ` Open requests on this order: ${listed}. Before registering another request of the same kind, ask whether the customer wants an update on it or a new request.`;
+  return ` Open requests on this order: ${listed}. A request of the same kind updates the open one: say that the open request will be updated with it; no new request is made.`;
 }
 
 // Refusals are HTTP 200 so the agent hears the reason; a non-2xx makes Sarvam speak the generic failure line.
@@ -234,20 +236,28 @@ function refused(res, message) {
   return res.json({ created: false, case_number: null, message });
 }
 
-function caseResponse(res, result, successMessage, extra = {}) {
-  if (result.existingRequest) {
-    const open = result.existingRequest;
+// `updatedMessage` says what an update added to the open request of the same kind (default: the details).
+function caseResponse(res, result, successMessage, extra = {}, updatedMessage = () => 'the new details are added to it') {
+  if (result.numberToConfirm) return refused(res, confirmNumberMessage(result.numberToConfirm, 'this request'));
+  const reached = result.contactNumberEnding ? ` The service team will call the number ending ${spokenDigits(result.contactNumberEnding)}.` : '';
+  if (result.updated) {
+    const spoken = spokenCaseNumber(result.caseNumber);
     return res.json({
       created: false,
-      case_number: null,
-      existing_request: true,
-      message: `${capitalized(REQUEST_KINDS[open.kind])} for this order is already open, registered on ${formatDate(open.createdDate)}. `
-        + 'Ask the customer whether they want an update on that request or a new request. For a new request, call this tool again with new_request set to true.',
+      updated: true,
+      case_id: result.caseId,
+      case_number: result.caseNumber,
+      spoken_case_number: spoken,
+      within_business_hours: result.withinBusinessHours,
+      order_verified: result.orderVerified,
+      contact_number_ending: result.contactNumberEnding || null,
+      ...extra,
+      message: `${capitalized(REQUEST_KINDS[result.kind] || 'a request')} for this order was already open, request ${spoken}, registered on `
+        + `${formatDate(result.registeredOn)}, so no new request is made: it is updated, and ${updatedMessage(spoken)}.${reached} `
+        + `Tell the customer request ${spoken} is updated.${result.withinBusinessHours ? '' : ' The service team will follow up on the next working day.'}`,
     });
   }
-  if (result.numberToConfirm) return refused(res, confirmNumberMessage(result.numberToConfirm, 'this request'));
   if (!result.created) return refused(res, result.error);
-  const reached = result.contactNumberEnding ? ` The service team will call the number ending ${spokenDigits(result.contactNumberEnding)}.` : '';
   return res.json({
     created: true,
     case_id: result.caseId,
@@ -357,8 +367,11 @@ module.exports = function agentToolsRouter({
     });
   });
 
-  function caseInput(body, issueType) {
+  // `req` says whether the website chat called (x-channel: chat), so the request names where it came from.
+  function caseInput(body, issueType, req) {
+    const fromChat = req?.get?.('x-channel') === 'chat';
     return {
+      ...(fromChat ? { origin: 'Web', capturedBy: 'Captured by the website chat assistant.' } : {}),
       issueType,
       description: body.description,
       phone: chosenPhone(body).phone,
@@ -385,7 +398,6 @@ module.exports = function agentToolsRouter({
       numberEnding: body.contact_number_ending,
       confirmNumber: true,
       useDetailsOnFile: isTrue(body.use_details_on_file),
-      newRequest: isTrue(body.new_request),
       atDeliveryAddress: isTrue(body.at_delivery_address),
     };
   }
@@ -936,9 +948,12 @@ module.exports = function agentToolsRouter({
   // part with its sticker number, quantity and part number, the hardware, the delivery check and the rules for that
   // product, so the agent goes through a damaged, defective or missing part one part at a time; with purpose
   // 'assembly' the complete guide, each numbered step with its own hardware, so it walks the customer through assembly.
+  // With item (a sticker number, hardware letter, step, box or part name), only that item: a short answer the agent
+  // asks for again whenever it needs a detail, because on long calls the full guide drops out of what the model sees.
   router.post('/product-guide', async (req, res) => {
     const body = req.body || {};
     const purpose = /assembl/i.test(String(body.purpose || '')) ? 'assembly' : 'parts';
+    const item = String(body.item || '').replace(/\s+/g, ' ').trim().slice(0, 80);
     const noGuide = purpose === 'assembly'
       ? 'No assembly guide is on record for this product. Offer an installation visit by the service team instead.'
       : 'No product guide is on record for this product. Match the part with tool:find_parts instead.';
@@ -955,6 +970,15 @@ module.exports = function agentToolsRouter({
     }
     const guides = await productGuides.publishedFor(productIds);
     if (!guides.length) return res.json({ found: false, message: noGuide });
+    if (item) {
+      return res.json({
+        found: true,
+        purpose,
+        item,
+        has_assembly_steps: guides.some((g) => Boolean(g.assemblySteps)),
+        message: guides.map((g) => guideItem(g, item)).join(' '),
+      });
+    }
     return res.json({
       found: true,
       purpose,
@@ -965,7 +989,7 @@ module.exports = function agentToolsRouter({
         parts_have_number_stickers: Boolean(g.partsHaveNumberStickers),
         parts: g.parts.map((p) => ({ name: p.name, part_number: p.partNumber })),
       })),
-      message: guides.map((g) => guideMessage(g, purpose)).join(' '),
+      message: `${guides.map((g) => guideMessage(g, purpose)).join(' ')} ${ITEM_AGAIN}`,
     });
   });
 
@@ -976,7 +1000,7 @@ module.exports = function agentToolsRouter({
       return refused(res, 'A short description of the issue is required. Call this tool again with one sentence describing the problem.');
     }
     if (chosenPhone(req.body).unknown) return refused(res, CALLING_NUMBER_UNKNOWN);
-    const result = await crm.createServiceCase(caseInput(req.body, issueType));
+    const result = await crm.createServiceCase(caseInput(req.body, issueType, req));
     return caseResponse(res, result, (n) => `Service request ${n} is registered.`);
   });
 
@@ -1004,10 +1028,12 @@ module.exports = function agentToolsRouter({
         preferred_time: slot.text,
       },
       reschedule ? 'installation_reschedule' : 'installation',
+      req,
     ));
     const place = { delivery: ' at the delivery address', customer: ' at the address on file' }[result.addressSource] || '';
     return caseResponse(res, result, (n) => `Installation request ${n} is registered${place} with a preferred slot of ${resolved.spoken}, ${slot.spoken}. `
-      + 'The service team confirms the appointment.', { preferred_date: resolved.date, preferred_time: slot.text });
+      + 'The service team confirms the appointment.', { preferred_date: resolved.date, preferred_time: slot.text },
+    () => `its preferred slot is now ${resolved.spoken}, ${slot.spoken}${place}, which the service team confirms`);
   });
 
   router.post('/escalate', async (req, res) => {
@@ -1015,6 +1041,7 @@ module.exports = function agentToolsRouter({
     const result = await crm.createServiceCase(caseInput(
       { ...req.body, description: `Reason: ${req.body?.reason || 'not stated'}` },
       'escalation',
+      req,
     ));
     return caseResponse(res, result, (n) => `Request ${n} is flagged for a service team member to call back.`);
   });

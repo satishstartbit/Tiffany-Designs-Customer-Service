@@ -79,6 +79,8 @@ function createFakeCrm({ now = () => Date.now() } = {}) {
   const savedCustomers = [];
   // Open requests on orders as the duplicate check sees them, newest first; tests add their own.
   const openRequests = [];
+  // Open requests a new request of the same kind was added to.
+  const updated = [];
   const savedLanguages = [];
   const weekly = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
     .map((day) => ({ day, window: day === 'Sunday' ? null : { start: 9 * 60, end: 18 * 60 } }));
@@ -99,6 +101,7 @@ function createFakeCrm({ now = () => Date.now() } = {}) {
 
   return {
     created,
+    updated,
     tasks,
     state,
     savedCustomers,
@@ -249,15 +252,21 @@ function createFakeCrm({ now = () => Date.now() } = {}) {
       if (!input.phone && !(linked && input.useDetailsOnFile)) {
         return { created: false, error: 'A mobile number is needed to register the request.' };
       }
-      // Like the real one: a new request of a kind already open on the order is refused unless the caller wants a second.
-      const kind = input.issueType === 'installation_reschedule' ? null : requestKind(serviceType, subType);
-      const existing = linked && kind && !input.newRequest ? openRequests.find((r) => r.orderId === linked.id && r.kind === kind) : null;
-      if (existing) return { created: false, existingRequest: existing, error: `Request ${existing.caseNumber} of this kind is already open for the order.` };
+      // Like the real one: a request of a kind already open on the order (a reschedule is an installation) updates it.
+      const kind = requestKind(serviceType, subType);
+      const existing = linked && kind ? openRequests.find((r) => r.orderId === linked.id && r.kind === kind) : null;
       // Like the real one: for the voice agent, nothing is saved until the caller agreed to the number by its ending.
       const mobile = input.phone || (await this.getDetailsOnFile({ order: linked })).mobile;
       if (input.confirmNumber) {
         const unconfirmed = numberToConfirm(mobile, { confirmedEnding: input.numberEnding, given: input.phone, caller: input.callerPhone });
         if (unconfirmed) return { created: false, numberToConfirm: unconfirmed };
+      }
+      if (existing) {
+        updated.push({ caseNumber: existing.caseNumber, input, updatedAt: now() });
+        return {
+          created: false, updated: true, kind, caseId: `500-${existing.caseNumber}`, caseNumber: existing.caseNumber, registeredOn: existing.createdDate,
+          withinBusinessHours: state.withinBusinessHours, contactNumberEnding: phoneEnding(mobile), orderVerified: true,
+        };
       }
       const verified = Boolean(linked);
       const order = linked;

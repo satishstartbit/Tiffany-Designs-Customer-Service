@@ -1,5 +1,5 @@
-// The website chat on /support (web/lib/chat.js): Sarvam's text chat protocol, to the same agent as the website call,
-// through the same session route and limits.
+// The website chat on /support: the browser side (web/lib/chat.js) and this site's /api/chat (web/lib/chatSession.js),
+// which runs the chat through the Node server's /api/chat with its key, within the website call limits.
 const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
@@ -8,84 +8,45 @@ const { pathToFileURL } = require('node:url');
 
 const WEB = path.join(__dirname, '..', 'web');
 const load = (file) => import(pathToFileURL(path.join(WEB, 'lib', file)).href);
-const LINK_PATH = '/api/sarvam/orgs/01a0c3a4-b74a-7441-813a-d7d799923769/workspaces/01a0c3ef-4753-7a81-a20c-07f739dcf1d6'
-  + '/apps/Tiffany-Des-4ab4474a-620f/url';
 const PHONE = '+919876543210';
+const SESSION = '1b4e28ba-2fa1-41d2-883f-0016d3cca427';
 
-class FakeSocket {
-  constructor(url) {
-    this.url = url;
-    this.sent = [];
-    this.readyState = 0;
-    this.listeners = {};
-    FakeSocket.made.push(this);
-  }
+const answer = (status, body, headers = {}) => ({
+  status,
+  ok: status >= 200 && status < 300,
+  json: async () => body,
+  text: async () => JSON.stringify(body),
+  headers: { get: (name) => headers[name.toLowerCase()] ?? null },
+});
 
-  addEventListener(type, fn) {
-    (this.listeners[type] ||= []).push(fn);
-  }
-
-  emit(type, event = {}) {
-    for (const fn of this.listeners[type] || []) fn(event);
-  }
-
-  open() {
-    this.readyState = 1;
-    this.emit('open');
-  }
-
-  receive(message) {
-    this.emit('message', { data: JSON.stringify(message) });
-  }
-
-  send(data) {
-    this.sent.push(JSON.parse(data));
-  }
-
-  close(code = 1000) {
-    if (this.readyState === 3) return;
-    this.readyState = 3;
-    this.emit('close', { code });
-  }
-}
-FakeSocket.made = [];
-
-function fakeRoute(status, answer, headers = {}) {
+// The site's /api/chat as the browser sees it: each request answered in turn.
+function fakeSite(...answers) {
   const requests = [];
   const fetchImpl = async (url, options) => {
-    requests.push({ url, options });
-    return {
-      status,
-      ok: status < 400,
-      json: async () => (typeof answer === 'string' ? JSON.parse(answer) : answer),
-      text: async () => (typeof answer === 'string' ? answer : JSON.stringify(answer)),
-      headers: { get: (name) => headers[name.toLowerCase()] ?? null },
-    };
+    requests.push({ url, options, body: options.body ? JSON.parse(options.body) : null });
+    const next = answers.shift();
+    if (next instanceof Error) throw next;
+    return next || answer(200, { reply: 'ok' });
   };
   return { requests, fetchImpl };
 }
 
-const LINK = { url: 'wss://apps.sarvam.test/s?token=t1', reference_id: 'r1', caller: { phone: PHONE, first_name: 'Satish' } };
-
-async function begin({ route = fakeRoute(200, LINK), ...options } = {}) {
+async function begin(site) {
   const { startChat } = await load('chat.js');
-  FakeSocket.made = [];
   const seen = [];
   const problems = [];
   const warned = [];
   const chat = startChat({
     server: 'https://site.test',
     phone: PHONE,
-    userId: 'tiffany-chat-1',
     onChange: (t) => seen.push(t),
     onProblem: (p) => problems.push(p),
-    fetchImpl: route.fetchImpl,
-    WebSocketImpl: FakeSocket,
+    fetchImpl: site.fetchImpl,
     logger: { warn: (m) => warned.push(m) },
-    ...options,
   });
   await chat.ready;
-  return { chat, route, seen, problems, warned, socket: FakeSocket.made[0], last: () => seen.at(-1) };
+  const settle = () => new Promise((resolve) => { setTimeout(resolve, 5); });
+  return { chat, seen, problems, warned, settle, last: () => seen.at(-1) };
 }
 
 test('the chat is shown only when SUPPORT_CHAT is on', async () => {
@@ -95,176 +56,126 @@ test('the chat is shown only when SUPPORT_CHAT is on', async () => {
   assert.equal(supportChatOn(undefined), false);
 });
 
-test('a chat link comes from the call session route, and the socket gets what Sarvam\'s SDK adds', async () => {
-  const { chatLinkUrl, chatSocketUrl } = await load('chat.js');
-  assert.equal(chatLinkUrl('https://site.test'), `https://site.test${LINK_PATH}?interaction_type=chat`);
-  assert.equal(chatSocketUrl('wss://apps.sarvam.test/s?token=t1', 'tiffany-chat-1'),
-    'wss://apps.sarvam.test/s?token=t1&user_identifier=tiffany-chat-1&user_identifier_type=custom&interaction_type=chat');
-  assert.equal(chatSocketUrl('wss://apps.sarvam.test/s', 'a b'),
-    'wss://apps.sarvam.test/s?user_identifier=a%20b&user_identifier_type=custom&interaction_type=chat');
-});
+test('a chat starts on this site\'s /api/chat with the number, shows the greeting and answers each message', async () => {
+  const site = fakeSite(
+    answer(200, { session_id: SESSION, reply: 'Namaste Satish ji, how can I help?', first_name: 'Satish' }),
+    answer(200, { reply: 'Hardware K is the handle, one piece.' }),
+  );
+  const { chat, settle, last, problems } = await begin(site);
+  assert.deepEqual([site.requests[0].url, site.requests[0].options.method, site.requests[0].body], ['https://site.test/api/chat', 'POST', { phone: PHONE }]);
+  assert.equal(last().status, 'open');
+  assert.deepEqual(last().messages.map((m) => [m.from, m.text]), [['agent', 'Namaste Satish ji, how can I help?']]);
 
-test('the session route hands out chat links within the call limits', async () => {
-  const { startWebSession } = await load('webSession.js');
-  const { createLimiter } = await load('limits.js');
-  const env = { SARVAM_API_KEY: 'sk_samvaad_test', SARVAM_APP_VERSION: '26' };
-  const limiter = createLimiter({ env, now: () => Date.parse('2026-11-11T06:31:00Z') });
-  const requests = [];
-  const fetchImpl = async (url) => {
-    requests.push(url);
-    return { status: 200, ok: true, text: async () => '{"url":"wss://apps.sarvam.test/s?token=t1","reference_id":"r1"}', headers: { get: () => null } };
-  };
-  const params = { orgId: '01a0c3a4-b74a-7441-813a-d7d799923769', workspaceId: '01a0c3ef-4753-7a81-a20c-07f739dcf1d6', appId: 'Tiffany-Des-4ab4474a-620f' };
-  const start = () => startWebSession({ params, searchParams: new URLSearchParams('interaction_type=chat'), ip: '198.51.100.9', phone: PHONE },
-    { limiter, env, fetchImpl, logger: { error() {} }, lookupCaller: async () => 'Satish' });
-  const first = await start();
-  assert.equal(first.status, 200);
-  assert.match(requests[0], /\/url\?interaction_type=chat&version=26$/);
-  assert.deepEqual(JSON.parse(first.body).caller, { phone: PHONE, first_name: 'Satish' });
-  for (let i = 0; i < 4; i += 1) await start();
-  const sixth = await start();
-  assert.equal(sixth.status, 429, 'a chat counts like a call: 5 per visitor in 10 minutes');
-  assert.equal(requests.length, 5);
-});
-
-test('a chat starts with the same caller variables as a website call', async () => {
-  const { chatStartMessage, chatTextMessage, chatPong } = await load('chat.js');
-  const { withCallerPhone, CALL_START } = await load('caller.js');
-  const now = () => 1700000000000;
-  const start = chatStartMessage({ phone: PHONE, name: 'Satish', now });
-  const fromWidget = JSON.parse(withCallerPhone(JSON.stringify({ type: CALL_START }), PHONE, 'Satish'));
-  assert.deepEqual(start, { type: CALL_START, origin: 'client', timestamp: 1700000000, agent_variables: fromWidget.agent_variables });
-  assert.equal(start.agent_variables.customer_name, 'Satish');
-  assert.equal(chatStartMessage({ phone: PHONE, now }).agent_variables.customer_name, undefined, 'no name for a number not on record');
-  assert.deepEqual(chatTextMessage('Where is my order?', now), { type: 'client.media.text', origin: 'client', timestamp: 1700000000, text: 'Where is my order?' });
-  assert.deepEqual(chatPong(7, now), { type: 'client.system.pong', origin: 'client', timestamp: 1700000000, event_id: 7 });
-});
-
-test('streamed and whole agent messages build one transcript', async () => {
-  const { newTranscript, applyServerMessage, addCustomerText } = await load('chat.js');
-  const run = (messages, state = newTranscript()) => messages.reduce((s, m) => applyServerMessage(s, m).state, state);
-  let state = run([{ type: 'server.action.interaction_connected', interaction_id: 'i-1' }]);
-  assert.equal(state.status, 'open');
-
-  // Pieces with only the new words, then the whole reply again: one message.
-  state = run([
-    { type: 'server.media.text_chunk', text: 'Namaste, ', status: 'pending' },
-    { type: 'server.media.text_chunk', text: 'how can I help?', status: 'pending' },
-    { type: 'server.media.text_chunk', text: '', status: 'completed' },
-    { type: 'server.media.text', text: 'Namaste, how can I help?' },
-  ], state);
-  assert.deepEqual(state.messages.map((m) => [m.from, m.text, m.done]), [['agent', 'Namaste, how can I help?', true]]);
-
-  state = addCustomerText(state, 'Where is my order?');
-  assert.equal(state.waiting, true);
-  // Pieces with the reply so far, after a tool call.
-  state = run([
-    { type: 'server.event.tool_call', name: 'order_lookup' },
-    { type: 'server.media.text_chunk', text: 'Your study table', status: 'pending' },
-    { type: 'server.media.text_chunk', text: 'Your study table was delivered.', status: 'completed' },
-  ], state);
-  assert.equal(state.waiting, false);
-  assert.deepEqual(state.messages.map((m) => m.text), ['Namaste, how can I help?', 'Where is my order?', 'Your study table was delivered.']);
-
-  // A whole message on its own; the same words after the customer wrote again are a new answer.
-  state = run([{ type: 'server.media.text', text: 'Anything else?' }], state);
-  state = addCustomerText(state, 'Say that again');
-  state = run([{ type: 'server.media.text', text: 'Anything else?' }], state);
-  assert.equal(state.messages.length, 6);
-  assert.equal(new Set(state.messages.map((m) => m.id)).size, 6, 'every message has its own id');
-
-  const { reply } = applyServerMessage(state, { type: 'server.system.ping', event_id: 42 });
-  assert.equal(reply.type, 'client.system.pong');
-  assert.equal(reply.event_id, 42);
-
-  state = run([{ type: 'server.media.text_chunk', text: 'Thank you', status: 'pending' }, { type: 'server.action.interaction_end' }], state);
-  assert.equal(state.status, 'ended');
-  assert.equal(state.messages.at(-1).done, true, 'an unfinished reply is closed when the chat ends');
-  assert.equal(applyServerMessage(state, { type: 'server.event.state_transition' }).state, state, 'other events change nothing');
-});
-
-test('a chat asks for its link with the number, starts with the caller variables and keeps the transcript', async () => {
-  const { callerVariables } = await load('caller.js');
-  const { chat, route, socket, problems, last } = await begin();
-  assert.equal(route.requests[0].url, `https://site.test${LINK_PATH}?interaction_type=chat`);
-  assert.equal(route.requests[0].options.headers['X-Caller-Phone'], PHONE, 'so the route can name a known customer');
-  assert.equal(socket.url, 'wss://apps.sarvam.test/s?token=t1&user_identifier=tiffany-chat-1&user_identifier_type=custom&interaction_type=chat');
-  assert.equal(last().status, 'connecting');
-  assert.equal(chat.send('too early'), false, 'nothing is sent before the chat is open');
-
-  socket.open();
-  assert.equal(socket.sent[0].type, 'client.action.interaction_start');
-  assert.deepEqual(socket.sent[0].agent_variables, callerVariables(PHONE, 'Satish'), 'the first name the route found greets the customer');
-  socket.receive({ type: 'server.action.interaction_connected', interaction_id: 'i-1' });
-  socket.receive({ type: 'server.media.text', text: 'Namaste Satish ji, how can I help?' });
-  socket.receive({ type: 'server.system.ping', event_id: 5 });
-  assert.deepEqual([socket.sent.at(-1).type, socket.sent.at(-1).event_id], ['client.system.pong', 5]);
-
-  assert.equal(chat.send('  Where is my study table?  '), true);
-  assert.deepEqual([socket.sent.at(-1).type, socket.sent.at(-1).text], ['client.media.text', 'Where is my study table?']);
-  assert.equal(last().waiting, true);
-  assert.deepEqual(last().messages.map((m) => m.from), ['agent', 'customer']);
+  assert.equal(chat.send('  letter K kya hai?  '), true);
+  assert.equal(last().waiting, true, 'the panel shows the assistant typing');
+  assert.equal(chat.send('another'), false, 'nothing else is sent while a reply is coming');
+  await settle();
+  assert.deepEqual([site.requests[1].url, site.requests[1].body], [`https://site.test/api/chat/${SESSION}`, { text: 'letter K kya hai?' }]);
+  assert.equal(last().waiting, false);
+  assert.deepEqual(last().messages.map((m) => m.text), ['Namaste Satish ji, how can I help?', 'letter K kya hai?', 'Hardware K is the handle, one piece.']);
+  assert.equal(new Set(last().messages.map((m) => m.id)).size, 3, 'every message has its own id');
   assert.equal(chat.send('   '), false, 'an empty message is not sent');
+
   chat.send('x'.repeat(600));
-  assert.equal(socket.sent.at(-1).text.length, 500, 'long messages are cut to 500 characters');
-
+  await settle();
+  assert.equal(site.requests[2].body.text.length, 500, 'long messages are cut to 500 characters');
   chat.end();
-  assert.equal(socket.readyState, 3);
+  await settle();
+  assert.deepEqual([site.requests.at(-1).url, site.requests.at(-1).options.method], [`https://site.test/api/chat/${SESSION}`, 'DELETE']);
   assert.equal(last().status, 'ended');
-  assert.deepEqual(problems, [], 'ending the chat is no problem');
+  assert.deepEqual(problems.filter(Boolean), [], 'ending the chat is no problem');
 });
 
-test('the agent ending the chat closes it without a problem', async () => {
-  const { socket, problems, last } = await begin();
-  socket.open();
-  socket.receive({ type: 'server.action.interaction_connected' });
-  socket.receive({ type: 'server.media.text', text: 'Thank you for contacting Tiffany Designs.' });
-  socket.receive({ type: 'server.action.interaction_end' });
+test('a message the server could not answer can be sent again, and an ended chat says so', async () => {
+  const site = fakeSite(
+    answer(200, { session_id: SESSION, reply: 'Hello' }),
+    answer(503, { error: 'busy_model', message: 'Sorry, I could not finish that just now.' }),
+    answer(200, { reply: 'Here it is.' }),
+    answer(410, { error: 'ended', message: 'This chat has ended. Please start a new chat.' }),
+  );
+  const { chat, settle, last, problems } = await begin(site);
+  chat.send('where is my order?');
+  await settle();
+  assert.equal(last().status, 'open');
+  assert.equal(last().waiting, false);
+  assert.equal(problems.at(-1), 'Sorry, I could not finish that just now.');
+  chat.send('where is my order?');
+  await settle();
+  assert.equal(problems.at(-1), '', 'a new message clears the problem');
+  assert.equal(last().messages.at(-1).text, 'Here it is.');
+  chat.send('more');
+  await settle();
   assert.equal(last().status, 'ended');
-  assert.equal(socket.readyState, 3);
-  assert.deepEqual(problems, []);
+  assert.equal(problems.at(-1), 'This chat has ended. Please start a new chat.');
+  assert.equal(chat.send('hello?'), false);
 });
 
-test('when Sarvam has no chat for the agent, the customer gets a plain message and staff the reason', async () => {
-  const { problems, warned, last, socket } = await begin({ route: fakeRoute(404, '{"detail":"App not found for the interaction type"}') });
-  assert.equal(socket, undefined, 'no socket without a link');
-  assert.equal(last().status, 'ended');
-  assert.deepEqual(problems, ['Our chat is not available right now. Please try again in a little while, or call us on +91-98799-99999.']);
-  assert.match(warned[0], /Sarvam has no text chat for agent Tiffany-Des-4ab4474a-620f/);
-  assert.match(warned[0], /turn SUPPORT_CHAT off/);
-});
+test('a chat that cannot start tells the customer what to do, and how long to wait at the limit', async () => {
+  const { CHAT_OFFLINE } = await load('chat.js');
+  const limited = await begin(fakeSite(answer(429, { error: 'rate_limited' }, { 'retry-after': '540' })));
+  assert.deepEqual(limited.problems, ['Too many chats and calls were started from this network. Please try again in about 9 min.']);
+  assert.equal(limited.last().status, 'ended');
 
-test('the call limits show the customer how long to wait', async () => {
-  const { problems } = await begin({ route: fakeRoute(429, '{"error":"rate_limited"}', { 'retry-after': '540' }) });
-  assert.deepEqual(problems, ['Too many chats and calls were started from this network. Please try again in about 9 min.']);
-});
+  const down = await begin(fakeSite(answer(503, { error: 'unavailable', message: 'x' })));
+  assert.deepEqual(down.problems, ['Our chat is not available right now. Please try again in a little while, or call us on +91-98799-99999.']);
+  assert.match(down.warned[0], /Starting a chat failed \(503\)/);
 
-test('a chat that cannot connect or drops tells the customer what to do', async () => {
-  const { CHAT_OFFLINE, CHAT_DROPPED } = await load('chat.js');
-  const offline = await begin({ route: { fetchImpl: async () => { throw new Error('Failed to fetch'); } } });
+  const offline = await begin(fakeSite(new Error('Failed to fetch')));
   assert.deepEqual(offline.problems, [CHAT_OFFLINE]);
   assert.match(offline.warned[0], /Cannot reach https:\/\/site\.test: Failed to fetch/);
-
-  const dropped = await begin();
-  dropped.socket.open();
-  dropped.socket.receive({ type: 'server.action.interaction_connected' });
-  dropped.socket.receive({ type: 'server.media.text', text: 'Namaste' });
-  dropped.socket.close(1006);
-  assert.deepEqual(dropped.problems, [CHAT_DROPPED]);
-  assert.equal(dropped.last().status, 'ended');
-
-  const refused = await begin();
-  refused.socket.close(1006);
-  assert.match(refused.problems[0], /^Our chat is not available right now/, 'closed before it started');
 });
 
-test('a chat Sarvam never starts gives up', async () => {
-  const { socket, problems, last } = await begin({ connectTimeoutMs: 20 });
-  socket.open();
-  await new Promise((resolve) => setTimeout(resolve, 60));
-  assert.match(problems[0], /^Our chat is not available right now/);
-  assert.equal(last().status, 'ended');
-  assert.equal(socket.readyState, 3);
+function nodeServer(...answers) {
+  const requests = [];
+  const fetchImpl = async (url, options) => {
+    requests.push({ url, options, body: options.body ? JSON.parse(options.body) : null });
+    return answers.shift() || answer(200, {});
+  };
+  return { requests, fetchImpl };
+}
+
+const request = (body) => new Request('https://site.test/api/chat', { method: 'POST', body: JSON.stringify(body) });
+
+test('this site\'s /api/chat starts chats on the Node server with its key, within the website call limits', async () => {
+  const { startChatSession, sendChatMessage, endChatSession } = await load('chatSession.js');
+  const { createLimiter } = await load('limits.js');
+  const env = { NODE_API_URL: 'http://node.test/', NODE_API_KEY: 'internal-key' };
+  const limiter = createLimiter({ env: {}, now: () => Date.parse('2026-11-11T06:31:00Z') });
+  const node = nodeServer(...Array.from({ length: 5 }, () => answer(200, { session_id: SESSION, reply: 'Welcome' })));
+  const deps = { limiter, ip: '198.51.100.9', env, fetchImpl: node.fetchImpl, logger: { error() {} } };
+
+  const bad = await startChatSession(request({ phone: '123' }), deps);
+  assert.equal(bad.status, 400);
+  const first = await startChatSession(request({ phone: '98765 43210' }), deps);
+  assert.equal(first.status, 200);
+  assert.deepEqual(await first.json(), { session_id: SESSION, reply: 'Welcome' });
+  assert.deepEqual([node.requests[0].url, node.requests[0].options.headers['x-api-key'], node.requests[0].body], ['http://node.test/api/chat/sessions', 'internal-key', { phone: PHONE }]);
+  for (let i = 0; i < 4; i += 1) await startChatSession(request({ phone: PHONE }), deps);
+  const sixth = await startChatSession(request({ phone: PHONE }), deps);
+  assert.equal(sixth.status, 429, 'a chat counts like a call: 5 per visitor in 10 minutes');
+  assert.equal(sixth.headers.get('retry-after') !== null, true);
+  assert.equal(node.requests.length, 5);
+
+  const reply = nodeServer(answer(200, { reply: 'Sure.' }), new Response(null, { status: 204 }));
+  const sent = await sendChatMessage(request({ text: 'hello' }), SESSION, { env, fetchImpl: reply.fetchImpl });
+  assert.deepEqual(await sent.json(), { reply: 'Sure.' });
+  assert.equal(reply.requests[0].url, `http://node.test/api/chat/sessions/${SESSION}/messages`);
+  assert.equal((await sendChatMessage(request({ text: 'x' }), '../admin', { env, fetchImpl: reply.fetchImpl })).status, 410, 'only a session id goes on to the server');
+  assert.equal((await endChatSession(SESSION, { env, fetchImpl: reply.fetchImpl })).status, 204);
+});
+
+test('without the Node server\'s chat, the customer gets a plain message and the site log the reason', async () => {
+  const { startChatSession } = await load('chatSession.js');
+  const { createLimiter } = await load('limits.js');
+  const logged = [];
+  const deps = (env, fetchImpl) => ({ limiter: createLimiter({ env: {} }), ip: '198.51.100.10', env, fetchImpl, logger: { error: (m) => logged.push(m) } });
+  const missing = await startChatSession(request({ phone: PHONE }), deps({ NODE_API_URL: 'http://node.test' }, async () => answer(200, {})));
+  assert.equal(missing.status, 503);
+  assert.match(logged.at(-1), /set NODE_API_URL and NODE_API_KEY/);
+  const old = await startChatSession(request({ phone: PHONE }), deps({ NODE_API_URL: 'http://node.test', NODE_API_KEY: 'k' }, async () => answer(404, { error: 'Not found' })));
+  assert.equal(old.status, 503);
+  assert.deepEqual(await old.json(), { error: 'unavailable', message: 'Our chat is not available right now. Please try again in a little while.' });
+  assert.match(logged.at(-1), /has no website chat: deploy the latest server code, with GROQ_API_KEY and AGENT_TOOL_SECRET/);
 });
 
 test('the support page offers the chat only when SUPPORT_CHAT is on, and the panel takes the widget\'s place', () => {
@@ -276,12 +187,23 @@ test('the support page offers the chat only when SUPPORT_CHAT is on, and the pan
   assert.match(page, /<VoiceAgent chat=\{chat\} \/>/);
   assert.match(read('app', 'globals.css'), /body\[data-chat\] sarvam-widget,/, 'the call widget steps aside for the chat');
   const panel = read('components', 'ChatAgent.js');
-  assert.match(panel, /startChat\(\{/);
+  assert.match(panel, /startChat\(\{\r?\n\s+server: location\.origin,/, 'the chat runs through this site\'s own /api/chat');
   assert.match(panel, /callerPhone\(value\)/, 'a chat needs a valid mobile number, like a call');
   assert.doesNotMatch(panel, /SARVAM_API_KEY|NODE_API_KEY|sk_samvaad/, 'no key in the chat panel');
+  assert.match(read('lib', 'chatServer.js'), /^import 'server-only';/, 'the route logic that reads NODE_API_KEY stays out of browser code');
+  for (const route of [['app', 'api', 'chat', 'route.js'], ['app', 'api', 'chat', '[id]', 'route.js']]) {
+    assert.match(read(...route), /from '@\/lib\/chatServer\.js'/);
+    assert.match(read(...route), /if \(!supportChatOn\(process\.env\)\)/, 'the routes are off with the chat');
+  }
   const widget = read('components', 'VoiceAgent.js');
   assert.match(widget, /new CustomEvent\(CHAT_OPEN_EVENT, \{ detail: \{ phone: field\.input\.value, start: true \} \}\)/,
-    'Start chat in the call widget opens the chat with the number typed there');
+    'Chat in the call widget opens the chat with the number typed there');
+  assert.match(widget, /const call = option\('call', CALL_ICON, 'Call', onCall\);\r?\n\s+const chat = option\('chat', CHAT_ICON, 'Chat', onChat\);/,
+    'the panel offers two options under the number: Call and Chat');
+  assert.match(widget, /button\.toggleAttribute\('data-tdc-hidden', !calling\);\r?\n\s+options\.row\.hidden = calling;/,
+    'the options take the call button\'s place until a call starts');
+  assert.match(widget, /if \(needPhone\(PHONE_NEEDED_CHAT\)\) return;/, 'a chat needs the number too');
+  assert.match(panel, /onClick=\{callInstead\}/, 'a chat that cannot start offers the call instead');
   assert.match(read('components', 'StartChatButton.js'), /document\.body\.dataset\.voice === 'calling'/, 'no chat during a call');
-  assert.match(read('components', 'StartCallButton.js'), /document\.body\.dataset\.chat === 'live'/, 'no call during a chat');
+  assert.match(read('lib', 'startCall.js'), /document\.body\.dataset\.chat === 'live'/, 'no call during a chat');
 });

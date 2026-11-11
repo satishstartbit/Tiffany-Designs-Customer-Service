@@ -1,5 +1,6 @@
-// Before a second request of the same kind is registered on an order, the agent asks the caller whether they want an
-// update on the open one or a new request (new_request). The language a caller chose is saved on their contact.
+// An order has one open request of each kind: a new installation, damage or replacement request is added as an update
+// to the open one of the same kind, and a new request is registered only when none is open (also when an earlier one
+// is closed). The language a caller chose is saved on their contact.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { createCrm, requestKind } = require('../src/crm/crm');
@@ -54,6 +55,8 @@ function org(openCases = OPEN_ON_ORDER) {
       { Id: '012RT-GEN', DeveloperName: 'General_Service_Query' },
     ],
     'SELECT CaseNumber, Service_Route__c FROM Case': () => [{ CaseNumber: '00001100', Service_Route__c: 'Internal' }],
+    "Damaged_Component__c FROM Case WHERE Id = '500A'": () => [{ Description: 'Customer requested installation.\nPreferred slot: 2026-10-14 11 am', Damaged_Component__c: null }],
+    "Damaged_Component__c FROM Case WHERE Id = '500B'": () => [{ Description: 'Door 9 cracked', Damaged_Component__c: 'a0C1' }],
     "SELECT Languages__c FROM Contact WHERE Id = '003A'": () => [{ Languages__c: 'English' }],
   };
 }
@@ -85,37 +88,52 @@ test('getOpenRequests reads the open cases on the order and leaves out general q
   assert.deepEqual(await crm.getOpenRequests(null), []);
 });
 
-test('a second installation request on an order is not registered until the caller asks for a new one', async () => {
+test('an installation request on an order with one open updates that one; no second request is made', async () => {
   const { salesforce, crm } = crmWith();
-  const input = { issueType: 'installation', description: 'Customer requested installation.', phone: '+919810000001', erpOrderId: 'TD-ORD-1001' };
+  const input = {
+    issueType: 'installation', description: 'Customer requested installation.', phone: '+919810000001', erpOrderId: 'TD-ORD-1001',
+    preferredDate: '2026-10-17', preferredTime: '3 pm', newRequest: true,
+  };
 
-  const refused = await crm.createServiceCase(input);
-  assert.equal(refused.created, false);
-  assert.equal(refused.existingRequest.caseNumber, '00001087');
-  assert.equal(refused.existingRequest.kind, 'installation');
-  assert.match(refused.error, /already open/);
-  assert.equal(caseCreates(salesforce).length, 0, 'nothing is saved');
+  const result = await crm.createServiceCase(input);
+  assert.equal(result.created, false);
+  assert.equal(result.updated, true);
+  assert.equal(result.caseNumber, '00001087');
+  assert.equal(result.kind, 'installation');
+  assert.equal(result.registeredOn, '2026-10-12T05:00:00.000Z');
+  assert.equal(result.contactNumberEnding, '0001');
+  assert.equal(caseCreates(salesforce).length, 0, 'a new request is never asked for: new_request no longer makes a second one');
+  const [update] = salesforce.log.updates;
+  assert.equal(update.sobject, 'Case');
+  assert.equal(update.id, '500A');
+  assert.match(update.fields.Description, /^Customer requested installation\.\nPreferred slot: 2026-10-14 11 am\n\n\[Update, \d{1,2} \w{3} \d{4}, .+\]\nCustomer requested installation\.\n/);
+  assert.match(update.fields.Description, /\nPreferred slot: 2026-10-17 3 pm\n/, 'the newest slot is the one a later call reads back');
+  assert.equal(update.fields.Service_Sub_Type__c, undefined);
 
-  const second = await crm.createServiceCase({ ...input, newRequest: true });
-  assert.equal(second.created, true);
-  assert.equal(caseCreates(salesforce).length, 1);
+  await crm.createServiceCase({ ...input, issueType: 'installation_reschedule', description: 'Customer asked to reschedule installation.' });
+  assert.equal(salesforce.log.updates.at(-1).fields.Service_Sub_Type__c, 'Installation Rescheduling', 'a reschedule moves the open request');
+  assert.equal(caseCreates(salesforce).length, 0);
 });
 
-test('the check compares kinds: another damage request is asked about, a different kind goes straight through', async () => {
+test('requests are compared by kind: the open damage request takes another damaged part, a different kind is new', async () => {
   const { salesforce, crm } = crmWith();
   const base = { phone: '+919810000001', erpOrderId: 'TD-ORD-1001' };
 
-  const missing = await crm.createServiceCase({ ...base, issueType: 'missing_parts', description: 'Two shelf pins missing' });
-  assert.equal(missing.existingRequest?.caseNumber, '00001090', 'an open damage case without a sub type still counts');
+  const missing = await crm.createServiceCase({ ...base, issueType: 'missing_parts', description: 'Two shelf pins missing', partNumber: 'KIS-WALKY-HW', quantity: '2' });
+  assert.equal(missing.updated, true);
+  assert.equal(missing.caseNumber, '00001090', 'an open damage case without a sub type still counts');
+  const update = salesforce.log.updates.at(-1);
+  assert.match(update.fields.Description, /^Door 9 cracked\n\n\[Update, .+\]\nTwo shelf pins missing\nPart number: KIS-WALKY-HW\nQuantity: 2\n/);
+  assert.equal(update.fields.Damaged_Component__c, undefined, 'the damaged component the request already has stays');
 
-  for (const issueType of ['replacement', 'return', 'installation_followup', 'general', 'escalation', 'installation_reschedule']) {
+  for (const issueType of ['replacement', 'return', 'installation_followup', 'general', 'escalation']) {
     const result = await crm.createServiceCase({ ...base, issueType, description: 'x' });
     assert.equal(result.created, true, issueType);
   }
-  assert.equal(caseCreates(salesforce).length, 6);
+  assert.equal(caseCreates(salesforce).length, 5);
 });
 
-test('without an order, or with nothing open on it, nothing is compared', async () => {
+test('without an order, or with nothing open on it (an earlier request closed), a new request is registered', async () => {
   const empty = crmWith(org([]));
   assert.equal((await empty.crm.createServiceCase({ issueType: 'installation', description: 'x', phone: '+919810000001', erpOrderId: 'TD-ORD-1001' })).created, true);
 
@@ -150,7 +168,7 @@ test('find_order names the open requests on the order, without their numbers', a
   assert.deepEqual(res.body.open_requests, ['damage', 'installation']);
   assert.match(res.body.message, /^Order TD-ORD-1001 for Demo 3-Door Wardrobe was delivered on Wednesday, 14 October\. /);
   assert.match(res.body.message, /Open requests on this order: a request about a damaged, defective or missing part, registered on Tuesday, 13 October; an installation request, registered on Monday, 12 October\. /);
-  assert.match(res.body.message, /ask whether the customer wants an update on it or a new request\.$/);
+  assert.match(res.body.message, /A request of the same kind updates the open one: say that the open request will be updated with it; no new request is made\.$/);
   assert.doesNotMatch(res.body.message, /1090|1087|1080/, 'request numbers need the mobile number or the name');
 
   const none = await s.call('POST', '/api/agent/order-lookup', { body: { order_id: 'TD-ORD-1111', caller_phone: '9820011111' }, headers: s.agent });
@@ -158,62 +176,56 @@ test('find_order names the open requests on the order, without their numbers', a
   assert.doesNotMatch(none.body.message, /Open requests/);
 });
 
-test('book_installation asks before a second installation request, and registers it with new_request', async (t) => {
+test('book_installation updates the open installation request with the new slot, and says so', async (t) => {
   const s = await startTestServer();
   t.after(s.close);
   s.crm.openRequests.push({ orderId: '801A', caseNumber: '00001087', kind: 'installation', createdDate: '2026-10-12T05:00:00.000Z' });
-  const body = { order_id: 'TD-ORD-1001', phone: '9876543210', contact_number_ending: '3210', preferred_date: '2026-10-17', preferred_time: 'morning' };
+  const body = { order_id: 'TD-ORD-1001', phone: '9876543210', contact_number_ending: '3210', preferred_date: '2026-10-17', preferred_time: '11 am' };
 
   const first = await s.call('POST', '/api/agent/installation', { body, headers: s.agent });
   assert.equal(first.status, 200);
   assert.equal(first.body.created, false);
-  assert.equal(first.body.existing_request, true);
-  assert.equal(first.body.message, 'An installation request for this order is already open, registered on Monday, 12 October. '
-    + 'Ask the customer whether they want an update on that request or a new request. For a new request, call this tool again with new_request set to true.');
+  assert.equal(first.body.updated, true);
+  assert.equal(first.body.case_number, '00001087', 'saved to the case_number variable like a new request');
+  assert.equal(first.body.message, 'An installation request for this order was already open, request 1087, registered on Monday, 12 October, so no new request is made: '
+    + 'it is updated, and its preferred slot is now Saturday, 17 October, at 11 am, which the service team confirms. The service team will call the number ending 3 2 1 0. '
+    + 'Tell the customer request 1087 is updated.');
   assert.equal(s.crm.created.length, 0);
+  assert.equal(s.crm.updated.at(-1).input.preferredDate, '2026-10-17');
 
-  const second = await s.call('POST', '/api/agent/installation', { body: { ...body, new_request: true }, headers: s.agent });
-  assert.equal(second.body.created, true);
-  assert.equal(s.crm.created.at(-1).input.newRequest, true);
+  const reschedule = await s.call('POST', '/api/agent/installation', { body: { ...body, reschedule: 'True' }, headers: s.agent });
+  assert.equal(reschedule.body.updated, true, 'moving the date updates the open request too');
+  assert.equal(s.crm.updated.at(-1).input.issueType, 'installation_reschedule');
 
-  const reschedule = await s.call('POST', '/api/agent/installation', { body: { ...body, reschedule: 'true' }, headers: s.agent });
-  assert.equal(reschedule.body.created, true, 'moving the date of the open request is not a second request');
+  const closed = await s.call('POST', '/api/agent/installation', { body: { ...body, order_id: 'TD-ORD-1111', phone: '9820011111', contact_number_ending: '1111' }, headers: s.agent });
+  assert.equal(closed.body.created, true, 'an order with nothing open gets a new request');
 });
 
-test('register_service_request asks before a second request of the same kind', async (t) => {
+test('register_service_request adds a damaged part to the open damage request; another kind is new', async (t) => {
   const s = await startTestServer();
   t.after(s.close);
-  s.crm.openRequests.push({ orderId: '801A', caseNumber: '00001081', kind: 'replacement', createdDate: '2026-10-13T05:00:00.000Z' });
-  const body = { issue_type: 'return', description: 'Customer wants to return the wardrobe.', order_id: '1001', phone: '9876543210', contact_number_ending: '3210' };
+  s.crm.openRequests.push({ orderId: '801A', caseNumber: '00001090', kind: 'damage', createdDate: '2026-10-13T05:00:00.000Z' });
+  const body = { issue_type: 'missing_parts', description: 'Two shelf pins missing.', order_id: '1001', phone: '9876543210', contact_number_ending: '3210', new_request: 'true' };
 
-  const first = await s.call('POST', '/api/agent/cases', { body, headers: s.agent });
-  assert.equal(first.body.existing_request, true);
-  assert.match(first.body.message, /^A replacement or return request for this order is already open, registered on Tuesday, 13 October\./);
+  const damage = await s.call('POST', '/api/agent/cases', { body, headers: s.agent });
+  assert.equal(damage.body.updated, true);
+  assert.match(damage.body.message, /^A request about a damaged, defective or missing part for this order was already open, request 1090, registered on Tuesday, 13 October, so no new request is made: it is updated, and the new details are added to it\./);
+  assert.equal(s.crm.created.length, 0, 'new_request no longer makes a second one');
 
-  const second = await s.call('POST', '/api/agent/cases', { body: { ...body, new_request: 'true' }, headers: s.agent });
-  assert.equal(second.body.created, true);
-
-  const other = await s.call('POST', '/api/agent/cases', { body: { ...body, issue_type: 'missing_parts', description: 'Shelf pins missing' }, headers: s.agent });
+  const other = await s.call('POST', '/api/agent/cases', { body: { ...body, issue_type: 'return', description: 'Customer wants to return the wardrobe.' }, headers: s.agent });
   assert.equal(other.body.created, true, 'a different kind is registered at once');
 });
 
-// On 6 and 10 November calls, new_request and reschedule were refused again and again although the agent sent them as
-// true: the voice platform can send a yes as text ("True"), and only true and "true" were read as yes.
+// The voice platform can send a yes as text ("True"); only true and "true" used to be read as yes.
 test('a yes the voice platform sends as text in any case still counts', async (t) => {
   const s = await startTestServer();
   t.after(s.close);
-  s.crm.openRequests.push({ orderId: '801A', caseNumber: '00001087', kind: 'installation', createdDate: '2026-10-12T05:00:00.000Z' });
-  const body = { order_id: 'TD-ORD-1001', phone: '9876543210', contact_number_ending: '3210', preferred_date: '2026-10-17', preferred_time: 'morning' };
+  const body = { order_id: 'TD-ORD-1001', phone: '9876543210', preferred_date: '2026-10-17', preferred_time: 'morning' };
   for (const yes of ['True', 'TRUE', 'yes', '1']) {
-    const created = s.crm.created.length;
-    const second = await s.call('POST', '/api/agent/installation', { body: { ...body, new_request: yes }, headers: s.agent });
-    assert.equal(second.body.created, true, `new_request ${yes}`);
-    assert.equal(s.crm.created.length, created + 1);
+    const moved = await s.call('POST', '/api/agent/installation', { body: { ...body, contact_number_ending: '3210', reschedule: yes }, headers: s.agent });
+    assert.equal(s.crm.created.at(-1).input.issueType, 'installation_reschedule', `reschedule ${yes}`);
+    assert.equal(moved.body.created, true);
   }
-  const moved = await s.call('POST', '/api/agent/installation', { body: { ...body, reschedule: 'True' }, headers: s.agent });
-  assert.equal(moved.body.created, true, 'reschedule "True"');
-  const no = await s.call('POST', '/api/agent/installation', { body: { ...body, new_request: 'False' }, headers: s.agent });
-  assert.equal(no.body.existing_request, true, '"False" is not a yes');
   const byCall = await s.call('POST', '/api/agent/orders', {
     headers: s.agent,
     body: { use_calling_number: 'True', caller_phone: '+919820011111', contact_number_ending: '1111', customer_name: 'Meera Iyer', items: 'TD-STD-01 x 1', address: '4 MI Road', city: 'Jaipur', postal_code: '302012' },

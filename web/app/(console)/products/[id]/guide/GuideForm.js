@@ -102,9 +102,12 @@ export default function GuideForm({ productId, guide, form }) {
       <Card title="Parts and hardware">
         <div className="form-grid">
           {field('partsList', area('partsList', 14), {
-            hint: 'One part per line with its sticker number, quantity and part number, e.g. 1. Worktop x 1, part number KIS-WALKY-01. Use the part numbers of the spare parts below.',
+            hint: 'One part per line starting with its sticker number, e.g. 9. Fluted doors x 2, KIS-WALKY-10; the voice agent finds parts by these numbers. '
+              + 'A line such as Box 1 of 3 heads the parts in a box. Use the part numbers of the spare parts below.',
           })}
-          {field('hardwareList', area('hardwareList', 14), { hint: 'One item per line, e.g. A. Cam bolts, for joining panels.' })}
+          {field('hardwareList', area('hardwareList', 14), {
+            hint: 'One item per line with its letter and quantity, e.g. B. Minifix (minifix bolt or cam bolt) x 68. Words in brackets help the voice agent match what customers call it.',
+          })}
         </div>
       </Card>
 

@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const express = require('express');
-const { createProductGuides, guideMessage } = require('../src/crm/productGuides');
+const { createProductGuides, guideMessage, guideItem } = require('../src/crm/productGuides');
 const adminRouter = require('../src/routes/admin');
 const agentToolsRouter = require('../src/routes/agentTools');
 
@@ -265,6 +265,91 @@ test('for assembly the agent hears the complete guide, each step with its hardwa
     guideMessage({ ...guide, assemblySteps: null }, 'assembly'),
     'Product guide for the Rocco Walky Kitchen Island by Rocco. No assembly steps are on record for it. Offer an installation visit by the service team instead.',
   );
+});
+
+// The Walky Large guide as staff keep it: parts by box with sticker numbers, hardware named as in the manual.
+const WALKY = {
+  ...GUIDE_ROW,
+  Product__r: { Name: 'Rocco Walky Kitchen Island Storage Cabinet with Wheels, Solid Rubber Wood Top (Grey, Large & Extendable)' },
+  ModelCode__c: 'Walky Cabinet (Large)',
+  TotalParts__c: 26,
+  PartsList__c: 'Box Common\n\n1. Left side panel with socket cut-out x 1, KIS-WALKY-03\n2. Right side panel x 1, KIS-WALKY-04\n'
+    + '9. Fluted doors x 2, KIS-WALKY-10\n\nBox 2 of 3\n\n16. Adjustable shelves x 2, KIS-WALKY-09\n\nBox 1 of 3\n\n'
+    + '20. Drawer side x 1, KIS-WALKY-11\n21. Drawer side x 1, KIS-WALKY-11\n26. Side section rails x 4',
+  HardwareList__c: 'A. Channel (drawer slide) x 1 pair\nB. Minifix (minifix bolt or cam bolt) x 68\nI. Ring x 2\n'
+    + 'M. Wheel (B) (castor wheel with brake) x 4\nN. Wheel (centre castor wheel) x 1',
+  HardwarePerStep__c: '1. Prepare the panels: B x 32, A x 1 pair, M x 4, N x 1\n2. Build the frame: B x 36',
+  AssemblySteps__c: '1. Prepare the panels. Screw bolts B into the edges.\n2. Build the frame.',
+  AgentRulesForThisProduct__c: '- Hardware A to I is part number KIS-WALKY-HW; wheels M and N are KIS-WALKY-15.',
+};
+
+test('the agent hears the parts box by box with their sticker numbers, and the model', async () => {
+  const { guides } = setup({ guides: [WALKY] });
+  const [guide] = await guides.publishedFor([PRODUCT.Id]);
+  const message = guideMessage(guide);
+  assert.match(message, /^Product guide for the Rocco Walky Kitchen Island Storage Cabinet with Wheels \(Grey, Large & Extendable\) by Rocco\. Model: Walky Cabinet \(Large\)\./);
+  assert.match(message, /Parts: Box Common: 1\. Left side panel with socket cut-out x 1, KIS-WALKY-03; 2\. Right side panel x 1, KIS-WALKY-04; 9\. Fluted doors x 2, KIS-WALKY-10\. Box 2 of 3: 16\. Adjustable shelves x 2, KIS-WALKY-09\. Box 1 of 3: 20\./);
+  assert.match(message, /Part numbers on record: Worktop, KIS-WALKY-01; LED light strip, KIS-WALKY-14\./);
+  assert.doesNotMatch(message, /Hardware pack/, 'a part number the rules give is not listed again under its spare part name');
+  assert.match(guideMessage({ ...guide, agentRules: null }), /Part numbers on record: Worktop, KIS-WALKY-01; Hardware pack \(A to J\), KIS-WALKY-HW/);
+  assert.match(guideMessage(guide, 'assembly'), /Step 1 of 2: Prepare the panels\. Screw bolts B into the edges\. Hardware: B x 32, A x 1 pair, M x 4, N x 1 \(B, Minifix \(minifix bolt or cam bolt\); A, Channel \(drawer slide\); M, Wheel \(B\) \(castor wheel with brake\); N, Wheel \(centre castor wheel\)\)\./,
+    'a step names its hardware without the total count');
+});
+
+test('one sticker number, letter, step, box or name is looked up on its own', async () => {
+  const { guides } = setup({ guides: [WALKY] });
+  const [guide] = await guides.publishedFor([PRODUCT.Id]);
+  const item = (what) => guideItem(guide, what);
+  const name = 'Rocco Walky Kitchen Island Storage Cabinet with Wheels (Grey, Large & Extendable)';
+  assert.equal(item('9'), `${name}, part 9: Fluted doors x 2, KIS-WALKY-10, in Box Common.`);
+  assert.equal(item('part 26'), `${name}, part 26: Side section rails x 4, in Box 1 of 3.`);
+  assert.equal(item('30'), `${name}, no part 30 is in its guide; its parts are numbered 1 to 26.`);
+  assert.equal(item('B'), `${name}, hardware B: Minifix (minifix bolt or cam bolt) x 68, used in steps 1 (32) and 2 (36).`);
+  assert.equal(item('letter i'), `${name}, hardware I: Ring x 2, not used in any assembly step.`);
+  assert.equal(item('K'), `${name}, no hardware letter K is in its guide; its hardware is lettered A to N.`);
+  assert.equal(item('12, 9 and A'), `${name}, no part 12 is in its guide; its parts are numbered 1 to 26; part 9: Fluted doors x 2, KIS-WALKY-10, in Box Common; `
+    + 'hardware A: Channel (drawer slide) x 1 pair, used in step 1 (1 pair).');
+  assert.equal(item('step 2'), `${name}, Step 2 of 2: Build the frame. Hardware: B x 36 (B, Minifix (minifix bolt or cam bolt)).`);
+  assert.equal(item('step 5'), `${name}, no step 5 is in its guide; it has 2 steps.`);
+  assert.equal(item('box 2'), `${name}, Box 2 of 3 has 1 part, 2 pieces: 16. Adjustable shelves x 2, KIS-WALKY-09.`);
+  assert.equal(item('the box marked common'), `${name}, Box Common has 3 parts, 4 pieces: 1. Left side panel with socket cut-out x 1, KIS-WALKY-03; `
+    + '2. Right side panel x 1, KIS-WALKY-04; 9. Fluted doors x 2, KIS-WALKY-10.');
+  assert.equal(item('box 3'), `${name}, its boxes are Box Common, Box 2 of 3 and Box 1 of 3; ask which one.`);
+  assert.match(item('hardware'), /, hardware: A\. Channel \(drawer slide\) x 1 pair; B\. Minifix .*; N\. Wheel \(centre castor wheel\) x 1\.$/);
+  assert.equal(item('cam bolt'), `${name}, hardware B: Minifix (minifix bolt or cam bolt) x 68, used in steps 1 (32) and 2 (36).`);
+  assert.match(item('drawer sides'), /, 2 match drawer sides: part 20: Drawer side x 1, KIS-WALKY-11, in Box 1 of 3; part 21: Drawer side/);
+  assert.match(item('wheels'), /, 2 match wheels: hardware M: Wheel \(B\) \(castor wheel with brake\) x 4, used in step 1 \(4\); hardware N:/);
+  assert.equal(item('shelves'), `${name}, part 16: Adjustable shelves x 2, KIS-WALKY-09, in Box 2 of 3.`);
+  assert.equal(item('mirror'), `${name}, nothing in its guide is called mirror; ask for the sticker number (1 to 26) or the hardware letter (A to N).`);
+});
+
+test('a parts list without sticker numbers is refused while the parts carry stickers', async () => {
+  const { salesforce, guides } = setup({ guides: [WALKY] });
+  const byBox = 'Box Common\n\nLeft side panel with socket cut-out x 1, KIS-WALKY-03\nRight side panel x 1, KIS-WALKY-04';
+  const refused = await guides.saveGuide(PRODUCT.Id, { partsList: byBox });
+  assert.equal(refused.error, 'invalid');
+  assert.equal(refused.field, 'partsList');
+  assert.match(refused.message, /^Start each part with its sticker number, for example 9\. Fluted doors x 2/);
+  assert.equal(salesforce.calls.updates.length, 0);
+
+  const withoutStickers = await guides.saveGuide(PRODUCT.Id, { partsList: byBox, partsHaveNumberStickers: 'false' });
+  assert.equal(withoutStickers.updated, true, 'a product whose parts carry no stickers needs no numbers');
+  const unrelated = await guides.saveGuide(PRODUCT.Id, { version: '2.1' });
+  assert.equal(unrelated.updated, true, 'an edit that leaves the parts alone is not held up');
+});
+
+test('the agent tool looks up one item, and the full guide says it can', async (t) => {
+  const { guides } = setup({ guides: [WALKY] });
+  const call = await serve(t, agentToolsRouter({ crm: {}, productGuides: guides }));
+  const full = await call('POST', '/product-guide', { product_name: 'kitchen island' });
+  assert.match(full.body.message, / To give a part, letter, box or step later in this call, call this tool again with item set to it\.$/);
+  const one = await call('POST', '/product-guide', { product_name: 'kitchen island', item: '  9 ' });
+  assert.equal(one.body.found, true);
+  assert.equal(one.body.item, '9');
+  assert.match(one.body.message, /, part 9: Fluted doors x 2, KIS-WALKY-10, in Box Common\.$/);
+  const step = await call('POST', '/product-guide', { product_name: 'kitchen island', purpose: 'assembly', item: 'step 1' });
+  assert.match(step.body.message, /Step 1 of 2: Prepare the panels/);
+  assert.equal(step.body.step_count, undefined);
 });
 
 async function serve(t, router) {

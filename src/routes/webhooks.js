@@ -61,9 +61,9 @@ module.exports = function webhooksRouter({ crm, now = () => Date.now(), logger =
         preferredTime: vars.installation_time,
         city: vars.delivery_city,
       });
-      if (fallbackCase.created) {
+      if (fallbackCase.created || fallbackCase.updated) {
         callCase = { id: fallbackCase.caseId, caseNumber: fallbackCase.caseNumber };
-        logger.warn(`Created fallback case ${fallbackCase.caseNumber} for interaction ${p.interaction_id}`);
+        logger.warn(`${fallbackCase.created ? 'Created fallback case' : 'Added the call as an update to open case'} ${fallbackCase.caseNumber} for interaction ${p.interaction_id}`);
       } else {
         logger.error(`Fallback case for interaction ${p.interaction_id} was refused: ${fallbackCase.error}`);
       }

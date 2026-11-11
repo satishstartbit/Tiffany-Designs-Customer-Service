@@ -1,15 +1,11 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { MessageCircle, Send, X } from 'lucide-react';
+import { MessageCircle, Phone, Send, X } from 'lucide-react';
 import { AGENT_NAME } from '@/lib/agent.js';
 import { callerPhone } from '@/lib/caller.js';
 import { CHAT_CLOSE_EVENT, CHAT_OPEN_EVENT, MAX_MESSAGE_LENGTH, startChat } from '@/lib/chat.js';
-
-// As for calls: this site's own /api/sarvam/ gives each signed chat URL, unless NEXT_PUBLIC_VOICE_SERVER_URL or ?server=
-// in the address names another server's.
-const CONFIGURED_SERVER = process.env.NEXT_PUBLIC_VOICE_SERVER_URL || '';
-const withoutTrailingSlash = (url) => url.replace(/\/+$/, '');
+import { startVoiceCall } from '@/lib/startCall.js';
 
 // The call widget's key too, so a number typed in one is already in the other.
 const SAVED_PHONE = 'tiffany-caller-phone';
@@ -46,8 +42,6 @@ export default function ChatAgent() {
   const [unread, setUnread] = useState(false);
   const chatRef = useRef(null);
   const chatIdRef = useRef(0);
-  const serverRef = useRef('');
-  const userIdRef = useRef('');
   const liveRef = useRef(false);
   const seenRef = useRef(0);
   const logRef = useRef(null);
@@ -74,10 +68,10 @@ export default function ChatAgent() {
     chatIdRef.current += 1;
     const id = chatIdRef.current;
     chatRef.current?.end();
+    // This site's /api/chat runs the chat through the Node server, with its key kept on this site's server.
     chatRef.current = startChat({
-      server: serverRef.current,
+      server: location.origin,
       phone: number,
-      userId: userIdRef.current,
       onChange: (next) => id === chatIdRef.current && setTranscript(next),
       onProblem: (text) => id === chatIdRef.current && setProblem(text),
     });
@@ -98,10 +92,20 @@ export default function ChatAgent() {
     if (chatRef.current?.send(draft)) setDraft('');
   }
 
+  // A chat that could not start: the same assistant takes the call instead, with the number already typed (saved
+  // under the key the call widget reads).
+  async function callInstead() {
+    remember(phone);
+    chatIdRef.current += 1;
+    chatRef.current?.end();
+    setView('closed');
+    setTranscript(null);
+    setProblem('');
+    await new Promise((resolve) => { setTimeout(resolve, 80); });
+    await startVoiceCall();
+  }
+
   useEffect(() => {
-    serverRef.current = withoutTrailingSlash(new URLSearchParams(location.search).get('server') || CONFIGURED_SERVER || location.origin);
-    // What Sarvam's logs search by: one per visit, findable by its prefix.
-    userIdRef.current = `tiffany-chat-${Date.now()}`;
     setPhone(remembered());
     const onOpen = (event) => {
       const typed = event.detail?.phone || remembered();
@@ -233,6 +237,11 @@ export default function ChatAgent() {
 
           {transcript.status === 'ended' ? (
             <div className="chat-foot">
+              {!transcript.messages.length && problem && (
+                <button className="btn btn-maroon btn-block" type="button" onClick={callInstead}>
+                  <Phone aria-hidden="true" /> Call instead
+                </button>
+              )}
               <button className="btn btn-block" type="button" onClick={() => begin(phone)}>
                 {transcript.messages.length ? 'Start a new chat' : 'Try again'}
               </button>

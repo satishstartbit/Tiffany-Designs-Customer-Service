@@ -48,6 +48,9 @@ const NUMBER_NEEDED = {
     + 'Offer the WhatsApp link to upload the invoice.',
 };
 
+// Case.Description holds at most 32,000 characters.
+const CASE_DESCRIPTION_MAX = 32000;
+
 // Voice issue types -> the org's restricted Service_Type__c / Service_Sub_Type__c values.
 const SERVICE_TYPES = {
   installation: { serviceType: 'Installation', subType: 'Initial Installation' },
@@ -66,8 +69,8 @@ const SERVICE_TYPES = {
   escalation: { serviceType: 'General Query', subType: null },
 };
 
-// What a request is about: installation, installation_followup, damage or replacement. A new request of the same kind
-// as one open on the same order is registered only when the caller wants a second one. Older cases often have no sub
+// What a request is about: installation (a reschedule included), installation_followup, damage or replacement. A
+// request of the same kind as one open on the same order updates that one instead. Older cases often have no sub
 // type, so kinds are broad; general queries and call backs are not compared.
 function requestKind(serviceType, subType) {
   if (serviceType === 'Installation') return ['Installation Follow-up', 'Re-installation'].includes(subType) ? 'installation_followup' : 'installation';
@@ -805,14 +808,11 @@ function createCrm({
       }
     }
 
-    // A reschedule changes the open installation request, so only new requests are compared.
-    const kind = input.issueType === 'installation_reschedule' ? null : requestKind(mapping.serviceType, mapping.subType);
-    if (order && kind && !input.newRequest) {
-      const existing = (await getOpenRequests(order.id)).find((r) => r.kind === kind);
-      if (existing) {
-        return { created: false, existingRequest: existing, error: `Request ${existing.caseNumber} of this kind is already open for the order.` };
-      }
-    }
+    // An order has one open request of each kind: a new installation, damage or replacement request (a reschedule
+    // included) is added as an update to the open one of the same kind, and a new request is registered only when
+    // none of that kind is open, also when an earlier one is closed. The checks below apply to an update all the same.
+    const kind = requestKind(mapping.serviceType, mapping.subType);
+    const existing = order && kind ? (await getOpenRequests(order.id)).find((r) => r.kind === kind) || null : null;
 
     // When the caller agreed to use the details on file (for the order, or for the caller's own number), they are used;
     // a number or address the caller gives instead replaces them for this request only.
@@ -920,6 +920,8 @@ function createCrm({
       input.capturedBy || 'Captured by the AI voice agent.',
     ].filter(Boolean).join('\n');
 
+    if (existing) return updateOpenRequest(existing, { description, input, mapping, mobile, withinBusinessHours, onFile, addressSource });
+
     const orderName = order?.erpOrderId || order?.orderNumber;
     const fields = compact({
       RecordTypeId: await caseRecordTypeId(mapping.serviceType),
@@ -952,6 +954,39 @@ function createCrm({
       contactNumberEnding: phoneEnding(mobile),
       orderVerified: Boolean(order),
       orderLinked: Boolean(order),
+      ...(onFile ? { usedDetailsOnFile: true } : {}),
+      ...(addressSource ? { addressSource } : {}),
+    };
+  }
+
+  // Adds what the caller said now to the open request: its description gets a dated update (the newest preferred slot,
+  // part and quantity are the ones a later call reads back), a reschedule marks the request as one, and a part number
+  // fills the damaged component when the request has none yet.
+  async function updateOpenRequest(existing, { description, input, mapping, mobile, withinBusinessHours, onFile, addressSource }) {
+    const [current] = await salesforce.query(`SELECT Description, Damaged_Component__c FROM Case WHERE Id = '${escapeSoql(existing.id)}'`);
+    const stamp = new Date(now()).toLocaleString('en-IN', {
+      timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', year: 'numeric', hour: 'numeric', minute: '2-digit',
+    });
+    const update = `\n\n[Update, ${stamp}]\n${description}`;
+    const before = String(current?.Description || '');
+    const merged = before.length + update.length > CASE_DESCRIPTION_MAX ? `${before.slice(0, CASE_DESCRIPTION_MAX - update.length - 2)}…${update}` : `${before}${update}`;
+    const component = !current?.Damaged_Component__c ? await componentId(input.partNumber) : null;
+    await salesforce.update('Case', existing.id, compact({
+      Description: merged.trim(),
+      Service_Sub_Type__c: input.issueType === 'installation_reschedule' ? mapping.subType : undefined,
+      Damaged_Component__c: component,
+    }));
+    return {
+      created: false,
+      updated: true,
+      kind: existing.kind,
+      caseId: existing.id,
+      caseNumber: existing.caseNumber,
+      registeredOn: existing.createdDate,
+      withinBusinessHours,
+      contactNumberEnding: phoneEnding(mobile),
+      orderVerified: true,
+      orderLinked: true,
       ...(onFile ? { usedDetailsOnFile: true } : {}),
       ...(addressSource ? { addressSource } : {}),
     };

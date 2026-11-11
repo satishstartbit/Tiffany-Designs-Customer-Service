@@ -71,6 +71,7 @@ const remember = (value) => {
 
 const PHONE_HINT = 'We use it to find your orders.';
 const PHONE_NEEDED = 'Enter your 10 digit mobile number to start the call.';
+const PHONE_NEEDED_CHAT = 'Enter your 10 digit mobile number to start the chat.';
 
 // The page's style sheet does not reach into the widget, so the mobile number field brings its own, in the panel's
 // look (rounded like its call button, the brand maroon). The call button is dimmed until the number is valid.
@@ -85,25 +86,48 @@ const CALLER_STYLE = `
 .tdc-caller p { margin: 0; color: #6b7280; font-size: 12px; line-height: 1.4; }
 .tdc-caller p.tdc-error { color: #b3261e; font-weight: 500; }
 button[data-needs-phone] { opacity: 0.5 !important; cursor: not-allowed !important; }
-.tdc-chat { box-sizing: border-box; display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; height: 40px;
-  margin: 10px 0 0; border: 1px solid #6e2a24; border-radius: 9999px; background: #ffffff; color: #6e2a24; font: inherit;
-  font-size: 14px; font-weight: 600; cursor: pointer; }
-.tdc-chat:hover { background: #f5e9e6; }
-.tdc-chat:focus-visible { outline: none; box-shadow: 0 0 0 3px rgba(110, 42, 36, 0.24); }
-.tdc-chat[hidden] { display: none; }
+[data-tdc-hidden] { display: none !important; }
+.tdc-options { display: grid; gap: 8px; }
+.tdc-options[hidden] { display: none; }
+.tdc-options p { margin: 0; color: #6b7280; font-size: 11px; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase; }
+.tdc-options div { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.tdc-option { box-sizing: border-box; display: flex; align-items: center; justify-content: center; gap: 8px; height: 44px; padding: 0 12px;
+  border: 1px solid #6e2a24; border-radius: 9999px; font: inherit; font-size: 15px; font-weight: 600; cursor: pointer; }
+.tdc-option.call { background: #6e2a24; color: #ffffff; }
+.tdc-option.call:hover { background: #5a221d; }
+.tdc-option.chat { background: #ffffff; color: #6e2a24; }
+.tdc-option.chat:hover { background: #f5e9e6; }
+.tdc-option:focus-visible { outline: none; box-shadow: 0 0 0 3px rgba(110, 42, 36, 0.24); }
 `;
 
-const CHAT_ICON = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
-  + 'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/></svg>';
+const ICON = (path) => '<svg xmlns="http://www.w3.org/2000/svg" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+  + `stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${path}</svg>`;
+const CALL_ICON = ICON('<path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z"/>');
+const CHAT_ICON = ICON('<path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/>');
 
-// The chat option in the widget's panel, under its call button: it opens the chat panel with the number typed above.
-function createChatButton(onClick) {
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.className = 'tdc-chat';
-  button.innerHTML = `${CHAT_ICON}<span>Start chat</span>`;
-  button.addEventListener('click', onClick);
-  return button;
+// The two ways to reach the agent, under the mobile number: Call (the widget's own Start call button, which stays
+// hidden while these show) and Chat, which opens the chat panel with the number typed above.
+function createOptions({ onCall, onChat }) {
+  const row = document.createElement('div');
+  row.className = 'tdc-options';
+  row.setAttribute('role', 'group');
+  row.setAttribute('aria-label', 'Call or chat with the assistant');
+  const label = document.createElement('p');
+  label.textContent = 'Talk to us by';
+  const buttons = document.createElement('div');
+  const option = (kind, icon, text, onClick) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = `tdc-option ${kind}`;
+    button.innerHTML = `${icon}<span>${text}</span>`;
+    button.addEventListener('click', onClick);
+    return button;
+  };
+  const call = option('call', CALL_ICON, 'Call', onCall);
+  const chat = option('chat', CHAT_ICON, 'Chat', onChat);
+  buttons.append(call, chat);
+  row.append(label, buttons);
+  return { row, call, chat };
 }
 
 // The mobile number field inside the widget's panel, above its call button. Made once and moved back in whenever the
@@ -140,8 +164,8 @@ function createCallerField({ initial, onInput, onEnter }) {
 
 // The voice call widget (bottom right) for customers. Its panel asks for the customer's mobile number above the call
 // button, and a call starts only with a valid one: the number goes into the call so the agent can find their orders.
-// A short note says what is happening while a call starts, and what to do when it cannot. With `chat`, the panel also
-// offers Start chat under the call button, which opens the chat panel (ChatAgent) with the number typed above.
+// A short note says what is happening while a call starts, and what to do when it cannot. With `chat`, the panel offers
+// two options under the number, Call and Chat: Chat opens the chat panel (ChatAgent) with the number typed above.
 export default function VoiceAgent({ chat = false }) {
   const [server, setServer] = useState('');
   const [userId, setUserId] = useState('');
@@ -225,18 +249,39 @@ export default function VoiceAgent({ chat = false }) {
     const callButton = () => [...root.querySelectorAll('button')].find((b) => /start call|end call|connecting/i.test(b.textContent || ''));
     const initial = remembered();
     callerRef.current = callerPhone(initial);
+    let options = null;
+    const markNeedsPhone = () => {
+      const button = callButton();
+      if (button) button.toggleAttribute('data-needs-phone', !callerRef.current && /start call/i.test(button.textContent || ''));
+      options?.call.toggleAttribute('data-needs-phone', !callerRef.current);
+      options?.chat.toggleAttribute('data-needs-phone', !callerRef.current);
+    };
     const field = createCallerField({
       initial,
       onInput: (value) => {
         callerRef.current = callerPhone(value);
         remember(value);
-        const button = callButton();
-        if (button) button.toggleAttribute('data-needs-phone', !callerRef.current && /start call/i.test(button.textContent || ''));
+        markNeedsPhone();
       },
       onEnter: () => callButton()?.click(),
     });
-    const chatButton = chat
-      ? createChatButton(() => window.dispatchEvent(new CustomEvent(CHAT_OPEN_EVENT, { detail: { phone: field.input.value, start: true } })))
+    // Without a valid number neither option goes ahead: the field says what is missing.
+    const needPhone = (problem) => {
+      if (callerRef.current) return false;
+      field.showProblem(problem);
+      field.input.focus();
+      return true;
+    };
+    options = chat
+      ? createOptions({
+        onCall: () => {
+          if (!needPhone(PHONE_NEEDED)) callButton()?.click();
+        },
+        onChat: () => {
+          if (needPhone(PHONE_NEEDED_CHAT)) return;
+          window.dispatchEvent(new CustomEvent(CHAT_OPEN_EVENT, { detail: { phone: field.input.value, start: true } }));
+        },
+      })
       : null;
 
     // Runs before the widget's own click handler (which listens further in): no valid number, no call.
@@ -256,11 +301,19 @@ export default function VoiceAgent({ chat = false }) {
       setPanel(!button ? 'closed' : calling ? 'calling' : 'open');
       if (!button) return;
       field.block.hidden = calling;
+      // A number typed in the chat panel (the same saved number) shows here too, unless the customer is typing.
+      if (!calling && root.activeElement !== field.input && field.input.value !== remembered()) {
+        field.input.value = remembered();
+        callerRef.current = callerPhone(field.input.value);
+      }
       button.toggleAttribute('data-needs-phone', !calling && !callerRef.current);
       if (field.block.nextElementSibling !== button) button.before(field.block);
-      if (chatButton) {
-        chatButton.hidden = calling;
-        if (button.nextElementSibling !== chatButton) button.after(chatButton);
+      if (options) {
+        // The options take the call button's place until a call starts; then its End call button is back.
+        button.toggleAttribute('data-tdc-hidden', !calling);
+        options.row.hidden = calling;
+        markNeedsPhone();
+        if (button.nextElementSibling !== options.row) button.after(options.row);
       }
     };
 
