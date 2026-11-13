@@ -857,11 +857,21 @@ test.describe('agent tools used during a call', () => {
   test('an order needs a valid Indian mobile, and every refusal is spoken back', async (t) => {
     const s = await startTestServer();
     t.after(s.close);
-    for (const phone of [undefined, '12345', '+1 415 555 0100', '5000000001']) {
+    for (const phone of [undefined, 'not known', '+1 415 555 0100']) {
       const res = await s.call('POST', '/api/agent/orders', { headers: s.agent, body: { phone, items: 'TD-STD-01' } });
       assert.equal(res.status, 200, String(phone));
       assert.deepEqual(res.body, { created: false, order_number: null, message: 'A valid 10 digit Indian mobile number is needed to place the order.' });
     }
+    // A number that does not fit is said back with what was heard, so the agent never counts the digits itself.
+    const short = await s.call('POST', '/api/agent/orders', { headers: s.agent, body: { phone: '98290 1234', items: 'TD-STD-01' } });
+    assert.deepEqual(short.body, {
+      created: false,
+      order_number: null,
+      message: 'The mobile number was heard as 9 8 2 9 0 1 2 3 4, which is 9 digits; a mobile number has 10. Nothing is saved or looked up with it. '
+        + 'Ask the customer to say the whole number once more, slowly, and call this tool again with every digit heard.',
+    });
+    const notMobile = await s.call('POST', '/api/agent/orders', { headers: s.agent, body: { phone: '5000000001', items: 'TD-STD-01' } });
+    assert.match(notMobile.body.message, /^The mobile number was heard as 5 0 0 0 0 0 0 0 0 1, and an Indian mobile number starts with 6, 7, 8 or 9\./);
     const noItems = await s.call('POST', '/api/agent/orders', { headers: s.agent, body: { phone: '9000000001', contact_number_ending: '0001' } });
     assert.deepEqual(noItems.body, { created: false, order_number: null, message: 'No product was given. Ask which product and how many.' });
     assert.equal(s.crm.placedOrders.length, 0);
@@ -1223,15 +1233,99 @@ test.describe('agent tools used during a call', () => {
     const s = await startTestServer();
     t.after(s.close);
     const ncr = await s.call('POST', '/api/agent/service-area', { headers: s.agent, body: { city: 'Gurugram', postal_code: '122002' } });
-    assert.deepEqual(ncr.body, { valid: true, route: 'Internal', message: 'Gurugram, PIN 122002 is within the Delhi NCR service area, so the Tiffany Designs service team handles it.' });
+    assert.deepEqual(ncr.body, { valid: true, route: 'Internal', message: 'Gurugram, PIN code 1 2 2 0 0 2, is within the Delhi NCR service area, so the Tiffany Designs service team handles it.' });
 
     const partner = await s.call('POST', '/api/agent/service-area', { headers: s.agent, body: { city: 'Jaipur', postal_code: '302012' } });
     assert.equal(partner.body.route, 'External Provider');
     assert.match(partner.body.message, /authorised service partner/);
+    const cityOnly = await s.call('POST', '/api/agent/service-area', { headers: s.agent, body: { city: 'Gurugram' } });
+    assert.match(cityOnly.body.message, /^Gurugram is within the Delhi NCR service area/);
 
     const badPin = await s.call('POST', '/api/agent/service-area', { headers: s.agent, body: { city: 'Delhi', postal_code: '1100' } });
-    assert.deepEqual(badPin.body, { valid: false, route: null, message: 'That PIN code is not valid. Ask for the six digit PIN code.' });
+    assert.deepEqual(badPin.body, {
+      valid: false,
+      route: null,
+      message: 'The PIN code was heard as 1 1 0 0, which is 4 digits; a PIN code has 6. Nothing is saved or looked up with it. '
+        + 'Ask the customer to say the PIN code once more, one digit at a time, and call this tool again with every digit heard.',
+    });
     assert.equal((await s.call('POST', '/api/agent/service-area', { headers: s.agent, body: {} })).body.message, 'The city or the six digit PIN code is needed.');
+  });
+
+  test('check_number normalises and validates a PIN code or a mobile number as it was said', async (t) => {
+    const s = await startTestServer();
+    t.after(s.close);
+    const check = async (kind, value) => (await s.call('POST', '/api/agent/check-number', { headers: s.agent, body: { kind, value } })).body;
+    for (const said of ['302020', '30 20 20', 'तीन शून्य दो शून्य दो शून्य']) {
+      const ok = await check('pin', said);
+      assert.deepEqual([ok.normalized, ok.digit_count, ok.format_valid], ['302020', 6, true], said);
+      assert.match(ok.message, /^The PIN code is 3 0 2 0 2 0, which has the right number of digits\. Read these digits back/);
+    }
+    const short = await check('pin', '30202');
+    assert.deepEqual([short.normalized, short.digit_count, short.format_valid], ['30202', 5, false]);
+    assert.match(short.message, /^The PIN code was heard as 3 0 2 0 2, which is 5 digits; a PIN code has 6\. Say it was not heard clearly, ask the customer to say the PIN code one digit at a time/);
+    assert.match(short.message, /After two tries that do not fit, offer a call back from the service team/);
+    const long = await check('pin', '3020200');
+    assert.deepEqual([long.digit_count, long.format_valid], [7, false]);
+    assert.deepEqual([(await check('pin', 'not clear')).digit_count, (await check('pin', 'not clear')).format_valid], [0, false]);
+
+    const mobile = await check('mobile', '+91 98 29 01 23 45');
+    assert.deepEqual([mobile.normalized, mobile.digit_count, mobile.format_valid], ['9829012345', 10, true], 'the country code is not part of the ten digits');
+    assert.match(mobile.message, /^The mobile number is 9 8 2 9 0, 1 2 3 4 5,/);
+    assert.equal((await check('mobile', '302020')).format_valid, false, 'PIN code rules are not applied to a mobile number');
+    assert.equal((await check('mobile', '99829012345')).digit_count, 11);
+    assert.equal((await s.call('POST', '/api/agent/check-number', { body: { kind: 'pin', value: '302020' } })).status, 401);
+  });
+
+  // On a live call the speech recogniser wrote a caller's PIN code as "30 20 20" and the agent, counting for itself,
+  // refused it three times as five digits. The tools read a number as it was said and do the counting.
+  test('a PIN code or a mobile number is taken as it was said, and the tools count its digits', async (t) => {
+    const s = await startTestServer();
+    t.after(s.close);
+    const area = (postalCode) => s.call('POST', '/api/agent/service-area', { headers: s.agent, body: { city: 'Jaipur', postal_code: postalCode } });
+    for (const said of ['30 20 20', '3 0 2 0 2 0', '302-020', '३०२०२०', 'तीन शून्य दो शून्य दो शून्य', 'three zero two zero two zero', 'PIN code 30 20 20।']) {
+      const res = await area(said);
+      assert.equal(res.body.valid, true, said);
+      assert.match(res.body.message, /^Jaipur, PIN code 3 0 2 0 2 0, is outside the Delhi NCR service area/, said);
+    }
+    assert.match((await area('30 20 2')).body.message, /^The PIN code was heard as 3 0 2 0 2, which is 5 digits; a PIN code has 6\./);
+    assert.match((await area('3020201')).body.message, /^The PIN code was heard as 3 0 2 0 2 0 1, which is 7 digits; a PIN code has 6\./);
+    assert.match((await area('012345')).body.message, /^The PIN code was heard as 0 1 2 3 4 5, and no PIN code starts with 0\./);
+    assert.equal((await area('not known')).body.valid, true, 'a value with no digits counts as left empty, so the city alone is checked');
+
+    // A PIN code said in groups reaches the request as its six digits.
+    const order = await s.call('POST', '/api/agent/orders', {
+      headers: s.agent,
+      body: { customer_name: 'Harsh Sharma', phone: '90000 00001', contact_number_ending: '0001', items: 'TD-STD-01 x 1', address: '4 Bhawar Nagar', city: 'Jaipur', postal_code: '30 20 20' },
+    });
+    assert.equal(order.body.created, true);
+    assert.equal(s.crm.placedOrders.at(-1).input.postalCode, '302020');
+
+    // A lookup with a number that does not fit says so, and never falls back to the number of the call.
+    const lookup = (body) => s.call('POST', '/api/agent/order-lookup', { headers: s.agent, body: { caller_phone: '+919876543210', ...body } });
+    const nine = await lookup({ phone: '98200 1111' });
+    assert.equal(nine.body.found, false);
+    assert.match(nine.body.message, /^The mobile number was heard as 9 8 2 0 0 1 1 1 1, which is 9 digits; a mobile number has 10\./);
+    const eleven = await lookup({ order_id: 'TD-ORD-1111', order_phone: '99820011111' });
+    assert.match(eleven.body.message, /^The mobile number was heard as 9 9 8 2 0 0 1 1 1 1 1, which is 11 digits; a mobile number has 10\./);
+    const inParts = await lookup({ order_id: 'TD-ORD-1111', order_phone: '98 20 01 11 11' });
+    assert.equal(inParts.body.number_confirmed, true, 'a number said in pairs is the same number');
+    const withDouble = await lookup({ order_id: 'TD-ORD-1111', order_phone: 'nine eight two zero zero triple one double one' });
+    assert.equal(withDouble.body.number_confirmed, true, 'words, double and triple are read as digits');
+    assert.equal((await lookup({ phone: 'same number' })).body.found, true, 'a phone with no digits counts as left empty: the number of the call is used');
+
+    // The number of this call is used whatever was passed as phone, so that phone is not checked.
+    const own = await s.call('POST', '/api/agent/customer', {
+      headers: s.agent,
+      body: { use_calling_number: true, phone: '12345', caller_phone: '+919000000777', contact_number_ending: '0777', customer_name: 'Ravi Kumar', postal_code: '१२२००२' },
+    });
+    assert.equal(own.body.saved, true);
+    assert.equal(s.crm.savedCustomers.at(-1).input.postalCode, '122002');
+    const badOther = await s.call('POST', '/api/agent/customer', {
+      headers: s.agent,
+      body: { phone: '9000000778', contact_number_ending: '0778', customer_name: 'Ravi Kumar', alternate_phone: '98111 2223' },
+    });
+    assert.deepEqual([badOther.body.saved, badOther.body.new_customer], [false, null]);
+    assert.match(badOther.body.message, /^The phone number was heard as 9 8 1 1 1 2 2 2 3, which is 9 digits; a phone number has 10\./);
   });
 
   test('customer details are saved for a new caller and only noted for an existing customer', async (t) => {

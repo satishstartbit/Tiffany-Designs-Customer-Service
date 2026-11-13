@@ -1,8 +1,39 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
-  normalizePhone, lastTenDigits, phoneEnding, numberToConfirm, fullName, normalizeIssueType, namesMatch,
+  digitsSaid, pinCodeSaid, normalizePhone, lastTenDigits, phoneEnding, numberToConfirm, fullName, normalizeIssueType, namesMatch,
 } = require('../src/rules');
+
+test('a number is read as it was said: in groups, in an Indian script, as words, with double and triple', () => {
+  assert.equal(digitsSaid('30 20 20।'), '302020');
+  assert.equal(digitsSaid('PIN code 3 0 2 0 2 0'), '302020');
+  assert.equal(digitsSaid('३०२०२०'), '302020');
+  assert.equal(digitsSaid('੩੦੨੦੨੦'), '302020', 'Gurmukhi');
+  assert.equal(digitsSaid('૩૦૨૦૨૦'), '302020', 'Gujarati');
+  assert.equal(digitsSaid('three zero two oh two zero'), '302020');
+  assert.equal(digitsSaid('तीन शून्य दो ज़ीरो दो जीरो'), '302020');
+  assert.equal(digitsSaid('पाँच पांच छह छः सात आठ नौ एक चार'), '556678914');
+  assert.equal(digitsSaid('double nine 8 triple two'), '998222');
+  assert.equal(digitsSaid('डबल 9 ट्रिपल शून्य'), '99000');
+  assert.equal(digitsSaid('double 20'), '220');
+  assert.equal(digitsSaid('+91 98765-43210'), '919876543210');
+  assert.equal(digitsSaid('not known'), '');
+  assert.equal(digitsSaid(null), '');
+  assert.equal(digitsSaid(302020), '302020');
+
+  assert.equal(pinCodeSaid('30 20 20'), '302020');
+  assert.equal(pinCodeSaid('३०२ ०२०'), '302020');
+  assert.equal(pinCodeSaid('30 20 2'), null);
+  assert.equal(pinCodeSaid('012345'), null, 'no PIN code starts with 0');
+  assert.equal(pinCodeSaid(''), null);
+
+  assert.equal(normalizePhone('98 29 01 23 45'), '+919829012345');
+  assert.equal(normalizePhone('९८२९०१२३४५'), '+919829012345');
+  assert.equal(normalizePhone('nine eight two nine zero one two three four five'), '+919829012345');
+  assert.equal(normalizePhone('double nine 82 90 12 34'), '+919982901234');
+  assert.equal(phoneEnding('९ ५ ४ ३'), '9543');
+  assert.equal(lastTenDigits('०९८२९०१२३४५'), '9829012345');
+});
 
 test('a number is confirmed by its last four digits, and otherwise said back with where it comes from', () => {
   assert.equal(phoneEnding('+91 78784 54578'), '4578');

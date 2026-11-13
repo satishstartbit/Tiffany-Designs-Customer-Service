@@ -121,7 +121,10 @@ test('the link needs a valid Indian mobile, goes to one number at most 3 times a
 
   const bad = await send({ phone: '12345' });
   assert.equal(bad.body.sent, false);
-  assert.match(bad.body.message, /10 digit Indian mobile number that is on WhatsApp/);
+  assert.match(bad.body.message, /^The mobile number was heard as 1 2 3 4 5, which is 5 digits; a mobile number has 10\./);
+  const none = await send({});
+  assert.equal(none.body.sent, false);
+  assert.match(none.body.message, /10 digit Indian mobile number that is on WhatsApp/);
   assert.equal(api.sent.length, 0);
 
   for (let i = 0; i < 3; i += 1) assert.equal((await send({ phone: '9876543210' })).body.sent, true);

@@ -42,10 +42,53 @@ const ISSUE_ALIASES = {
   human: 'escalation',
 };
 
+// Where the digits 0 to 9 start in the Indian scripts a caller's speech can be written in: Devanagari, Bengali,
+// Gurmukhi, Gujarati, Odia, Tamil, Telugu, Kannada and Malayalam.
+const SCRIPT_ZEROS = [0x0966, 0x09e6, 0x0a66, 0x0ae6, 0x0b66, 0x0be6, 0x0c66, 0x0ce6, 0x0d66];
+// Keyed in NFC, as digitsSaid reads the text, so "ज़ीरो" matches however its nukta was typed.
+const wordMap = (words) => new Map(Object.entries(words).map(([word, value]) => [word.normalize('NFC'), value]));
+const DIGIT_WORDS = wordMap({
+  zero: 0, oh: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9,
+  शून्य: 0, ज़ीरो: 0, जीरो: 0, एक: 1, दो: 2, तीन: 3, चार: 4, पाँच: 5, पांच: 5, छह: 6, छः: 6, छे: 6, सात: 7, आठ: 8, नौ: 9,
+});
+const REPEAT_WORDS = wordMap({ double: 2, triple: 3, डबल: 2, ट्रिपल: 3 });
+
+// The digits of a number as a caller says it and the speech recogniser or the agent writes it: in groups ("30 20 20"
+// is 302020), in an Indian script ("३०२०२०"), as words ("three zero", "तीन शून्य") or with double and triple
+// ("double two" is 22). Anything else, such as "PIN code" or a dash, is left out.
+function digitsSaid(value) {
+  const text = String(value ?? '').normalize('NFC').replace(/\p{Nd}/gu, (ch) => {
+    const code = ch.codePointAt(0);
+    const zero = SCRIPT_ZEROS.find((z) => code >= z && code <= z + 9);
+    return zero ? String(code - zero) : ch;
+  });
+  let digits = '';
+  let repeat = 1;
+  for (const token of text.toLowerCase().match(/[0-9]+|[\p{L}\p{M}]+/gu) || []) {
+    if (REPEAT_WORDS.has(token)) {
+      repeat = REPEAT_WORDS.get(token);
+    } else if (/^[0-9]+$/.test(token)) {
+      // "double 2" is 22; a group after it, as in "double 20", is repeated by its first digit only.
+      digits += token[0].repeat(repeat) + token.slice(1);
+      repeat = 1;
+    } else if (DIGIT_WORDS.has(token)) {
+      digits += String(DIGIT_WORDS.get(token)).repeat(repeat);
+      repeat = 1;
+    }
+  }
+  return digits;
+}
+
+// The six digits of an Indian PIN code as said ("30 20 20"), or null when what was said is not one.
+function pinCodeSaid(value) {
+  const digits = digitsSaid(value);
+  return /^[1-9]\d{5}$/.test(digits) ? digits : null;
+}
+
 function normalizePhone(input) {
   if (input === undefined || input === null) return null;
   const raw = String(input).trim();
-  const digits = raw.replace(/\D/g, '');
+  const digits = digitsSaid(raw);
   if (digits.length === 10 && /^[6-9]/.test(digits)) return `+91${digits}`;
   if (digits.length === 11 && digits.startsWith('0') && /^[6-9]/.test(digits[1])) return `+91${digits.slice(1)}`;
   if (digits.length === 12 && digits.startsWith('91') && /^[6-9]/.test(digits[2])) return `+${digits}`;
@@ -54,13 +97,13 @@ function normalizePhone(input) {
 }
 
 function lastTenDigits(phone) {
-  const digits = String(phone || '').replace(/\D/g, '');
+  const digits = digitsSaid(phone);
   return digits.length >= 10 ? digits.slice(-10) : null;
 }
 
 // The last four digits of a number, as the voice agent says a number back for the caller to confirm.
 function phoneEnding(phone) {
-  const digits = String(phone ?? '').replace(/\D/g, '');
+  const digits = digitsSaid(phone);
   return digits.length >= 4 ? digits.slice(-4) : null;
 }
 
@@ -178,6 +221,6 @@ function sameReference(said, stored) {
 }
 
 module.exports = {
-  ISSUE_TYPES, normalizePhone, lastTenDigits, phoneEnding, numberToConfirm, normalizeIssueType, nameWords, personNameWords, searchNameWords, fullName,
-  hasName, namesMatch, joinDigits, trailingNumber, sameReference,
+  ISSUE_TYPES, digitsSaid, pinCodeSaid, normalizePhone, lastTenDigits, phoneEnding, numberToConfirm, normalizeIssueType, nameWords, personNameWords,
+  searchNameWords, fullName, hasName, namesMatch, joinDigits, trailingNumber, sameReference,
 };

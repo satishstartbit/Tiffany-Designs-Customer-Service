@@ -1,6 +1,6 @@
 const express = require('express');
 const {
-  normalizePhone, normalizeIssueType, namesMatch, lastTenDigits, phoneEnding, numberToConfirm, sameReference,
+  digitsSaid, pinCodeSaid, normalizePhone, normalizeIssueType, namesMatch, lastTenDigits, phoneEnding, numberToConfirm, sameReference,
 } = require('../rules');
 const { formatDate, formatDateTime, formatClock, describeWeek, spokenCaseNumber, shortName } = require('../speech');
 const { resolveDate, todayInIst, MAX_DAYS_AHEAD } = require('../dates');
@@ -132,6 +132,27 @@ const isTrue = (value) => value === true || /^(true|yes|1)$/i.test(String(value 
 
 // "302021" as "3 0 2 0 2 1", so the voice reads digits rather than a large number.
 const spokenDigits = (value) => String(value || '').replace(/\D/g, '').split('').join(' ');
+
+// The numbers a caller says that the agent passes on as it heard them. The agent never counts their digits itself: on
+// a live call it took "30 20 20" for five digits and refused the caller's PIN code three times. The count is made here.
+const SAID_NUMBERS = { postal_code: 'PIN code', phone: 'mobile number', order_phone: 'mobile number', alternate_phone: 'phone number' };
+const MAX_DIGITS_SPOKEN = 14;
+
+// What the agent hears about a PIN code or a mobile number that does not fit: the digits that were heard and how many
+// they are, so it asks for the number once more instead of judging it. Null when the number fits.
+function saidNumberProblem(field, value) {
+  const digits = digitsSaid(value);
+  const label = SAID_NUMBERS[field];
+  const isPin = field === 'postal_code';
+  if (isPin ? pinCodeSaid(value) : normalizePhone(value)) return null;
+  const size = isPin ? 6 : 10;
+  const heard = `The ${label} was heard as ${digits.length > MAX_DIGITS_SPOKEN ? `${digits.length} digits` : spokenDigits(digits)}`;
+  const why = digits.length !== size
+    ? `${digits.length > MAX_DIGITS_SPOKEN ? ', and' : `, which is ${digits.length} digit${digits.length === 1 ? '' : 's'};`} a ${label} has ${size}`
+    : isPin ? ', and no PIN code starts with 0' : ', and an Indian mobile number starts with 6, 7, 8 or 9';
+  return `${heard}${why}. Nothing is saved or looked up with it. Ask the customer to say the ${isPin ? 'PIN code' : 'whole number'} once more, `
+    + `${isPin ? 'one digit at a time' : 'slowly'}, and call this tool again with every digit heard.`;
+}
 
 // " in Jaipur, Rajasthan, PIN code 3 0 2 0 2 1": the parts of an address on file the agent may say. "Delhi, Delhi" is
 // said once, and the street never.
@@ -282,6 +303,29 @@ module.exports = function agentToolsRouter({
   crm, invoiceLinks, invoiceUploads, productGuides, callStartBudgetMs = 1000, now = () => Date.now(), logger = console,
 }) {
   const router = express.Router();
+
+  // Every tool but the call start: a PIN code or a mobile number the agent passes is read as it was said ("30 20 20",
+  // "३०२०२०", "double nine eight") before the tool runs. A PIN code that fits goes on as its six digits. A number that
+  // does not fit is answered here, in the tool's own refusal, with what was heard (saidNumberProblem). A value with no
+  // digit in it, such as "not known", counts as left empty.
+  router.use((req, res, next) => {
+    const body = req.body;
+    if (req.path === '/call-start' || !body || typeof body !== 'object') return next();
+    for (const field of Object.keys(SAID_NUMBERS)) {
+      const value = body[field];
+      if (value === undefined || value === null || String(value).trim() === '') continue;
+      // With use_calling_number the server uses the number of the call, whatever was passed as phone.
+      if (field === 'phone' && isTrue(body.use_calling_number)) continue;
+      if (!digitsSaid(value)) {
+        body[field] = '';
+        continue;
+      }
+      const problem = saidNumberProblem(field, value);
+      if (problem) return res.json({ ...(UNANSWERED[req.path] || { found: false }), message: problem });
+      if (field === 'postal_code') body[field] = pinCodeSaid(value);
+    }
+    return next();
+  });
 
   // Runs as the call starts (the agent's on-start tool), before the greeting. On a phone call Sarvam sends the number
   // the customer is calling from; it becomes customer_phone, so the agent never asks for it, and a customer on record
@@ -1142,13 +1186,54 @@ module.exports = function agentToolsRouter({
         message: area.reason === 'pin' ? 'That PIN code is not valid. Ask for the six digit PIN code.' : 'The city or the six digit PIN code is needed.',
       });
     }
-    const place = [area.city, area.postalCode && `PIN ${area.postalCode}`].filter(Boolean).join(', ');
+    // The PIN code is said digit by digit, so the customer hears what was taken down and can correct it.
+    const place = [area.city, area.postalCode && `PIN code ${spokenDigits(area.postalCode)},`].filter(Boolean).join(', ');
     return res.json({
       valid: true,
       route: area.route,
       message: area.route === 'Internal'
         ? `${place} is within the Delhi NCR service area, so the Tiffany Designs service team handles it.`
         : `${place} is outside the Delhi NCR service area, so an authorised service partner handles it.`,
+    });
+  });
+
+  // The validator for a PIN code or a mobile number the caller has just said: the agent passes what it heard as it was
+  // written ("30 20 20", "तीन शून्य दो शून्य दो शून्य") and never counts the digits itself. The answer has the number as
+  // plain digits (`normalized`), how many they are (`digit_count`) and whether that is the form of an Indian PIN code
+  // (six digits, not starting with 0) or mobile number (ten digits starting 6 to 9, without the country code)
+  // (`format_valid`). Digits are never guessed or added. The form says nothing about whether the PIN code exists;
+  // check_service_area and the request tools go by the city and the PIN code together.
+  router.post('/check-number', (req, res) => {
+    const body = req.body || {};
+    const value = body.value ?? body.number;
+    const digits = digitsSaid(value);
+    const isPin = /pin|postal/i.test(String(body.kind || '')) || (!body.kind && digits.length <= 6);
+    const kind = isPin ? 'pin' : 'mobile';
+    const label = isPin ? 'PIN code' : 'mobile number';
+    const again = `ask the customer to say the ${label} one digit at a time, and call this tool again with what is heard. After two tries `
+      + 'that do not fit, offer a call back from the service team; entering the number on the keypad is not available.';
+    if (!digits) {
+      return res.json({ kind, normalized: '', digit_count: 0, format_valid: false, message: `No digits were heard for the ${label}. Say it was not heard clearly, ${again}` });
+    }
+    const problem = saidNumberProblem(isPin ? 'postal_code' : 'phone', value);
+    if (problem) {
+      return res.json({
+        kind,
+        normalized: digits,
+        digit_count: digits.length,
+        format_valid: false,
+        message: `${problem.split(' Nothing is saved')[0]} Say it was not heard clearly, ${again}`,
+      });
+    }
+    const normalized = isPin ? pinCodeSaid(value) : lastTenDigits(normalizePhone(value));
+    const spoken = isPin ? spokenDigits(normalized) : `${spokenDigits(normalized.slice(0, 5))}, ${spokenDigits(normalized.slice(5))}`;
+    return res.json({
+      kind,
+      normalized,
+      digit_count: normalized.length,
+      format_valid: true,
+      message: `The ${label} is ${spoken}, which has the right number of digits. Read these digits back to the customer and ask whether `
+        + `they are right. Once the customer confirms, use ${normalized} as the ${label}; when the customer corrects it, call this tool again with the new number.`,
     });
   });
 
