@@ -1,4 +1,5 @@
 const { cleanApiKey } = require('./sarvam');
+const { invoiceReaderSettings } = require('./invoiceReader');
 
 const env = process.env;
 
@@ -81,7 +82,10 @@ module.exports = {
     apiKey: env.WHATSAPP_API_KEY || '',
   },
 
-  // Reads uploaded invoices (a Groq vision model with structured output).
+  // Reads uploaded invoices (a vision model with structured output): OpenAI when OPENAI_API_KEY is set, else Groq.
+  invoiceReader: invoiceReaderSettings(env),
+
+  // Groq: the website chat's text models, and the invoice reader when OpenAI has no key.
   groq: {
     apiKey: env.GROQ_API_KEY || '',
     model: env.GROQ_OCR_MODEL || 'qwen/qwen3.8-27b',

@@ -6,7 +6,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { createInvoiceLinkSender } = require('../src/invoiceLinks');
 const { createWhatsApp } = require('../src/whatsapp');
-const { createInvoiceReader, normalizeInvoice, INVOICE_SCHEMA } = require('../src/invoiceReader');
+const { createInvoiceReader, invoiceReaderSettings, normalizeInvoice, INVOICE_SCHEMA } = require('../src/invoiceReader');
 const { pdfPages } = require('../src/pdfPages');
 const { createInvoiceUploads, productFor, LINK_SUBJECT, ADDED_ORDER_SUBJECT } = require('../src/crm/invoiceUploads');
 const { createInvoiceLinkLimiter, createInvoiceUploadLimiter } = require('../src/rateLimit');
@@ -482,6 +482,39 @@ test('a PDF goes as an image of page one with the text printed on every page', a
 
   const pages = await pdfPages(pdf, { maxPages: 3 });
   assert.equal(pages.images.length, 3);
+});
+
+test('with an OpenAI key the invoice is read by OpenAI: no reasoning setting, and three pages of a PDF', async () => {
+  const openai = invoiceReaderSettings({ OPENAI_API_KEY: 'sk-test', GROQ_API_KEY: 'gsk_test' });
+  assert.deepEqual(openai, {
+    provider: 'OpenAI', apiKey: 'sk-test', model: 'gpt-4.1-mini', baseUrl: 'https://api.openai.com/v1', reasoningEffort: null, pdfPageImages: 3,
+  });
+  assert.equal(invoiceReaderSettings({ OPENAI_API_KEY: 'sk-test', OPENAI_OCR_MODEL: 'gpt-4.1' }).model, 'gpt-4.1');
+  const groq = invoiceReaderSettings({ GROQ_API_KEY: 'gsk_test' });
+  assert.deepEqual([groq.provider, groq.apiKey, groq.baseUrl], ['Groq', 'gsk_test', 'https://api.groq.com/openai/v1'], 'Groq reads when OpenAI has no key');
+
+  const api = fakeGroq(READ);
+  const reader = createInvoiceReader({ ...openai, fetchImpl: api.fetchImpl });
+  assert.equal(reader.configured, true);
+  const invoice = await reader.read({ data: Buffer.from('png'), contentType: 'image/png' });
+  assert.equal(invoice.invoiceNumber, 'INV-2010');
+  const [request] = api.requests;
+  assert.equal(request.url, 'https://api.openai.com/v1/chat/completions');
+  assert.equal(request.auth, 'Bearer sk-test');
+  assert.equal(request.body.model, 'gpt-4.1-mini');
+  assert.equal(request.body.response_format.json_schema.strict, true);
+  assert.equal('reasoning_effort' in request.body, false, 'gpt-4.1-mini refuses a reasoning setting');
+
+  const pdf = textPdf([['Invoice Number : INV-2010'], ['Page two'], ['Page three'], ['Terms']]);
+  await reader.read({ data: pdf, contentType: 'application/pdf' });
+  const [text, ...images] = api.requests[1].body.messages[1].content;
+  assert.equal(images.length, 3);
+  assert.match(text.text, /the images are pages 1 to 3 of its 4 pages/);
+
+  const refused = createInvoiceReader({ ...openai, fetchImpl: fakeGroq(READ, 401).fetchImpl });
+  const err = await refused.read({ data: Buffer.from('a'), contentType: 'image/png' }).then(() => null, (e) => e);
+  assert.match(err.message, /OpenAI request failed \(401\): Invalid API Key/);
+  assert.equal(err.setup, true);
 });
 
 test('a scanned PDF goes without text; a broken PDF is unreadable, not a failure to retry', async () => {

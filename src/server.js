@@ -74,7 +74,7 @@ function buildServer() {
 
   const { invoiceUploads: uploads } = config;
   const whatsapp = createWhatsApp(config.whatsapp);
-  const reader = createInvoiceReader(config.groq);
+  const reader = createInvoiceReader(config.invoiceReader);
   const records = createInvoiceUploads({ salesforce, crm, linkDays: uploads.linkDays, productCodePrefix: config.salesforce.productCodePrefix });
   const invoices = {
     sender: createInvoiceLinkSender({ whatsapp, reader, records, limiter: createInvoiceLinkLimiter({ redis, prefix: config.redis.prefix }) }),
@@ -82,7 +82,7 @@ function buildServer() {
     records,
     uploadLimiter: createInvoiceUploadLimiter({ perHour: uploads.maxPerHour, perDay: uploads.maxPerDay, redis, prefix: config.redis.prefix }),
   };
-  if (!reader.configured) console.warn('Invoice uploads are off until GROQ_API_KEY is set');
+  if (!reader.configured) console.warn('Invoice uploads are off until OPENAI_API_KEY (or GROQ_API_KEY) is set');
   if (!whatsapp.configured) console.warn('Invoice upload links are not sent on WhatsApp until WHATSAPP_API_KEY is set');
 
   // The website chat: a Groq text model with the voice agent's tools (Sarvam has no text chat for the voice agent).

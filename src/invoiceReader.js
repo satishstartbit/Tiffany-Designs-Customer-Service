@@ -6,11 +6,11 @@ const IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 const FILE_TYPES = [...IMAGE_TYPES, 'application/pdf'];
 // Error codes that no retry fixes.
 const SETUP_ERRORS = ['invalid_api_key', 'model_not_found', 'model_decommissioned', 'insufficient_quota', 'organization_restricted'];
-// Pages of a PDF sent as images. Each image costs about 2,000 input tokens, and Groq's free tier allows about 7,000 a
-// minute for the model, so only page one goes (it holds the seller, the numbers and the buyer); the printed text of the
-// later pages goes along. A paid tier can take up to 3, Groq's limit per request.
+// Pages of a PDF sent as images, unless the reader is given pdfPageImages. Each image costs about 2,000 input tokens,
+// and Groq's free tier allows about 7,000 a minute for the model, so only page one goes (it holds the seller, the
+// numbers and the buyer); the printed text of the later pages goes along. OpenAI gets the first 3 (config.js).
 const PDF_PAGE_IMAGES = 1;
-// The longest wait, in seconds, for Groq's per-minute allowance before asking once more.
+// The longest wait, in seconds, for the provider's per-minute allowance before asking once more.
 const MAX_RETRY_WAIT = 10;
 
 const text = (description) => ({ type: ['string', 'null'], description });
@@ -142,20 +142,24 @@ function normalizeInvoice(raw) {
 
 const imagePart = (contentType, data) => ({ type: 'image_url', image_url: { url: `data:${contentType};base64,${Buffer.from(data).toString('base64')}` } });
 
-// Reads an uploaded invoice with a Groq vision model (GROQ_OCR_MODEL), as structured fields. A PDF goes as images of
-// its first pages plus the text printed in it, because the model takes no PDF files.
+// Reads an uploaded invoice with a vision model, as structured fields, over the OpenAI chat completions API: OpenAI
+// (OPENAI_OCR_MODEL) when it has a key, else Groq (GROQ_OCR_MODEL); config.js picks. A PDF goes as images of its first
+// pages plus the text printed in it, so both read it the same way. `reasoningEffort` is sent only when set: Groq's
+// model takes 'none', and OpenAI refuses the setting for a model that does not reason, such as gpt-4.1-mini.
 function createInvoiceReader({
-  apiKey, model, baseUrl = 'https://api.groq.com/openai/v1', fetchImpl = (...args) => fetch(...args), readPdf = pdfPages,
+  apiKey, model, baseUrl = 'https://api.groq.com/openai/v1', provider = 'Groq', reasoningEffort = 'none',
+  pdfPageImages = PDF_PAGE_IMAGES, fetchImpl = (...args) => fetch(...args), readPdf = pdfPages,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), timeoutMs = 50000,
 }) {
   async function read({ data, contentType }) {
     if (!FILE_TYPES.includes(contentType)) throw new Error(`Unsupported invoice file type: ${contentType}`);
     let content = [{ type: 'text', text: 'Read this invoice.' }, imagePart(contentType, data)];
     if (contentType === 'application/pdf') {
-      const pdf = await readPdf(data, { maxPages: PDF_PAGE_IMAGES });
-      const pages = pdf.pageCount > pdf.images.length
-        ? `the image is page 1 of its ${pdf.pageCount} pages`
-        : 'the image is its page';
+      const pdf = await readPdf(data, { maxPages: pdfPageImages });
+      const shown = pdf.images.length;
+      const pages = shown > 1
+        ? `the images are ${pdf.pageCount > shown ? `pages 1 to ${shown} of its ${pdf.pageCount} pages` : `its ${shown} pages`}`
+        : pdf.pageCount > shown ? `the image is page 1 of its ${pdf.pageCount} pages` : 'the image is its page';
       content = [
         { type: 'text', text: `Read this invoice. It is a PDF: ${pages}. `
           + (pdf.text ? `The text printed in the PDF:\n${pdf.text}` : 'It has no printed text, so read the image.') },
@@ -174,14 +178,14 @@ function createInvoiceReader({
         ],
         response_format: { type: 'json_schema', json_schema: { name: 'invoice', strict: true, schema: INVOICE_SCHEMA } },
         // Copying from the page needs no thinking, and answers come back in a second or two without it.
-        reasoning_effort: 'none',
+        ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
         max_completion_tokens: 2000,
       }),
       signal: AbortSignal.timeout(timeoutMs),
     };
     const url = `${baseUrl.replace(/\/+$/, '')}/chat/completions`;
     let res = await fetchImpl(url, request);
-    // Two uploads within a minute can use up the per-minute allowance; waiting the few seconds Groq names beats asking
+    // Two uploads within a minute can use up the per-minute allowance; waiting the few seconds the provider names beats asking
     // the customer to try again.
     const wait = Number(res.headers?.get?.('retry-after'));
     if (res.status === 429 && wait > 0 && wait <= MAX_RETRY_WAIT) {
@@ -190,7 +194,7 @@ function createInvoiceReader({
     }
     const answer = await res.json().catch(() => null);
     if (!res.ok) {
-      const err = new Error(`Groq request failed (${res.status}): ${answer?.error?.message || 'no details'}`);
+      const err = new Error(`${provider} request failed (${res.status}): ${answer?.error?.message || 'no details'}`);
       // A refused key, a blocked account or an unknown model fails every reading until someone fixes the setup;
       // trying again only helps with the rest (rate limits, outages).
       err.setup = [401, 403].includes(res.status) || SETUP_ERRORS.includes(answer?.error?.code) || SETUP_ERRORS.includes(answer?.error?.type);
@@ -200,12 +204,35 @@ function createInvoiceReader({
     try {
       parsed = JSON.parse(answer?.choices?.[0]?.message?.content || '');
     } catch {
-      throw new Error('Groq answered without the invoice fields');
+      throw new Error(`${provider} answered without the invoice fields`);
     }
     return normalizeInvoice(parsed);
   }
 
-  return { configured: Boolean(apiKey && model), read };
+  return { configured: Boolean(apiKey && model), provider, read };
 }
 
-module.exports = { createInvoiceReader, normalizeInvoice, soldByTiffany, INVOICE_SCHEMA, FILE_TYPES, IMAGE_TYPES, ORDER_SOURCES, SELLER };
+// Which account reads the invoices: OpenAI when OPENAI_API_KEY is set, else Groq. gpt-4.1-mini does not reason, so no
+// reasoning setting is sent to OpenAI unless OPENAI_OCR_REASONING_EFFORT names one (for a model that reasons); OpenAI
+// has no small per-minute allowance, so it gets the first 3 pages of a PDF as images.
+function invoiceReaderSettings(env = process.env) {
+  const url = (value, fallback) => (value || fallback).replace(/\/+$/, '');
+  if (env.OPENAI_API_KEY) {
+    return {
+      provider: 'OpenAI',
+      apiKey: env.OPENAI_API_KEY.trim(),
+      model: env.OPENAI_OCR_MODEL || 'gpt-4.1-mini',
+      baseUrl: url(env.OPENAI_BASE_URL, 'https://api.openai.com/v1'),
+      reasoningEffort: env.OPENAI_OCR_REASONING_EFFORT || null,
+      pdfPageImages: 3,
+    };
+  }
+  return {
+    provider: 'Groq',
+    apiKey: env.GROQ_API_KEY || '',
+    model: env.GROQ_OCR_MODEL || 'qwen/qwen3.8-27b',
+    baseUrl: url(env.GROQ_BASE_URL, 'https://api.groq.com/openai/v1'),
+  };
+}
+
+module.exports = { createInvoiceReader, invoiceReaderSettings, normalizeInvoice, soldByTiffany, INVOICE_SCHEMA, FILE_TYPES, IMAGE_TYPES, ORDER_SOURCES, SELLER };

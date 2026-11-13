@@ -43,7 +43,7 @@ module.exports = function invoiceUploadsRouter({ reader, records, limiter, logge
     }
     if (!reader.configured) {
       // The visitor sees a plain message; the log says what is missing.
-      logger.error('Invoice reading is off: set GROQ_API_KEY.');
+      logger.error('Invoice reading is off: set OPENAI_API_KEY (or GROQ_API_KEY).');
       return res.status(503).json({ error: 'not_configured', message: 'Invoice upload is not available right now. Please try again later.' });
     }
 
@@ -60,7 +60,7 @@ module.exports = function invoiceUploadsRouter({ reader, records, limiter, logge
       invoice = await reader.read({ data: req.body, contentType });
     } catch (err) {
       if (err.setup) {
-        logger.error(`Invoice reading is off until the Groq account or GROQ_API_KEY / GROQ_OCR_MODEL is fixed: ${err.message}`);
+        logger.error(`Invoice reading is off until the ${reader.provider || 'AI'} account, its API key or its OCR model is fixed: ${err.message}`);
         return res.status(503).json({ error: 'not_configured', message: 'Invoice upload is not available right now. Please try again later, or call Tiffany Designs customer care.' });
       }
       if (err.unreadable) {
