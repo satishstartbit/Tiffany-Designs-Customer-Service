@@ -657,7 +657,10 @@ function createCrm({
     return indianStates.get(STATE_ALIASES[key] || key);
   }
 
-  // A phone order is saved as a Draft for the sales team to confirm price, delivery and payment before activating it.
+  // A phone order is saved as a Draft, since Salesforce takes products only on a Draft order. Once its products are on
+  // it, it is activated and marked Delivered, with today (India) as the delivery date. When Salesforce refuses that, the
+  // delivery is saved on its own and the order is kept as a Draft (`activated` false); its description says what was
+  // refused, for the sales team to set by hand.
   async function createOrder(input) {
     if (!input.phone) return { created: false, error: 'A valid mobile number is needed to place the order.' };
     const parsed = parseItems(input.items);
@@ -697,21 +700,23 @@ function createCrm({
     if (!customer) return { created: false, error: "The customer's full name, first and last, is needed to place the order. Ask for it." };
     const givenName = String(input.customerName || '').trim();
 
+    const description = [
+      'Placed by phone through the AI voice agent.',
+      'Confirm the final price, delivery charges, delivery date and payment with the customer.',
+      !customer.created && givenName && givenName.toLowerCase() !== String(customer.name || '').toLowerCase()
+        ? `The caller gave the name ${givenName}; the mobile belongs to ${customer.name}.`
+        : null,
+      input.notes ? `Customer notes: ${input.notes}` : null,
+    ].filter(Boolean).join('\n');
+    const today = todayInIst(now()).toISOString().slice(0, 10);
     const order = await salesforce.create('Order', compact({
       AccountId: customer.accountId,
       CustomerAuthorizedById: customer.id,
-      EffectiveDate: todayInIst(now()).toISOString().slice(0, 10),
+      EffectiveDate: today,
       Status: 'Draft',
       Pricebook2Id: lines[0].pricebookId,
       Order_Source__c: 'Other',
-      Description: [
-        'Placed by phone through the AI voice agent.',
-        'Confirm the final price, delivery charges, delivery date and payment with the customer before activating.',
-        !customer.created && givenName && givenName.toLowerCase() !== String(customer.name || '').toLowerCase()
-          ? `The caller gave the name ${givenName}; the mobile belongs to ${customer.name}.`
-          : null,
-        input.notes ? `Customer notes: ${input.notes}` : null,
-      ].filter(Boolean).join('\n'),
+      Description: description,
       ...prefixed('Shipping'),
     }));
 
@@ -727,9 +732,27 @@ function createCrm({
       throw err;
     }
 
+    const delivery = { Delivery_Status__c: 'Delivered', Delivery_Date__c: today };
+    let activated = true;
+    let delivered = true;
+    try {
+      await salesforce.update('Order', order.id, { Status: 'Activated', ...delivery });
+    } catch (err) {
+      activated = false;
+      const problems = [`The order could not be activated and was left Draft: ${String(err.message || err).slice(0, 500)} Activate it by hand.`];
+      await salesforce.update('Order', order.id, delivery).catch((deliveryErr) => {
+        delivered = false;
+        problems.push(`It could not be marked Delivered: ${String(deliveryErr.message || deliveryErr).slice(0, 500)}`);
+      });
+      await salesforce.update('Order', order.id, { Description: [description, ...problems].join('\n') }).catch(() => {});
+    }
+
     const [saved] = await salesforce.query(`SELECT OrderNumber, TotalAmount FROM Order WHERE Id = '${escapeSoql(order.id)}'`);
     return {
       created: true,
+      activated,
+      delivered,
+      deliveryDate: delivered ? today : null,
       orderId: order.id,
       orderNumber: saved?.OrderNumber || null,
       total: saved?.TotalAmount ?? lines.reduce((sum, l) => sum + l.unitPrice * l.quantity, 0),

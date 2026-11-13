@@ -627,11 +627,14 @@ function orderOrg({ search = [], describe = { Order: ORDER_DESCRIBE } } = {}) {
   });
 }
 
-test('createOrder saves a Draft order with price book lines for a known caller', async () => {
+test('createOrder saves an order with price book lines for a known caller and activates it', async () => {
   const sf = orderOrg({ search: [AARAV] });
   const result = await createCrm({ salesforce: sf, businessHours: open, now: lateEvening }).createOrder({ ...ORDER_INPUT, notes: 'Ring the bell twice' });
   assert.deepEqual(result, {
     created: true,
+    activated: true,
+    delivered: true,
+    deliveryDate: '2026-10-15',
     orderId: 'Order-1',
     orderNumber: '00000120',
     total: 18997,
@@ -659,7 +662,7 @@ test('createOrder saves a Draft order with price book lines for a known caller',
   });
   assert.equal(fields.Description, [
     'Placed by phone through the AI voice agent.',
-    'Confirm the final price, delivery charges, delivery date and payment with the customer before activating.',
+    'Confirm the final price, delivery charges, delivery date and payment with the customer.',
     'Customer notes: Ring the bell twice',
   ].join('\n'));
   assert.deepEqual(sf.log.batches, [{
@@ -670,6 +673,8 @@ test('createOrder saves a Draft order with price book lines for a known caller',
     ],
   }]);
   assert.equal(sf.log.deletes.length, 0);
+  assert.deepEqual(sf.log.updates, [{ sobject: 'Order', id: 'Order-1', fields: { Status: 'Activated', Delivery_Status__c: 'Delivered', Delivery_Date__c: '2026-10-15' } }],
+    'activated and marked Delivered today (India) once its products are on it');
 });
 
 test('a new caller gets an account with the billing address and a contact before the order', async () => {
@@ -746,6 +751,23 @@ test('if the order lines are refused the draft order is deleted and the error is
   sf.createMany = async () => { throw new Error('Salesforce rejected OrderItem records: FIELD_INTEGRITY_EXCEPTION'); };
   await assert.rejects(createCrm({ salesforce: sf, businessHours: open }).createOrder(ORDER_INPUT), /FIELD_INTEGRITY_EXCEPTION/);
   assert.deepEqual(sf.log.deletes, [{ sobject: 'Order', id: 'Order-1' }]);
+});
+
+test('an order Salesforce does not activate is kept as a Draft with the reason in its description', async () => {
+  const sf = orderOrg({ search: [AARAV] });
+  const update = sf.update;
+  sf.update = async (sobject, id, fields) => {
+    if (fields.Status === 'Activated') throw new Error('Salesforce request failed (400): An order must have a contract.');
+    return update(sobject, id, fields);
+  };
+  const result = await createCrm({ salesforce: sf, businessHours: open, now: lateEvening }).createOrder(ORDER_INPUT);
+  assert.equal(result.created, true);
+  assert.equal(result.activated, false);
+  assert.equal(result.delivered, true);
+  assert.equal(sf.log.deletes.length, 0, 'the order is kept');
+  assert.equal(sf.log.updates.length, 2);
+  assert.deepEqual(sf.log.updates[0].fields, { Delivery_Status__c: 'Delivered', Delivery_Date__c: '2026-10-15' }, 'the delivery is saved on its own');
+  assert.match(sf.log.updates[1].fields.Description, /\nThe order could not be activated and was left Draft: .*An order must have a contract\. Activate it by hand\.$/);
 });
 
 test('findProducts searches the TD- price book entries by every word, then by any word', async () => {
