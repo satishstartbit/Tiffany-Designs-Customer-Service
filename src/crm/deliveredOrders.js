@@ -1,4 +1,5 @@
 const { escapeSoql, soqlDateTime, requestKind } = require('./crm');
+const { ADDED_ORDER_SUBJECT } = require('./invoiceUploads');
 const { todayInIst } = require('../dates');
 
 // Left on an order once its delivery check call is placed. It lives in Salesforce rather than the job store, which
@@ -79,6 +80,16 @@ function createDeliveredOrders({ salesforce, now = () => Date.now() }) {
     return new Set(rows.map((r) => r.WhatId));
   }
 
+  // Orders added from an invoice the customer uploaded: they are marked delivered on the day of the upload, not of the
+  // delivery, and the customer is usually still talking to the agent about them.
+  async function addedFromInvoice(orderIds) {
+    if (!orderIds.length) return new Set();
+    const rows = await salesforce.query(
+      `SELECT WhatId FROM Task WHERE WhatId IN (${idList(orderIds)}) AND Subject = '${escapeSoql(ADDED_ORDER_SUBJECT)}'`,
+    );
+    return new Set(rows.map((r) => r.WhatId));
+  }
+
   // `attemptId` is Sarvam's id for the call; without one, Sarvam did not answer and the call may not have gone out.
   async function markCalled({ orderId, contactId, attemptId }) {
     const created = await salesforce.create('Task', {
@@ -97,7 +108,7 @@ function createDeliveredOrders({ salesforce, now = () => Date.now() }) {
     return created.id;
   }
 
-  return { findDeliveredToday, productNames, withOpenRequests, alreadyCalled, markCalled };
+  return { findDeliveredToday, productNames, withOpenRequests, alreadyCalled, addedFromInvoice, markCalled };
 }
 
 module.exports = { createDeliveredOrders, CALL_MARKER_SUBJECT };

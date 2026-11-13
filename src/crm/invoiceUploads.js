@@ -9,6 +9,8 @@ const DAY_MS = 24 * HOUR_MS;
 const DESCRIPTION_MAX = 32000;
 // Each link sent is a task with the number in its subject, so an upload can find it from a phone number alone.
 const LINK_SUBJECT = 'Invoice upload link sent on WhatsApp to';
+// The task on an order added from an uploaded invoice; the delivery check calls skip such orders (deliveredOrders.js).
+const ADDED_ORDER_SUBJECT = 'Order added from the uploaded invoice';
 const FILE_EXTENSIONS = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'application/pdf': 'pdf' };
 
 // The order, its customer and its address fields as the invoice update reads and labels them.
@@ -22,6 +24,9 @@ const LABELS = {
   ERP_Order_Id__c: 'Order id',
   Order_Source__c: 'Channel',
   EffectiveDate: 'Order date',
+  Status: 'Status',
+  Delivery_Status__c: 'Delivery status',
+  Delivery_Date__c: 'Delivered on',
   CustomerAuthorizedById: 'Customer contact',
   FirstName: 'First name',
   LastName: 'Last name',
@@ -139,9 +144,9 @@ const REFUSALS = {
 // else the order number, else the order id. A matched order is brought in line with the invoice: its details, its
 // customer and its products (every change is noted, old value and new), it gets the file, and the caller's requests
 // that were registered without an order. No order is ever added for an invoice that matches one. An invoice that
-// matches no order becomes a new Draft order with its customer, its details and its products, but only when Sold By is
-// Tiffany Designs Private Limited, the invoice number is printed and every product is in the catalog; otherwise the
-// upload is refused and nothing is saved. When its invoice number, order number or order id is already on more than
+// matches no order becomes a new order with its customer, its details and its products, activated and marked Delivered
+// on the day of the upload, but only when Sold By is Tiffany Designs Private Limited, the invoice number is printed and
+// every product is in the catalog; otherwise the upload is refused and nothing is saved. When its invoice number, order number or order id is already on more than
 // one order, or no customer can be saved for it (no phone, or no full name), it goes to the service team on a request.
 // The upload page asks for nothing but the file, so the WhatsApp link an upload answers is found from the invoice:
 // a link sent in the last `linkDays` to the phone on the invoice or to the customer of the matched order. The link's
@@ -563,10 +568,10 @@ function createInvoiceUploads({ salesforce, crm, linkDays = 7, productCodePrefix
     };
   }
 
-  // An invoice that matches no order becomes a Draft order, for the service team to check against the invoice and
-  // activate. Its customer is the one the phone on the invoice (else the caller's WhatsApp number) belongs to, else a
-  // new customer under the full name on the invoice or given on the call, with the invoice's email and address. The
-  // order takes every detail the invoice shows and its products.
+  // An invoice that matches no order becomes a new order, added as Draft (Salesforce takes products only on a Draft
+  // order) and activated by deliverAdded. Its customer is the one the phone on the invoice (else the caller's WhatsApp
+  // number) belongs to, else a new customer under the full name on the invoice or given on the call, with the
+  // invoice's email and address. The order takes every detail the invoice shows and its products.
   // The invoice is checked before anything is saved. Returns { added }; { refused: { reason, products } } when the
   // customer has to upload another invoice (not sold by Tiffany Designs, no invoice number, no products, or a product
   // not in the catalog); or { reason } when the service team has to look at it (its invoice number, order number or
@@ -609,7 +614,8 @@ function createInvoiceUploads({ salesforce, crm, linkDays = 7, productCodePrefix
       EffectiveDate: invoice.orderDate || invoice.invoiceDate || today(),
       Pricebook2Id: pricebook.Id,
       Description: [
-        `Added from the invoice the customer uploaded on ${longDate(now())} ${marker}, because no order matched it. Check it against the attached invoice and activate it.`,
+        `Added from the invoice the customer uploaded on ${longDate(now())} ${marker}, because no order matched it. `
+          + 'Its delivery date is the day of the upload. Check it against the attached invoice.',
         ...invoiceLines(invoice),
       ].join('\n').slice(0, DESCRIPTION_MAX),
     });
@@ -646,9 +652,40 @@ function createInvoiceUploads({ salesforce, crm, linkDays = 7, productCodePrefix
         contactId: customer.id,
         customer: `${customer.name}${customer.created ? ' (new customer)' : ''}, mobile ${phone}`,
         productChanges: products.changes,
+        allProducts: products.changes.length === invoice.items.length,
         problems,
       },
     };
+  }
+
+  // The customer already has what an uploaded invoice shows, so the order added from it is activated and marked
+  // Delivered, delivered on the day of the upload (India). It stays Draft when some of its products could not be added,
+  // since an activated order takes no products. Each value Salesforce refuses is left out on its own and listed.
+  // Runs just before the order's note is saved, which is what keeps the delivery check calls off it.
+  async function deliverAdded(added) {
+    const on = today();
+    const fields = { Delivery_Status__c: 'Delivered', Delivery_Date__c: on, ...(added.allProducts ? { Status: 'Activated' } : {}) };
+    const refused = await save('Order', added.id, fields);
+    const reason = (field) => refused.find((r) => r.field === field)?.reason;
+    const problems = [
+      !added.allProducts && 'The order was left Draft because some of its products could not be added; add them and activate it.',
+      ...refused.map((r) => (r.field === 'Status'
+        ? `The order could not be activated: ${r.reason} Activate it by hand.`
+        : `${LABELS[r.field]} was not set: ${r.reason}`)),
+    ].filter(Boolean);
+    return {
+      activated: added.allProducts && !reason('Status'),
+      delivered: !reason('Delivery_Status__c'),
+      on: reason('Delivery_Date__c') ? null : on,
+      problems,
+    };
+  }
+
+  // "activated and marked Delivered on 14 October 2026, the day of the upload", as far as it went.
+  function addedState(state) {
+    const delivered = state.delivered && `marked Delivered${state.on ? ` on ${longDate(state.on)}, the day of the upload` : ''}`;
+    if (state.activated) return delivered ? `activated and ${delivered}` : 'activated';
+    return delivered ? `${delivered}, but left Draft` : 'left Draft';
   }
 
   async function linkCases(cases, order) {
@@ -731,19 +768,20 @@ function createInvoiceUploads({ salesforce, crm, linkDays = 7, productCodePrefix
     if (added) {
       const linked = await linkCases(waiting, added);
       const fileId = await attach(file, added.id);
+      const state = await deliverAdded(added);
       await note({
         whatId: added.id,
         whoId: added.contactId,
-        subject: 'Order added from the uploaded invoice',
+        subject: ADDED_ORDER_SUBJECT,
         open: true,
         lines: [
-          'The customer uploaded an invoice that matched no order, so this order was added from it as a Draft. Check it against the attached invoice and activate it.',
+          `The customer uploaded an invoice that matched no order, so this order was added from it, ${addedState(state)}. Check it against the attached invoice.`,
           sentTo,
           ...found.notes,
           `Customer: ${added.customer}.`,
           ...section('Products:', added.productChanges.map((c) => `- ${c}`)),
           linked.length ? `Requests linked to the order: ${linked.join(', ')}.` : null,
-          ...section('Check these:', added.problems.map((p) => `- ${p}`)),
+          ...section('Check these:', [...added.problems, ...state.problems].map((p) => `- ${p}`)),
           fileId ? 'The invoice file is attached to the order.' : 'The invoice file could not be attached.',
           '',
           'Read from the invoice:',
@@ -797,4 +835,4 @@ function createInvoiceUploads({ salesforce, crm, linkDays = 7, productCodePrefix
   return { linkSent, linkFailed, findLink, uploadStatus, record };
 }
 
-module.exports = { createInvoiceUploads, invoiceLines, productFor, LINK_SUBJECT };
+module.exports = { createInvoiceUploads, invoiceLines, productFor, LINK_SUBJECT, ADDED_ORDER_SUBJECT };

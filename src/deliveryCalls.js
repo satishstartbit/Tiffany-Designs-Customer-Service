@@ -18,10 +18,12 @@ function mobileToCall(customer) {
 }
 
 // Why an order gets no call, or null when it is due one.
-function skipReason(order, { called, openRequests, followUps }) {
+function skipReason(order, { called, openRequests, followUps, fromInvoice = new Set() }) {
   if (order.deliveryStatus !== 'Delivered') return 'not_delivered';
   if (!mobileToCall(order.customer)) return 'no_phone';
   if (called.has(order.id)) return 'already_called';
+  // Added from an invoice the customer uploaded: its delivery date is the day of the upload.
+  if (fromInvoice.has(order.id)) return 'added_from_invoice';
   // The Salesforce-triggered follow-up (POST /api/orders/delivered) already calls about this order.
   if (followUps.has(order.id)) return 'followup_scheduled';
   if (openRequests.has(order.id)) return 'open_request';
@@ -115,13 +117,15 @@ function createDeliveryCalls({ orders, crm, sarvam, scheduler, config, now = () 
     const today = todayInIst(now()).toISOString().slice(0, 10);
     const delivered = await orders.findDeliveredToday(today);
     const ids = delivered.map((o) => o.id);
-    const [marked, openRequests, followUps] = await Promise.all([orders.alreadyCalled(ids), orders.withOpenRequests(ids), followUpOrders()]);
+    const [marked, openRequests, followUps, fromInvoice] = await Promise.all([
+      orders.alreadyCalled(ids), orders.withOpenRequests(ids), followUpOrders(), orders.addedFromInvoice(ids),
+    ]);
     const called = new Set([...marked, ...calledHere]);
 
     const skipped = {};
     const due = [];
     for (const order of delivered) {
-      const reason = skipReason(order, { called, openRequests, followUps });
+      const reason = skipReason(order, { called, openRequests, followUps, fromInvoice });
       if (reason) (skipped[reason] ||= []).push(orderRef(order));
       else due.push(order);
     }

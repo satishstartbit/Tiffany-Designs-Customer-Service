@@ -31,7 +31,7 @@ const ownCustomer = (id, overrides = {}) => order(id, {
 });
 
 // Each marker notes how many calls had been placed when it was saved, to show it comes after the call.
-function fakeOrders(list, sarvam, { called = [], open = [] } = {}) {
+function fakeOrders(list, sarvam, { called = [], open = [], fromInvoice = [] } = {}) {
   const markers = [];
   return {
     markers,
@@ -50,6 +50,9 @@ function fakeOrders(list, sarvam, { called = [], open = [] } = {}) {
     async alreadyCalled() {
       return new Set([...called, ...markers.map((m) => m.orderId)]);
     },
+    async addedFromInvoice() {
+      return new Set(fromInvoice);
+    },
     async markCalled(marker) {
       if (this.failMark > 0) {
         this.failMark -= 1;
@@ -61,9 +64,9 @@ function fakeOrders(list, sarvam, { called = [], open = [] } = {}) {
   };
 }
 
-function setup(list, { called, open, serviceOpen = true, serviceHoursOnly = false, maxPerRun = 20, canStartCalls = true, jobs = [] } = {}) {
+function setup(list, { called, open, fromInvoice, serviceOpen = true, serviceHoursOnly = false, maxPerRun = 20, canStartCalls = true, jobs = [] } = {}) {
   const sarvam = createFakeSarvam({ canStartCalls });
-  const orders = fakeOrders(list, sarvam, { called, open });
+  const orders = fakeOrders(list, sarvam, { called, open, fromInvoice });
   const store = createMemoryJobStore();
   for (const job of jobs) store.create(job);
   const scheduler = createScheduler({ store, handlers: {}, now: () => NOW, logger: quiet });
@@ -122,10 +125,12 @@ test('orders that break a rule are skipped with the reason', async () => {
       order('6'),
       order('7'),
       order('8'),
+      order('9'),
     ],
     {
       called: ['5'],
       open: ['6'],
+      fromInvoice: ['9'],
       jobs: [{ id: 'delivery_followup:7', type: 'delivery_followup', status: 'pending', payload: { orderId: '7' } }],
     },
   );
@@ -136,6 +141,7 @@ test('orders that break a rule are skipped with the reason', async () => {
     already_called: ['TD-ORD-5'],
     open_request: ['TD-ORD-6'],
     followup_scheduled: ['TD-ORD-7'],
+    added_from_invoice: ['TD-ORD-9'],
   });
   assert.deepEqual(result.placed.map((p) => p.order), ['TD-ORD-2', 'TD-ORD-8'], 'an order marked Delivered a minute ago is called too');
   assert.equal(sarvam.started.length, 2);
@@ -313,6 +319,8 @@ test('Salesforce: delivered orders come with the authorising contact, else the a
   assert.deepEqual([...await data.withOpenRequests(['801A', '801B'])], ['801A'], 'a general query does not block the call');
   assert.deepEqual([...await data.alreadyCalled(['801A', '801B'])], ['801B']);
   assert.match(queries.at(-1), new RegExp(`Subject = '${CALL_MARKER_SUBJECT}'`));
+  assert.deepEqual([...await data.addedFromInvoice(['801A', '801B'])], ['801B']);
+  assert.match(queries.at(-1), /WhatId IN \('801A', '801B'\) AND Subject = 'Order added from the uploaded invoice'/);
 
   assert.equal(await data.markCalled({ orderId: '801A', contactId: '003A', attemptId: 'att-9' }), '00T1');
   assert.equal(created[0].sobject, 'Task');

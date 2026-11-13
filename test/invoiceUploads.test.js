@@ -8,7 +8,7 @@ const { createInvoiceLinkSender } = require('../src/invoiceLinks');
 const { createWhatsApp } = require('../src/whatsapp');
 const { createInvoiceReader, normalizeInvoice, INVOICE_SCHEMA } = require('../src/invoiceReader');
 const { pdfPages } = require('../src/pdfPages');
-const { createInvoiceUploads, productFor, LINK_SUBJECT } = require('../src/crm/invoiceUploads');
+const { createInvoiceUploads, productFor, LINK_SUBJECT, ADDED_ORDER_SUBJECT } = require('../src/crm/invoiceUploads');
 const { createInvoiceLinkLimiter, createInvoiceUploadLimiter } = require('../src/rateLimit');
 const { createCrm } = require('../src/crm/crm');
 const { lastTenDigits, fullName } = require('../src/rules');
@@ -913,7 +913,7 @@ test('an order is looked up by the invoice number, else the phone, else the orde
   assert.equal(created(byId.org.log, 'Order').length, 0, 'no order is added for an invoice that matches one');
 });
 
-test('an invoice that matches no order becomes a Draft order with its customer, its details and its products', async () => {
+test('an invoice that matches no order becomes an order with its customer, its details and its products, activated and delivered on the upload day', async () => {
   const org = fakeOrg({ links: [LINK_TO_INVOICE_PHONE], waiting: [{ Id: '500W', CaseNumber: '00001290', ContactId: '003W', Invoice_Number__c: null, Order_Source__c: null }] });
   const { uploads, crm } = uploadsWith({ org });
   const invoice = { ...INVOICE, orderNumber: '00000999' };
@@ -928,14 +928,18 @@ test('an invoice that matches no order becomes a Draft order with its customer, 
     AccountId: '001N', CustomerAuthorizedById: '003N', Status: 'Draft', EffectiveDate: '2026-10-08', Pricebook2Id: '01sSTD', Description: undefined,
     Invoice_Number__c: 'INV-2010', ERP_Order_Id__c: 'TD-ORD-2010', Order_Source__c: 'Website', ...addressOf('Shipping'), ...addressOf('Billing'),
   });
-  assert.match(order.Description, /^Added from the invoice the customer uploaded on 14 October 2026 \(invoice INV-2010\), because no order matched it\. Check it against the attached invoice and activate it\.\nInvoice number: INV-2010\n/);
+  assert.match(order.Description, /^Added from the invoice the customer uploaded on 14 October 2026 \(invoice INV-2010\), because no order matched it\. Its delivery date is the day of the upload\. Check it against the attached invoice\.\nInvoice number: INV-2010\n/);
   assert.match(order.Description, /\nSold by: Tiffany Designs Private Limited\n/);
   assert.deepEqual(org.log.many, [{ sobject: 'OrderItem', records: [{ OrderId: 'Order-1', PricebookEntryId: '01uTBL', Quantity: 1, UnitPrice: 8999 }] }]);
+  assert.deepEqual(updatesOf(org.log, 'Order'), [{
+    sobject: 'Order', id: 'Order-1', fields: { Delivery_Status__c: 'Delivered', Delivery_Date__c: '2026-10-14', Status: 'Activated' },
+  }], 'once its products are in, the order is activated and delivered on the day of the upload');
 
   assert.equal(created(org.log, 'ContentVersion')[0].FirstPublishLocationId, 'Order-1');
   assert.deepEqual(updatesOf(org.log, 'Case')[0].fields, { Order__c: 'Order-1', Invoice_Number__c: 'INV-2010', Order_Source__c: 'Website' });
   const [task] = created(org.log, 'Task');
-  assert.deepEqual([task.WhatId, task.WhoId, task.Subject, task.Status], ['Order-1', '003N', 'Order added from the uploaded invoice', 'Not Started']);
+  assert.deepEqual([task.WhatId, task.WhoId, task.Subject, task.Status], ['Order-1', '003N', ADDED_ORDER_SUBJECT, 'Not Started']);
+  assert.match(task.Description, /^The customer uploaded an invoice that matched no order, so this order was added from it, activated and marked Delivered on 14 October 2026, the day of the upload\. Check it against the attached invoice\.\n/);
   assert.match(task.Description, /\nCustomer: Asha Sharma \(new customer\), mobile \+919876500000\.\nProducts:\n- Demo Study Table: added, quantity 1 at 8,999 rupees\n/);
   assert.match(task.Description, /\nCheck these:\n- The invoice shows order number 00000999, which no order has; this order's number is 00000130\.\n/);
   assert.match(updatesOf(org.log, 'Task')[0].fields.Description, /Invoice uploaded on 14 October 2026: no order matched; order TD-ORD-2010 was added from it\.$/);
@@ -960,6 +964,26 @@ test('an invoice that matches no order becomes a Draft order with its customer, 
   assert.equal(saved.created, true);
   assert.equal(created(strict.log, 'Order')[0].ERP_Order_Id__c, undefined);
   assert.match(created(strict.log, 'Task')[0].Description, /- The order was saved without its invoice number, order id, channel and addresses, because Salesforce refused them: duplicate value found: ERP_Order_Id__c\n/);
+});
+
+test('an added order that cannot be activated is still delivered; one whose products failed stays Draft', async () => {
+  const refusing = fakeOrg({ refuse: (sobject, fields) => (sobject === 'Order' && fields.Status === 'Activated' ? 'Choose an active price book.' : null) });
+  const refused = await uploadsWith({ org: refusing }).uploads.record({ invoice: INVOICE, file: FILE });
+  assert.equal(refused.created, true);
+  assert.deepEqual(updatesOf(refusing.log, 'Order').map((u) => u.fields), [{ Delivery_Status__c: 'Delivered' }, { Delivery_Date__c: '2026-10-14' }],
+    'each delivery value is saved on its own once the activation is refused');
+  const [task] = created(refusing.log, 'Task');
+  assert.match(task.Description, /^The customer uploaded an invoice that matched no order, so this order was added from it, marked Delivered on 14 October 2026, the day of the upload, but left Draft\./);
+  assert.match(task.Description, /\n- The order could not be activated: Choose an active price book\. Activate it by hand\.\n/);
+
+  const failing = fakeOrg();
+  failing.salesforce.createMany = async () => { throw new Error('Salesforce request failed (400): [{"message":"Price book entry is inactive."}]'); };
+  await uploadsWith({ org: failing }).uploads.record({ invoice: INVOICE, file: FILE });
+  assert.deepEqual(updatesOf(failing.log, 'Order').map((u) => u.fields), [{ Delivery_Status__c: 'Delivered', Delivery_Date__c: '2026-10-14' }],
+    'an activated order takes no products, so it is not activated');
+  const [draft] = created(failing.log, 'Task');
+  assert.match(draft.Description, /, marked Delivered on 14 October 2026, the day of the upload, but left Draft\./);
+  assert.match(draft.Description, /\n- Some products were not changed: Price book entry is inactive\.\n- The order was left Draft because some of its products could not be added; add them and activate it\.\n/);
 });
 
 test('no order is added from an invoice with a product not in the catalog, without its invoice number or products, or not sold by Tiffany Designs; nothing is saved', async () => {

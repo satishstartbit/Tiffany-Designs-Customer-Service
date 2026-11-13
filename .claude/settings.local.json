@@ -10,7 +10,8 @@
       "Grep",
       "WebFetch",
       "WebSearch",
-      "mcp__sarvam-voice-agents"
+      "mcp__sarvam-voice-agents",
+      "Bash(npm test *)"
     ]
   }
 }
